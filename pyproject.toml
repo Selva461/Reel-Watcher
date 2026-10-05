@@ -1,0 +1,30 @@
+[project]
+name = "reel-watcher"
+version = "0.1.0"
+description = "Have a local AI model watch the Instagram reels you saved and write structured notes. Windows edition (Ollama + faster-whisper + RapidOCR), analysis is local."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Jacob Bruce" }]
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "faster-whisper>=1.1.0",
+    "numpy>=1.26",
+    "pillow>=11.0",
+    "rapidocr-onnxruntime>=1.3.24",
+]
+
+[project.scripts]
+reel-watcher = "reel_watcher.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reel_watcher"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
