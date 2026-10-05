@@ -1,6 +1,6 @@
 """Study saved Instagram reels locally and keep compact, structured summaries.
 
-Per reel: fetch media through Apify (the only network step), then analyze on
+Per reel: download media with yt-dlp (free; the only network step), then analyze on
 this machine: ffmpeg scene cuts, RapidOCR text reading, near-duplicate frame
 merging, ONE vision-model call (Ollama) on a labeled contact sheet, faster-whisper
 transcript with word timing, and giveaway ("comment X", "DM me X", "link in
@@ -102,7 +102,91 @@ def append_jsonl(path: Path, obj: dict) -> None:
 
 # ---------------------------------------------------------------- download
 
-# ---------------------------------------------------------------- apify route (primary)
+# ---------------------------------------------------------------- yt-dlp route (default, free)
+
+# Instagram answers anonymous requests it does not like with these; such items are NOT marked failed.
+YTDLP_BLOCK_RE = re.compile(r"login|rate.?limit|429|401|checkpoint|not available", re.I)
+YTDLP_MAX_BLOCKED = 3  # consecutive blocked downloads before the run stops
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
+
+
+def ytdlp_download(url: str, work: Path) -> dict:
+    """Download one post with yt-dlp (no login, no cookies). Returns the yt-dlp info dict."""
+    from yt_dlp import YoutubeDL
+    opts = {"outtmpl": str(work / "%(id)s_%(autonumber)02d.%(ext)s"), "format": "bv*+ba/b", "merge_output_format": "mp4",
+            "quiet": True, "no_warnings": True, "noprogress": True, "retries": 3, "socket_timeout": 60}
+    with YoutubeDL(opts) as ydl:
+        return ydl.extract_info(url, download=True) or {}
+
+
+def ytdlp_meta(info: dict) -> dict:
+    """yt-dlp info dict (or its first playlist entry) -> the same `post` shape the Apify route writes."""
+    first = (info.get("entries") or [None])[0] if info.get("entries") else None
+    it = {**(first or {}), **{k: v for k, v in info.items() if v is not None and k != "entries"}}
+
+    def pos(v):
+        return v if isinstance(v, (int, float)) and v >= 0 else None
+    d = str(it.get("upload_date") or "")
+    if len(d) == 8:
+        d = f"{d[:4]}-{d[4:6]}-{d[6:]}"
+    elif isinstance(it.get("timestamp"), (int, float)):
+        d = time.strftime("%Y-%m-%d", time.gmtime(it["timestamp"]))
+    title = it.get("track") if isinstance(it.get("track"), str) else ""
+    artist = it.get("artist") if isinstance(it.get("artist"), str) else ""
+    music = {"song_name": title, "artist_name": artist} if (title or artist) else None
+    return {
+        "caption": (it.get("description") or "")[:2000],
+        "author": it.get("channel") or it.get("uploader_id") or it.get("uploader"), "author_id": it.get("channel_id") or it.get("uploader_id"),
+        "likes": pos(it.get("like_count")), "views": pos(it.get("view_count")), "comments": pos(it.get("comment_count")),
+        "post_date": d or None, "duration_s": it.get("duration"), "music_info": music,
+    }
+
+
+def prepare_ytdlp(item: dict, work_parent: Path) -> dict:
+    """Download one item into work_parent/<code>/. Returns a prepared unit (same shape as the Apify route)."""
+    work = work_parent / item["code"]
+    shutil.rmtree(work, ignore_errors=True)  # never pick up files from an earlier attempt
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        info = ytdlp_download(item["url"], work)
+    except Exception as e:  # noqa: BLE001  (yt-dlp DownloadError and friends)
+        shutil.rmtree(work, ignore_errors=True)
+        msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e))
+        return {"item": item, "error": f"ytdlp: {msg}"[:300]}
+    vids = sorted(p for p in work.iterdir() if p.suffix.lower() in VIDEO_EXTS)
+    if not vids:
+        shutil.rmtree(work, ignore_errors=True)
+        return {"item": item, "error": "ytdlp_no_video: image-only posts cannot be downloaded for free; skipped"}
+    return {"item": {**item, "kind": "reel"}, "meta": ytdlp_meta(info), "work": work, "media": vids[:1]}
+
+
+def ytdlp_producer(todo, q, stop, work_parent, sleep_s):
+    """Download stage for the free route: one item at a time, polite pause between requests."""
+    blocked = 0
+    try:
+        for n, it in enumerate(todo):
+            if stop.is_set():
+                break
+            if n:
+                time.sleep(sleep_s)
+            unit = prepare_ytdlp(it, work_parent)
+            if unit.get("error") and YTDLP_BLOCK_RE.search(unit["error"]):
+                blocked += 1
+                log(f"{it['code']}: Instagram refused the download ({unit['error'][6:120]}); not marked failed")
+                if blocked >= YTDLP_MAX_BLOCKED:
+                    q.put(("fatal", "Instagram is refusing anonymous downloads (rate limit or login wall). Wait an hour or two and "
+                                    "run the same command again; refused reels were not marked failed. Updating yt-dlp can also help: "
+                                    "uv sync --upgrade-package yt-dlp"))
+                    return
+                continue
+            blocked = 0
+            q.put(("units", [unit]))
+        q.put(("done", None))
+    except Exception as e:  # noqa: BLE001
+        q.put(("fatal", f"{type(e).__name__}: {e}"[:500]))
+
+
+# ---------------------------------------------------------------- apify route (optional, paid)
 
 def apify_token() -> str | None:
     """The Apify token comes from the APIFY_TOKEN environment variable only."""
@@ -1034,9 +1118,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="reel-watcher study", description="Analyze saved reels locally. Dry run unless --run.")
     ap.add_argument("--input", help="TSV/TXT of url<TAB>collections (default: <out-root>/urls.tsv)")
     ap.add_argument("--out-root", default="./reel-watcher-out", help="where study/ JSON and the run logs go")
-    ap.add_argument("--run", action="store_true", help="fetch via Apify (paid, small) and analyze")
+    ap.add_argument("--run", action="store_true", help="download and analyze (free with the default --source ytdlp)")
+    ap.add_argument("--source", choices=["ytdlp", "apify"], default="ytdlp", help="ytdlp: free, no account (default); apify: paid, optional")
+    ap.add_argument("--sleep", type=float, default=4.0, help="seconds to wait between yt-dlp downloads (be polite, avoid rate limits)")
     ap.add_argument("--limit", type=int, default=0, help="stop after N new reels")
-    ap.add_argument("--local", nargs="+", metavar="MP4", help="analyze local video file(s); no download, no Apify, source untouched")
+    ap.add_argument("--local", nargs="+", metavar="MP4", help="analyze local video file(s); no download, source untouched")
     ap.add_argument("--local-collections", default="", help="with --local: '|' separated labels")
     ap.add_argument("--retry-failed", action="store_true", help="retry reels that failed before (never automatic)")
     ap.add_argument("--rollup", action="store_true", help="rebuild study_index.jsonl from study/*.json and exit")
@@ -1047,8 +1133,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--fast", action="store_true", help="fewer frames and tokens")
     ap.add_argument("--detailed", action="store_true", help="one VLM call per frame instead of one contact sheet")
     ap.add_argument("--archive", metavar="DIR", help="keep media, frames and manifest per reel in DIR/<code>/")
-    ap.add_argument("--batch", type=int, default=15, help="Apify batch size")
-    ap.add_argument("--apify-batch-cap-usd", type=float, default=2.0, help="hard spending cap per Apify batch")
+    ap.add_argument("--batch", type=int, default=15, help="Apify batch size (--source apify only)")
+    ap.add_argument("--apify-batch-cap-usd", type=float, default=2.0, help="hard spending cap per Apify batch (--source apify only)")
     return ap
 
 
@@ -1106,29 +1192,42 @@ def main(argv: list[str] | None = None) -> int:
     todo = prioritize(todo, [t.strip() for t in a.collections.split(",") if t.strip()], a.only_priority)
     if a.limit:
         todo = todo[: a.limit]
-    token = apify_token()
-    print(f"{len(every)} urls, {len(todo)} to fetch via Apify")
+    paid = a.source == "apify"
+    token = apify_token() if paid else None
+    print(f"{len(every)} urls, {len(todo)} to download via {'Apify (paid)' if paid else 'yt-dlp (free)'}")
     if not a.run:
         for i in todo:
             print(f"  would fetch [{i['kind']}] {i['code']}  {i['url']}  {'|'.join(i['collections'])}")
-        print("dry run; pass --run to fetch and analyze (Apify is paid, about $0.002 per reel; per-batch cap $%.2f)" % a.apify_batch_cap_usd)
+        if paid:
+            print("dry run; pass --run to fetch and analyze (Apify is paid, about $0.002 per reel; per-batch cap $%.2f)" % a.apify_batch_cap_usd)
+        else:
+            print("dry run; pass --run to download and analyze. Free: yt-dlp + local models, no account, no cost.")
         return 0
     if not todo:
         return 0
-    if not token:
+    if paid and not token:
         print("APIFY_TOKEN is not set. Export it in your shell (never put it in a file in this repo).")
         return 2
     missing = media.preflight()
     if missing:
         print(missing)
         return 2
+    if not paid:
+        try:
+            import yt_dlp  # noqa: F401
+        except ImportError:
+            print("yt-dlp is not installed. Run: uv sync")
+            return 2
 
     import queue
     work_parent.mkdir(exist_ok=True)
     vision = Vision()
     q: queue.Queue = queue.Queue(maxsize=1)  # bounded: at most ~2 batches of media on disk
     stop = threading.Event()
-    th = threading.Thread(target=producer, daemon=True, args=(todo, q, stop, out_root, work_parent, a.batch, a.apify_batch_cap_usd, token))
+    if paid:
+        th = threading.Thread(target=producer, daemon=True, args=(todo, q, stop, out_root, work_parent, a.batch, a.apify_batch_cap_usd, token))
+    else:
+        th = threading.Thread(target=ytdlp_producer, daemon=True, args=(todo, q, stop, work_parent, a.sleep))
     th.start()
     n = done_n = 0
     rc = 0

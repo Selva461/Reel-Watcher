@@ -10,12 +10,16 @@ this version swaps those parts for tools that run on a normal Windows 10/11 PC:
 | Speech to text | `mlx-whisper` | `faster-whisper` (CPU by default, NVIDIA GPU optional) |
 | On-screen text (OCR) | Apple Vision | RapidOCR (ONNX, CPU) |
 
-Everything else (Apify download, frame sampling, contact sheet, giveaway detection, output JSON) is the same.
+It is also **100% free**: reels are downloaded with the open-source [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+instead of the paid Apify service (Apify is still available as an option, but you never need it).
+
+Everything else (frame sampling, contact sheet, giveaway detection, output JSON) is the same.
 
 You save reels on Instagram and never go back to them. reel-watcher has an AI model on your own PC watch them
 for you and write down what each one is: the hook, the format, the on-screen text, the transcript, the editing
 tricks, any "comment WORD and I'll send you X" giveaway, and a one-line verdict on why it works. You end up with
-one searchable JSON file per reel. Everything except the media download runs on your machine.
+one searchable JSON file per reel. Everything except the media download runs on your machine, and nothing costs money:
+no account, no API key, no credit card.
 
 ## What you need
 
@@ -77,23 +81,26 @@ notepad .\out\study\some-clip.json
 uv run reel-watcher export "C:\path\to\saved_posts.json" -o urls.tsv
 ```
 
-**5. Download and analyze them via Apify (paid, about $0.002 per reel)**
-
-Create an account at [apify.com](https://apify.com), copy your API token from Settings > API & Integrations.
-Set it for the current PowerShell window only (do not put it in a file in this folder):
+**5. Download and analyze them (free)**
 
 ```powershell
-$env:APIFY_TOKEN = "paste-your-token-here"
-uv run reel-watcher study --input urls.tsv --out-root .\out                    # dry run: lists what it would fetch, costs nothing
+uv run reel-watcher study --input urls.tsv --out-root .\out                    # dry run: lists what it would download
 uv run reel-watcher study --input urls.tsv --out-root .\out --run --limit 5    # real run on 5 reels
 ```
 
 Check the results in `out\study\`, then run again without `--limit` for the rest. Finished reels are skipped,
-failed ones are logged to `out\study\_failed.jsonl` and retried only with `--retry-failed`.
+failed ones are logged to `out\study\_failed.jsonl` and retried only with `--retry-failed`. You can leave it running
+overnight.
+
+**About free downloading.** yt-dlp downloads public reels without logging in. Instagram sometimes limits anonymous
+downloads: if three reels in a row are refused, the run stops with a message. Those reels are *not* marked as failed, so
+just wait an hour or two and run the same command again. It picks up where it stopped. If downloads keep failing,
+update yt-dlp with `uv sync --upgrade-package yt-dlp`. Limits of the free route: private accounts and photo-only posts
+(image carousels) can't be downloaded and are skipped. For a photo carousel, save the images yourself if you need them.
 
 ## What it does per reel
 
-1. Fetches the video (or carousel slides) through Apify, the only network step.
+1. Downloads the video with yt-dlp (free), the only network step.
 2. Cuts the video into key frames (hook frames plus one frame after each scene cut) with FFmpeg.
 3. Reads on-screen text with RapidOCR.
 4. Merges near-duplicate frames, then asks the local vision model (Ollama) about all unique frames at once,
@@ -104,11 +111,11 @@ failed ones are logged to `out\study\_failed.jsonl` and retried only with `--ret
 
 ## Cost
 
-- Apify: about $0.002 per reel with the `apify/instagram-scraper` actor. Every batch is sent with a spending cap
-  (`maxTotalChargeUsd`, default $2, set with `--apify-batch-cap-usd`) and the actual cost of each run is written to
-  `apify_cost.jsonl`. Check current Apify pricing yourself.
-- All analysis (OCR, vision model, whisper) is local and free.
-- Without `APIFY_TOKEN` nothing is downloaded and nothing is charged. Dry run is the default.
+**Free.** Every part is free and open source: yt-dlp (download), FFmpeg, Ollama and the Qwen vision models,
+faster-whisper, RapidOCR. Nothing needs an account or a card. The only "cost" is your PC's electricity and disk space.
+
+Optional and paid, never required: `--source apify` uses the Apify scraping service instead of yt-dlp (about $0.002
+per reel; needs `APIFY_TOKEN`). It can also fetch photo carousels. Do not use it if you want to stay at zero cost.
 
 ## Getting your saved reels
 
@@ -127,7 +134,9 @@ see `examples\urls.tsv`.
 
 | Option | Meaning |
 |---|---|
-| `--run` | Actually fetch and analyze (default is a dry run) |
+| `--run` | Actually download and analyze (default is a dry run) |
+| `--sleep N` | Seconds between downloads (default 4; raise it if Instagram refuses downloads) |
+| `--source apify` | Optional paid downloader instead of the free yt-dlp (not needed) |
 | `--limit N` | Stop after N new reels |
 | `--local A.mp4 B.mp4` | Analyze local files, no network |
 | `--archive DIR` | Keep video, frames and manifest per reel in `DIR\<code>\` |
@@ -142,7 +151,7 @@ Environment variables (set in PowerShell with `$env:NAME = "value"`):
 
 | Variable | Meaning |
 |---|---|
-| `APIFY_TOKEN` | Required for `--run` |
+| `APIFY_TOKEN` | Only for the optional paid `--source apify` |
 | `REEL_WATCHER_MODEL` | `small` or `large` |
 | `REEL_WATCHER_VLM` | Ollama vision model tag |
 | `REEL_WATCHER_WHISPER` | faster-whisper model: `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo` |
@@ -159,6 +168,8 @@ Environment variables (set in PowerShell with `$env:NAME = "value"`):
 - **Very slow / out of memory**: use `--model-size small --fast`, or lower `$env:REEL_WATCHER_NUM_CTX = "8192"`.
 - **`setup.ps1` cannot be loaded because running scripts is disabled**: use the exact command in step 2
   (`powershell -ExecutionPolicy Bypass -File .\setup.ps1`).
+- **"Instagram is refusing anonymous downloads"**: wait an hour or two and run the same command again, or raise `--sleep`.
+  Update yt-dlp with `uv sync --upgrade-package yt-dlp`.
 - **Python version errors**: the project pins Python 3.12 (`.python-version`); uv downloads it automatically.
 
 ## Output: one study (`out\study\<code>.json`)
@@ -192,7 +203,7 @@ Environment variables (set in PowerShell with `$env:NAME = "value"`):
 ```
 
 The full field list is the same as the original project. Also written: `study_index.jsonl` (one summary line per
-reel) and `apify_cost.jsonl`. Model output is not guaranteed to be correct: treat `analysis` as a draft.
+reel). Model output is not guaranteed to be correct: treat `analysis` as a draft.
 
 ## Optional: advice library
 
@@ -204,7 +215,7 @@ the format is shown in `examples\advice_library.json`.
 
 - Only analyze reels you saved yourself, for your own learning and research.
 - Respect creators. Credit them, do not copy their work, and do not redistribute their videos, frames or transcripts.
-- Scraping can conflict with Instagram's Terms of Use. You are responsible for how you use Apify and for complying
+- Downloading can conflict with Instagram's Terms of Use. You are responsible for how you use yt-dlp and for complying
   with the platform's terms and the law where you live. This tool does not log in to your account or use your cookies.
 - Model output can hallucinate, including names and quotes. Do not publish it as fact about a person.
 

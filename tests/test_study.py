@@ -162,3 +162,48 @@ def test_transcribe_words_maps_faster_whisper(monkeypatch):
     tr = rs.transcribe_words("v.mp4")
     assert tr["language"] == "en" and tr["text"] == "Comment GUIDE"
     assert tr["words"] == [{"w": "Comment", "s": 0.0, "e": 0.5}, {"w": "GUIDE", "s": 0.5, "e": 1.23}]
+
+
+def test_ytdlp_meta_maps_info():
+    m = rs.ytdlp_meta({"description": "cap", "channel": "creator_a", "like_count": 5, "view_count": -1, "comment_count": 2,
+                       "upload_date": "20260501", "duration": 12.5, "track": "Song", "artist": "Band"})
+    assert m["caption"] == "cap" and m["author"] == "creator_a" and m["likes"] == 5 and m["views"] is None
+    assert m["post_date"] == "2026-05-01" and m["duration_s"] == 12.5
+    assert m["music_info"] == {"song_name": "Song", "artist_name": "Band"}
+    pl = rs.ytdlp_meta({"entries": [{"description": "inner", "timestamp": 0}], "uploader_id": "u"})
+    assert pl["caption"] == "inner" and pl["author"] == "u" and pl["post_date"] == "1970-01-01" and pl["music_info"] is None
+
+
+def test_prepare_ytdlp_ok_and_errors(tmp_path, monkeypatch):
+    item = {"url": "https://www.instagram.com/reel/A1/", "code": "A1", "collections": [], "kind": "reel"}
+
+    def ok(url, work):
+        (work / "A1_01.mp4").write_bytes(b"v")
+        return {"description": "hi"}
+    monkeypatch.setattr(rs, "ytdlp_download", ok)
+    u = rs.prepare_ytdlp(item, tmp_path)
+    assert u["media"] == [tmp_path / "A1" / "A1_01.mp4"] and u["meta"]["caption"] == "hi" and "error" not in u
+
+    monkeypatch.setattr(rs, "ytdlp_download", lambda url, work: {})
+    assert rs.prepare_ytdlp(item, tmp_path)["error"].startswith("ytdlp_no_video")
+
+    def boom(url, work):
+        raise RuntimeError("\x1b[0;31mERROR:\x1b[0m Requested content is not available, rate-limit reached or login required")
+    monkeypatch.setattr(rs, "ytdlp_download", boom)
+    e = rs.prepare_ytdlp(item, tmp_path)["error"]
+    assert e.startswith("ytdlp: ERROR:") and rs.YTDLP_BLOCK_RE.search(e) and not (tmp_path / "A1").exists()
+
+
+def test_ytdlp_producer_stops_when_blocked(tmp_path, monkeypatch):
+    import queue
+    import threading
+    items = [{"url": f"u{i}", "code": f"C{i}", "collections": [], "kind": "reel"} for i in range(6)]
+    results = {"C0": {"item": items[0], "error": "ytdlp: video unavailable 404"},
+               "C1": {"item": items[1], "media": [1]}}
+    monkeypatch.setattr(rs, "prepare_ytdlp", lambda it, wp: results.get(it["code"], {"item": it, "error": "ytdlp: login required"}))
+    monkeypatch.setattr(rs.time, "sleep", lambda s: None)
+    q = queue.Queue()
+    rs.ytdlp_producer(items, q, threading.Event(), tmp_path, 0)
+    got = [q.get_nowait() for _ in range(q.qsize())]
+    assert [k for k, _ in got] == ["units", "units", "fatal"]
+    assert got[0][1][0]["error"].endswith("404") and "not marked failed" in got[2][1]

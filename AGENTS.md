@@ -11,13 +11,14 @@ uv sync
 uv run pytest                                                   # must pass before and after any change
 uv run reel-watcher study --local clip.mp4 --out-root .\out     # no network, no cost (needs Ollama running)
 uv run reel-watcher study --input urls.tsv --out-root .\out     # dry run (default)
-uv run reel-watcher study --input urls.tsv --out-root .\out --run --limit 3
+uv run reel-watcher study --input urls.tsv --out-root .\out --run --limit 3    # free
 ```
 
 ## Rules
 
-- Never spend money without the user's explicit OK. `--run` calls Apify (about $0.002 per reel). Always
-  show the dry run and the count first, start with `--limit 3`, keep the per-batch cap.
+- The user wants everything free. The default downloader is yt-dlp (free). Never use `--source apify` (paid)
+  or suggest a paid service unless the user explicitly asks. Show the dry run first and start with `--limit 3`.
+- If yt-dlp is refused by Instagram, wait and rerun, raise `--sleep`, or update yt-dlp. Never log in or use cookies.
 - `APIFY_TOKEN` is read from the environment only. Never write it to a file, a log, a URL or a commit.
 - Never log in to Instagram, use browser cookies, or automate the Instagram UI. Reel URLs come from the
   user's official data export (`reel-watcher export`) or a plain URL list.
@@ -31,7 +32,7 @@ uv run reel-watcher study --input urls.tsv --out-root .\out --run --limit 3
 | File | Role |
 |---|---|
 | `cli.py` | `reel-watcher study|export|advice` dispatcher |
-| `study.py` | The pipeline: Apify fetch, frame sampling, RapidOCR, dedupe, contact-sheet VLM call, faster-whisper, giveaway detection, archive, JSON writing, `main()` |
+| `study.py` | The pipeline: yt-dlp download (default, free) or Apify (optional, paid), frame sampling, RapidOCR, dedupe, contact-sheet VLM call, faster-whisper, giveaway detection, archive, JSON writing, `main()` |
 | `model.py` | Ollama vision model and whisper names (env overridable), RAM detection, `Vision.ask`, `parse_json` |
 | `media.py` | ffprobe/ffmpeg helpers, scene cuts, Instagram URL parsing, preflight |
 | `ig_export.py` | Instagram data-export (saved_posts JSON/HTML) to URL list |

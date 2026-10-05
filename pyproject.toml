@@ -1,7 +1,7 @@
 [project]
 name = "reel-watcher"
 version = "0.1.0"
-description = "Have a local AI model watch the Instagram reels you saved and write structured notes. Windows edition (Ollama + faster-whisper + RapidOCR), analysis is local."
+description = "Have a local AI model watch the Instagram reels you saved and write structured notes. Windows edition (Ollama + faster-whisper + RapidOCR), free: yt-dlp download, analysis is local."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Jacob Bruce" }]
@@ -11,6 +11,7 @@ dependencies = [
     "numpy>=1.26",
     "pillow>=11.0",
     "rapidocr-onnxruntime>=1.3.24",
+    "yt-dlp>=2025.1.1",
 ]
 
 [project.scripts]
