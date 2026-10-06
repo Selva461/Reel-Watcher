@@ -13,7 +13,8 @@ from PIL import Image
 
 from reel_watcher import demo, server, study, worker
 
-CHROME = next((p for p in ("/opt/pw-browsers/chromium-1194/chrome-linux/chrome",) if os.path.exists(p)), None) or shutil.which("chromium")
+CHROME = next((p for p in ("/opt/pw-browsers/chromium-1194/chrome-linux/chrome",) if os.path.exists(p)), None) or \
+    shutil.which("chromium") or shutil.which("google-chrome") or shutil.which("chromium-browser")
 
 
 @pytest.fixture

@@ -6,6 +6,11 @@ from reel_watcher.model import SIZES, select_models
 GB = 1024**3
 
 
+def test_auto_phone_below_12gb():
+    assert select_models(env={}, ram_bytes=8 * GB)[2] == "phone"
+    assert select_models(env={}, ram_bytes=0)[2] == "small"  # unknown RAM: not the weakest model
+
+
 def test_auto_small_below_32gb():
     assert select_models(env={}, ram_bytes=16 * GB)[2] == "small"
     assert select_models(env={}, ram_bytes=24 * GB)[2] == "small"

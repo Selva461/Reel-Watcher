@@ -450,10 +450,15 @@ def ocr_image(path: Path) -> str:
                 from rapidocr_onnxruntime import RapidOCR
                 _OCR_ENGINE = RapidOCR()
             except Exception as e:  # pragma: no cover - depends on venv
-                log(f"OCR unavailable ({e}); on_screen_text stays empty")
-                _OCR_ENGINE = False
+                if shutil.which("tesseract"):  # phones (Termux): pkg install tesseract
+                    _OCR_ENGINE = "tesseract"
+                else:
+                    log(f"OCR unavailable ({e}); on_screen_text stays empty")
+                    _OCR_ENGINE = False
         if not _OCR_ENGINE:
             return ""
+        if _OCR_ENGINE == "tesseract":
+            return ocr_tesseract(path)
         try:
             result, _ = _OCR_ENGINE(str(path))
         except Exception as e:  # noqa: BLE001
@@ -462,6 +467,15 @@ def ocr_image(path: Path) -> str:
     # result rows are [box(4 points), text, score]; sort by the top edge, then left edge
     rows = sorted(result or [], key=lambda r: (min(pt[1] for pt in r[0]), min(pt[0] for pt in r[0])))
     lines = [str(r[1]) for r in rows if len(r) > 2 and float(r[2]) >= 0.5]
+    txt = _SECRET_RE.sub("[redacted]", " ".join(lines))
+    return re.sub(r"\s+", " ", txt).strip()[:500]
+
+
+def ocr_tesseract(path: Path) -> str:
+    """Fallback OCR with the free Tesseract command-line tool (sparse text mode suits screenshots and captions)."""
+    p = subprocess.run(["tesseract", str(path), "stdout", "-l", os.environ.get("REEL_WATCHER_TESSERACT_LANG", "eng"), "--psm", "11"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    lines = [ln.strip() for ln in (p.stdout or "").splitlines() if len(ln.strip()) > 1]
     txt = _SECRET_RE.sub("[redacted]", " ".join(lines))
     return re.sub(r"\s+", " ", txt).strip()[:500]
 
@@ -678,6 +692,10 @@ def whisper_model():
 
 
 def transcribe_words(video: Path) -> dict:
+    try:
+        import faster_whisper  # noqa: F401
+    except ImportError:  # phones (Termux) have no faster-whisper build: use whisper.cpp
+        return transcribe_whisper_cpp(video)
     segments, info = whisper_model().transcribe(str(video), word_timestamps=True, condition_on_previous_text=False,
                                                 no_speech_threshold=0.6)
     words, segs = [], []
@@ -688,6 +706,71 @@ def transcribe_words(video: Path) -> dict:
         for w in s.words or []:
             words.append({"w": w.word.strip(), "s": round(w.start, 2), "e": round(w.end, 2)})
     return {"language": info.language, "text": " ".join(s["text"] for s in segs), "segments": segs, "words": words}
+
+
+GGML_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{name}.bin"
+
+
+def whisper_cpp_bin() -> str | None:
+    env = os.environ.get("REEL_WATCHER_WHISPER_CPP")
+    if env:
+        return env
+    return next((shutil.which(n) for n in ("whisper-cli", "whisper-cpp", "whisper.cpp") if shutil.which(n)), None)
+
+
+def whisper_cpp_model() -> Path:
+    env = os.environ.get("REEL_WATCHER_WHISPER_GGML")
+    if env:
+        return Path(env)
+    name = _model.WHISPER_MODEL.split("/")[-1].removeprefix("whisper-").removesuffix("-mlx")
+    dest = Path.home() / ".cache" / "reel-shelf" / f"ggml-{name}.bin"
+    if not dest.exists():  # one-time free download from Hugging Face
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        log(f"downloading speech model ggml-{name}.bin (one time)...")
+        tmp = dest.with_suffix(".part")
+        req = urllib.request.Request(GGML_URL.format(name=name), headers={"User-Agent": "reel-watcher"})
+        with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f)
+        tmp.replace(dest)
+    return dest
+
+
+def parse_whisper_cpp(j: dict) -> dict:
+    """whisper.cpp JSON (run with -ml 1 -sow, one word per entry) -> the transcript shape used everywhere."""
+    words = []
+    for e in j.get("transcription") or []:
+        w = str(e.get("text") or "").strip()
+        off = e.get("offsets") or {}
+        if not w or w.startswith("[") or "from" not in off:
+            continue
+        words.append({"w": w, "s": round(off["from"] / 1000, 2), "e": round(off.get("to", off["from"]) / 1000, 2)})
+    segs, cur = [], []
+    for w in words:
+        cur.append(w)
+        if w["w"].endswith((".", "!", "?")):
+            segs.append(cur)
+            cur = []
+    if cur:
+        segs.append(cur)
+    segments = [{"start": s[0]["s"], "end": s[-1]["e"], "text": " ".join(x["w"] for x in s)} for s in segs]
+    return {"language": (j.get("result") or {}).get("language"), "text": " ".join(x["text"] for x in segments),
+            "segments": segments, "words": words}
+
+
+def transcribe_whisper_cpp(video: Path) -> dict:
+    exe = whisper_cpp_bin()
+    if not exe:  # still read the reel from its text, caption and comments
+        log("No speech model: install faster-whisper (PC) or whisper.cpp (phone: see android/termux-setup.sh); reading without speech")
+        return {"language": None, "text": "", "segments": [], "words": []}
+    with tempfile.TemporaryDirectory() as td:
+        wav = Path(td) / "a.wav"
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000", str(wav)], check=True)
+        out = Path(td) / "out"
+        p = subprocess.run([exe, "-m", str(whisper_cpp_model()), "-f", str(wav), "-oj", "-of", str(out), "-ml", "1", "-sow", "-l", "auto",
+                            "-np", "-t", str(max(2, (os.cpu_count() or 4) - 1))], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if p.returncode != 0 or not out.with_suffix(".json").exists():
+            raise RuntimeError(f"whisper.cpp failed: {(p.stderr or '')[-300:]}")
+        return parse_whisper_cpp(json.loads(out.with_suffix(".json").read_text(encoding="utf-8", errors="replace")))
 
 
 def non_speech_energy(video: Path, words: list[dict], duration: float) -> dict:
@@ -1133,7 +1216,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rollup", action="store_true", help="rebuild study_index.jsonl from study/*.json and exit")
     ap.add_argument("--collections", default="", help="priority terms, comma separated, matched against collection names")
     ap.add_argument("--only-priority", action="store_true", help="with --collections: skip non-matching items")
-    ap.add_argument("--model-size", choices=["small", "large"], help="small: qwen2.5vl:7b + whisper small (16 GB PCs); large: qwen3-vl:30b + large-v3-turbo. Default auto by RAM (env REEL_WATCHER_MODEL)")
+    ap.add_argument("--model-size", choices=["phone", "small", "large"], help="small: qwen2.5vl:7b + whisper small (16 GB PCs); large: qwen3-vl:30b + large-v3-turbo. Default auto by RAM (env REEL_WATCHER_MODEL)")
     ap.add_argument("--model", help="exact Ollama vision model tag, e.g. qwen2.5vl:7b (overrides --model-size)")
     ap.add_argument("--fast", action="store_true", help="fewer frames and tokens")
     ap.add_argument("--detailed", action="store_true", help="one VLM call per frame instead of one contact sheet")

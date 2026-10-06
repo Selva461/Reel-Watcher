@@ -694,7 +694,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lan", action="store_true", help="let your phone connect over Wi-Fi (protected by an access code)")
     ap.add_argument("--no-engine", action="store_true", help="only show results, do not process anything")
     ap.add_argument("--no-ai", action="store_true", help="do not load the AI vision model (OCR, lookups and scene search still run)")
-    ap.add_argument("--model-size", choices=["small", "large"])
+    ap.add_argument("--model-size", choices=["phone", "small", "large"])
     ap.add_argument("--model", help="exact Ollama vision model tag")
     ap.add_argument("--open", action="store_true", help="open the app in your browser")
     ap.add_argument("--demo", action="store_true", help="try the app with sample data (kept in ~/ReelShelf-demo)")

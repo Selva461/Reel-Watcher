@@ -10,3 +10,9 @@ reel-watcher-out/
 Thumbs.db
 /out/
 /urls.tsv
+
+# Android build output
+android/app-shell/.gradle/
+android/app-shell/build/
+android/app-shell/app/build/
+android/app-shell/local.properties

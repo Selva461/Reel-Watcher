@@ -1,0 +1,23 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'app.reelshelf'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'app.reelshelf'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '0.2'
+    }
+    buildTypes {
+        release { minifyEnabled false }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

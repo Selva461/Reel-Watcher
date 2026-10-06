@@ -5,8 +5,8 @@ Speech: faster-whisper (CTranslate2), CPU by default. Models download on first u
 
 Model choice (highest priority first):
   --model <ollama tag> / REEL_WATCHER_VLM   exact Ollama vision model, e.g. qwen2.5vl:7b
-  --model-size small|large / REEL_WATCHER_MODEL
-  auto: small if total RAM < 32 GB, else large
+  --model-size phone|small|large / REEL_WATCHER_MODEL
+  auto: phone below 12 GB of RAM, small below 32 GB, else large
 REEL_WATCHER_WHISPER overrides the faster-whisper model (tiny, base, small, medium, large-v3, large-v3-turbo).
 REEL_WATCHER_WHISPER_DEVICE: cpu (default) or cuda (needs the NVIDIA cuBLAS/cuDNN libraries, see README).
 OLLAMA_HOST overrides the Ollama address.
@@ -24,8 +24,10 @@ import urllib.request
 SIZES = {
     "large": ("qwen3-vl:30b", "large-v3-turbo"),
     "small": ("qwen2.5vl:7b", "small"),
+    "phone": ("qwen2.5vl:3b", "base"),  # phones and 8 GB PCs
 }
 SMALL_RAM_LIMIT = 32 * 1024**3  # below this, auto picks "small"
+PHONE_RAM_LIMIT = 12 * 1024**3  # below this, auto picks "phone"
 NUM_CTX = int(os.environ.get("REEL_WATCHER_NUM_CTX", "16384"))  # contact sheet + prompt need a large context
 
 
@@ -59,9 +61,9 @@ def select_models(size=None, model=None, env=None, ram_bytes=None):
     size = size or env.get("REEL_WATCHER_MODEL") or "auto"
     if size == "auto":
         ram = total_ram_bytes() if ram_bytes is None else ram_bytes
-        size = "small" if ram < SMALL_RAM_LIMIT else "large"
+        size = "phone" if 0 < ram < PHONE_RAM_LIMIT else "small" if ram < SMALL_RAM_LIMIT else "large"
     if size not in SIZES:
-        raise ValueError(f"model size must be small, large or auto, got {size!r}")
+        raise ValueError(f"model size must be phone, small, large or auto, got {size!r}")
     vlm, whisper = SIZES[size]
     vlm = model or env.get("REEL_WATCHER_VLM") or vlm
     whisper = env.get("REEL_WATCHER_WHISPER") or whisper

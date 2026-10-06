@@ -207,3 +207,17 @@ def test_ytdlp_producer_stops_when_blocked(tmp_path, monkeypatch):
     got = [q.get_nowait() for _ in range(q.qsize())]
     assert [k for k, _ in got] == ["units", "units", "fatal"]
     assert got[0][1][0]["error"].endswith("404") and "not marked failed" in got[2][1]
+
+
+def test_whisper_cpp_json_and_tesseract_fallback(monkeypatch, tmp_path):
+    j = {"result": {"language": "en"}, "transcription": [
+        {"offsets": {"from": 400, "to": 900}, "text": " Start"}, {"offsets": {"from": 900, "to": 1200}, "text": " now."},
+        {"offsets": {"from": 1500, "to": 1600}, "text": " [MUSIC]"}, {"offsets": {"from": 1600, "to": 2000}, "text": " Go"}]}
+    tr = rs.parse_whisper_cpp(j)
+    assert tr["language"] == "en" and tr["text"] == "Start now. Go"
+    assert tr["words"][0] == {"w": "Start", "s": 0.4, "e": 0.9} and [s["text"] for s in tr["segments"]] == ["Start now.", "Go"]
+
+    class P:
+        stdout = "VINLAND SAGA\n\nx\nEpisode 12\n"
+    monkeypatch.setattr(rs.subprocess, "run", lambda *a, **k: P())
+    assert rs.ocr_tesseract(tmp_path / "a.png") == "VINLAND SAGA Episode 12"

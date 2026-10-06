@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reel Shelf</title>
+<style>
+  :root { --bg:#15161A; --surface:#1F2026; --line:#3A3B43; --text:#F2EFE8; --muted:#A3A09A; --accent:#F2B544; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 28px 16px 40px; display: flex; flex-direction: column; gap: 16px; }
+  .brand { color: var(--accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 14px; }
+  h1 { margin: 0; font-size: 28px; line-height: 1.15; }
+  p, li { color: #CFCBC3; line-height: 1.5; margin: 0; }
+  .card { background: var(--surface); border-radius: 16px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  button { min-height: 48px; border-radius: 12px; border: 1px solid var(--line); background: transparent; color: var(--text); font-size: 15px; font-weight: 600; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #15161A; }
+  input { min-height: 48px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); color: var(--text); padding: 0 12px; font-size: 15px; width: 100%; }
+  code { display: block; background: var(--bg); color: var(--accent); padding: 10px; border-radius: 8px; font-size: 12px; word-break: break-all; }
+  ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
+  #status { color: var(--muted); font-size: 14px; min-height: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">Reel Shelf</div>
+  <h1>Reel Shelf is not running yet</h1>
+  <p id="status"></p>
+  <div class="card">
+    <strong>On this phone</strong>
+    <p>Reads reels and screenshots right here. Uses Termux, a free app.</p>
+    <button class="primary" id="start">Start Reel Shelf</button>
+  </div>
+  <div class="card">
+    <strong>With my PC (faster)</strong>
+    <p>On the PC run <b>reel-watcher app --lan</b>, then type the address it shows (with the code).</p>
+    <label for="addr" style="font-size:14px;font-weight:600">PC address</label>
+    <input id="addr" type="url" inputmode="url" placeholder="http://192.168.1.20:8765/?t=...">
+    <button id="pc">Connect to my PC</button>
+  </div>
+  <div class="card">
+    <strong>First time on this phone? Set up once (about 20 minutes, free)</strong>
+    <ol>
+      <li><button id="getTermux">1. Install Termux from F-Droid</button></li>
+      <li>2. Open Termux and paste this command:<code id="cmd"></code><button id="copy">Copy command</button></li>
+      <li>3. When it says Done, come back here and tap Start Reel Shelf.</li>
+      <li>4. Android Settings, Apps, Termux, Battery: set Unrestricted so scans keep running.</li>
+    </ol>
+  </div>
+</main>
+<script>
+  const RS = window.ReelShelf;
+  const CMD = "pkg install -y git && git clone -b ccr-d0c0b070-bdpssy https://github.com/selva461/Reel-Watcher.git ~/Reel-Watcher && bash ~/Reel-Watcher/android/termux-setup.sh";
+  const $ = (id) => document.getElementById(id);
+  $("cmd").textContent = CMD;
+  const say = (t) => { $("status").textContent = t; };
+  const server = RS ? RS.server() : "http://localhost:8765/";
+  if (!server.includes("localhost")) $("addr").value = server;
+  async function reachable(url) {
+    try { await fetch(url.split("?")[0] + "api/home", { mode: "no-cors", cache: "no-store" }); return true; } catch (e) { return false; }
+  }
+  async function waitAndOpen(url, tries) {
+    for (let i = 0; i < tries; i++) {
+      if (await reachable(url)) { say("Connected. Opening..."); RS ? RS.open() : (location.href = url); return; }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    say("Still not reachable. Open Termux and type: reel-shelf");
+  }
+  $("start").onclick = () => {
+    if (!RS) return say("Open this page inside the Reel Shelf app.");
+    RS.rememberPhone();
+    const r = RS.startEngine();
+    if (r === "no-termux") return say("Termux is not installed yet. Follow the setup steps below.");
+    if (r === "permission") return say("Tap Allow, then tap Start Reel Shelf again.");
+    if (r !== "started") return say("Could not start (" + r + "). Open Termux and type: reel-shelf");
+    say("Starting... the first start can take a minute.");
+    waitAndOpen("http://localhost:8765/", 40);
+  };
+  $("pc").onclick = () => { const a = $("addr").value.trim(); if (!a) return say("Type the address shown on your PC."); RS ? RS.setServer(a) : (location.href = a); };
+  $("getTermux").onclick = () => RS && RS.installTermux();
+  $("copy").onclick = () => RS ? RS.copy(CMD) : navigator.clipboard.writeText(CMD);
+  if (RS && !RS.hasTermux()) say("Termux is not installed yet. To use Reel Shelf without a PC, follow the setup steps below.");
+  else waitAndOpen(server, 2);
+</script>
+</body>
+</html>
