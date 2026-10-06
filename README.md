@@ -50,19 +50,27 @@ uv run reel-watcher app --lan            # also usable from your phone on the sa
 
 ### Run it on an Android phone, no PC needed
 
-1. Install **Termux** from F-Droid (free): https://f-droid.org/packages/com.termux/
-2. Open Termux and paste:
+The easy way: the Reel Shelf app walks you through it and shows the setup progress.
 
-   ```bash
-   pkg install -y git && git clone -b ccr-d0c0b070-bdpssy https://github.com/Selva461/Reel-Watcher.git ~/Reel-Watcher && bash ~/Reel-Watcher/android/termux-setup.sh
-   ```
+1. On your phone open https://github.com/Selva461/Reel-Watcher/releases/tag/apk-latest , download `ReelShelf.apk`
+   and install it (allow installing from your browser when Android asks).
+2. Open Reel Shelf and follow the two steps it shows:
+   - **Install Termux** from F-Droid (free). Not the Play Store version: that build is different and Reel Shelf cannot use it.
+   - **Set up once**: tap *Copy setup command and open Termux*, then in Termux long-press, Paste, Enter.
+     Come back to Reel Shelf to watch the progress; it opens by itself when it is ready (15-30 minutes, about 4 GB, use Wi-Fi).
+3. Android Settings, Apps, Termux, Battery: **Unrestricted**, so scans keep running with the screen off.
 
-   It installs Python, FFmpeg, Tesseract (text), whisper.cpp (speech) and a small AI vision model
-   (`qwen2.5vl:3b`, about 3 GB), then adds the `reel-shelf` command. It takes 15-30 minutes once.
-3. Start it any time with `reel-shelf`, or install the **Reel Shelf APK** and tap **Start Reel Shelf**.
-   The APK is built for free by GitHub Actions on every change. On your phone open
-   https://github.com/Selva461/Reel-Watcher/releases/tag/apk-latest , download `ReelShelf.apk`, and allow installing it.
-4. Android Settings, Apps, Termux, Battery: **Unrestricted**, so scans keep running with the screen off.
+Later, tap **Start Reel Shelf** in the app. If Android does not let the app start Termux, it opens Termux instead,
+which starts Reel Shelf and brings you back. Opening Termux yourself does the same; `reel-shelf-stop` stops it.
+
+Setup command, if you want to paste it yourself:
+
+```bash
+pkg install -y git && { git -C ~/Reel-Watcher pull -q --ff-only 2>/dev/null || git clone -b ccr-d0c0b070-bdpssy https://github.com/Selva461/Reel-Watcher.git ~/Reel-Watcher; } && bash ~/Reel-Watcher/android/termux-setup.sh
+```
+
+It installs Python, FFmpeg, Tesseract (text), whisper.cpp (speech) and a small AI vision model (`qwen2.5vl:3b`, about 3 GB).
+A newer APK is signed differently, so uninstall the old Reel Shelf app before installing a new one (your library lives in Termux and is kept).
 
 Without the APK you can also open http://localhost:8765 in Chrome and choose **Add to Home screen**.
 On a phone, a reel takes longer than on a PC (a few minutes each); connect your PC with `--lan` for speed.

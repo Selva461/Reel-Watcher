@@ -7,4 +7,10 @@ if ! pgrep -f "reel-watcher app" >/dev/null; then
   nohup reel-watcher app > "$HOME/reel-shelf.log" 2>&1 &
   sleep 3
 fi
-[ "${1:-}" = "--no-open" ] || termux-open-url "http://localhost:8765/" 2>/dev/null || echo "Open http://localhost:8765 in your browser"
+case "${1:-}" in
+  --no-open) ;;
+  # back to the Reel Shelf app if it is installed, else the browser
+  --back) echo "Reel Shelf is running."
+          am start -n app.reelshelf/.MainActivity >/dev/null 2>&1 || termux-open-url "http://localhost:8765/" 2>/dev/null || true ;;
+  *) termux-open-url "http://localhost:8765/" 2>/dev/null || echo "Open http://localhost:8765 in your browser" ;;
+esac

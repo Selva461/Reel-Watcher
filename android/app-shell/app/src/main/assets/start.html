@@ -5,82 +5,280 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reel Shelf</title>
 <style>
-  :root { --bg:#15161A; --surface:#1F2026; --line:#3A3B43; --text:#F2EFE8; --muted:#A3A09A; --accent:#F2B544; }
+  :root { --bg:#15161A; --surface:#1F2026; --line:#3A3B43; --text:#F2EFE8; --muted:#A3A09A; --accent:#F2B544; --ok:#7BC98F; --bad:#E7866F; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; }
   main { max-width: 520px; margin: 0 auto; padding: 28px 16px 40px; display: flex; flex-direction: column; gap: 16px; }
   .brand { color: var(--accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 14px; }
+  .kicker { color: var(--muted); font-size: 14px; font-weight: 600; }
   h1 { margin: 0; font-size: 28px; line-height: 1.15; }
   p, li { color: #CFCBC3; line-height: 1.5; margin: 0; }
   .card { background: var(--surface); border-radius: 16px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-  button { min-height: 48px; border-radius: 12px; border: 1px solid var(--line); background: transparent; color: var(--text); font-size: 15px; font-weight: 600; }
+  .warn { border: 1px solid var(--bad); }
+  button { min-height: 52px; border-radius: 12px; border: 1px solid var(--line); background: transparent; color: var(--text); font-size: 16px; font-weight: 600; width: 100%; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #15161A; }
+  button.link { min-height: 40px; border: 0; color: var(--muted); font-weight: 500; text-decoration: underline; }
   input { min-height: 48px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); color: var(--text); padding: 0 12px; font-size: 15px; width: 100%; }
-  code { display: block; background: var(--bg); color: var(--accent); padding: 10px; border-radius: 8px; font-size: 12px; word-break: break-all; }
   ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
+  details summary { color: var(--muted); font-size: 15px; padding: 8px 0; }
+  details .card { margin-top: 8px; }
+  .bar { height: 10px; background: var(--bg); border-radius: 99px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width .6s ease; }
+  .detail { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); word-break: break-all; min-height: 16px; }
+  .steps { list-style: none; padding: 0; gap: 10px; }
+  .steps li { display: flex; gap: 10px; align-items: center; color: var(--muted); }
+  .steps li::before { content: ""; width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line); flex: none; }
+  .steps li.now { color: var(--text); }
+  .steps li.now::before { border-color: var(--accent); border-top-color: transparent; animation: spin 1s linear infinite; }
+  .steps li.done { color: var(--text); }
+  .steps li.done::before { background: var(--ok); border-color: var(--ok); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  [hidden] { display: none !important; }
   #status { color: var(--muted); font-size: 14px; min-height: 20px; }
 </style>
 </head>
 <body>
 <main>
   <div class="brand">Reel Shelf</div>
-  <h1>Reel Shelf is not running yet</h1>
+
+  <section id="s-checking" class="card"><p>Looking for Reel Shelf...</p></section>
+
+  <section id="s-install" hidden>
+    <div class="kicker">Step 1 of 2</div>
+    <h1>Install Termux</h1>
+    <div class="card warn" id="playWarn" hidden>
+      <strong>Your Termux is from the Play Store</strong>
+      <p>That version is old and limited, and Reel Shelf cannot use it. Uninstall it first (long-press the Termux icon, Uninstall), then tap the button below.</p>
+      <button class="link" id="usePlay">Use it anyway</button>
+    </div>
+    <div class="card">
+      <p>Termux is a free app that runs Reel Shelf on your phone. Get it from F-Droid (not the Play Store).</p>
+      <button class="primary" id="getTermux">Get Termux (free)</button>
+      <p style="font-size:14px">On the F-Droid page, tap <b>Download APK</b>, open it, and tap Install. Then come back here.</p>
+    </div>
+  </section>
+
+  <section id="s-setup" hidden>
+    <div class="kicker">Step 2 of 2</div>
+    <h1>Set up Reel Shelf (once)</h1>
+    <div class="card">
+      <p>Takes about 20 minutes and downloads about 4 GB, so use Wi-Fi and keep the phone charging.</p>
+      <button class="primary" id="setupBtn">Copy setup command and open Termux</button>
+      <ol>
+        <li>In Termux, <b>long-press</b> the black screen and tap <b>Paste</b>.</li>
+        <li>Tap <b>Enter</b> on the keyboard.</li>
+        <li>If Android asks for storage access, tap <b>Allow</b>.</li>
+        <li>Come back here to watch the progress. Reel Shelf opens by itself when it is ready.</li>
+      </ol>
+    </div>
+    <button class="link" id="alreadySetUp">I already set it up</button>
+  </section>
+
+  <section id="s-progress" hidden>
+    <div class="kicker" id="pStep">Setting up</div>
+    <h1 id="pTitle">Setting up Reel Shelf</h1>
+    <div class="card">
+      <div class="bar"><div id="pBar"></div></div>
+      <strong id="pLabel">Waiting for Termux...</strong>
+      <div class="detail" id="pDetail"></div>
+      <p style="font-size:14px" id="pHint">Leave Termux running. You can use other apps meanwhile; come back any time.</p>
+    </div>
+    <button id="pTermux">Show Termux</button>
+    <button class="link" id="pRetry" hidden>Copy setup command again</button>
+  </section>
+
+  <section id="s-start" hidden>
+    <h1>Reel Shelf is ready</h1>
+    <div class="card">
+      <p>Reads your reels and screenshots right here on the phone.</p>
+      <button class="primary" id="start">Start Reel Shelf</button>
+    </div>
+    <button class="link" id="redoSetup">Set up again</button>
+  </section>
+
+  <section id="s-starting" hidden>
+    <div class="kicker">Starting</div>
+    <h1>Opening Reel Shelf</h1>
+    <div class="card">
+      <ol class="steps">
+        <li id="st1">Starting Termux</li>
+        <li id="st2">Loading Reel Shelf</li>
+        <li id="st3">Opening</li>
+      </ol>
+      <p style="font-size:14px" id="stHint">The first start can take a minute.</p>
+    </div>
+    <div class="card warn" id="stHelp" hidden>
+      <strong>Reel Shelf did not start</strong>
+      <p>Tap Show Termux and read the last lines. If it says <b>command not found</b>, the setup did not finish: tap Set up again.</p>
+      <button id="stTermux">Show Termux</button>
+      <button id="stSetup">Set up again</button>
+    </div>
+  </section>
+
   <p id="status"></p>
-  <div class="card">
-    <strong>On this phone</strong>
-    <p>Reads reels and screenshots right here. Uses Termux, a free app.</p>
-    <button class="primary" id="start">Start Reel Shelf</button>
-  </div>
-  <div class="card">
-    <strong>With my PC (faster)</strong>
-    <p>On the PC run <b>reel-watcher app --lan</b>, then type the address it shows (with the code).</p>
-    <label for="addr" style="font-size:14px;font-weight:600">PC address</label>
-    <input id="addr" type="url" inputmode="url" placeholder="http://192.168.1.20:8765/?t=...">
-    <button id="pc">Connect to my PC</button>
-  </div>
-  <div class="card">
-    <strong>First time on this phone? Set up once (about 20 minutes, free)</strong>
-    <ol>
-      <li><button id="getTermux">1. Install Termux from F-Droid</button></li>
-      <li>2. Open Termux and paste this command:<code id="cmd"></code><button id="copy">Copy command</button></li>
-      <li>3. When it says Done, come back here and tap Start Reel Shelf.</li>
-      <li>4. Android Settings, Apps, Termux, Battery: set Unrestricted so scans keep running.</li>
-    </ol>
-  </div>
+
+  <details id="pcBox">
+    <summary>Use my PC instead (faster)</summary>
+    <div class="card">
+      <p>On the PC run <b>reel-watcher app --lan</b>, then type the address it shows (with the code).</p>
+      <label for="addr" style="font-size:14px;font-weight:600">PC address</label>
+      <input id="addr" type="url" inputmode="url" placeholder="http://192.168.1.20:8765/?t=...">
+      <button id="pc">Connect to my PC</button>
+    </div>
+  </details>
 </main>
 <script>
   const RS = window.ReelShelf;
-  const CMD = "pkg install -y git && git clone -b ccr-d0c0b070-bdpssy https://github.com/Selva461/Reel-Watcher.git ~/Reel-Watcher && bash ~/Reel-Watcher/android/termux-setup.sh";
+  const PHONE = "http://localhost:8765/";
+  const SETUP_STATUS = "http://127.0.0.1:8766/";
+  const REPO = "https://github.com/Selva461/Reel-Watcher.git";
+  const BRANCH = "ccr-d0c0b070-bdpssy";
+  const CMD = "pkg install -y git && { git -C ~/Reel-Watcher pull -q --ff-only 2>/dev/null || git clone -b " + BRANCH + " " + REPO +
+              " ~/Reel-Watcher; } && bash ~/Reel-Watcher/android/termux-setup.sh";
   const $ = (id) => document.getElementById(id);
-  $("cmd").textContent = CMD;
-  const say = (t) => { $("status").textContent = t; };
-  const server = RS ? RS.server() : "http://localhost:8765/";
-  if (!server.includes("localhost")) $("addr").value = server;
+  const say = (t) => { $("status").textContent = t || ""; };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const flag = (n) => RS ? RS.getFlag(n) : localStorage.getItem(n) === "1";
+  const setFlag = (n, v) => RS ? RS.setFlag(n, v) : localStorage.setItem(n, v ? "1" : "0");
+  let screen = "checking";
+  let starting = false;
+
+  function show(name) {
+    screen = name;
+    for (const s of document.querySelectorAll("main > section")) s.hidden = s.id !== "s-" + name;
+    $("pcBox").hidden = name === "progress" || name === "starting";
+    say("");
+  }
+
   async function reachable(url) {
     try { await fetch(url.split("?")[0] + "api/home", { mode: "no-cors", cache: "no-store" }); return true; } catch (e) { return false; }
   }
-  async function waitAndOpen(url, tries) {
-    for (let i = 0; i < tries; i++) {
-      if (await reachable(url)) { say("Connected. Opening..."); RS ? RS.open() : (location.href = url); return; }
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-    say("Still not reachable. Open Termux and type: reel-shelf");
+  async function setupStatus() {
+    try { const r = await fetch(SETUP_STATUS, { cache: "no-store" }); return await r.json(); } catch (e) { return null; }
   }
+  function openApp() {
+    setFlag("setup", true);
+    RS ? RS.open() : (location.href = PHONE);
+  }
+
+  function showProgress(st) {
+    if (screen !== "progress") show("progress");
+    const total = st.total || 7;
+    $("pRetry").hidden = !st.error;
+    if (st.error) {
+      $("pTitle").textContent = "Setup stopped";
+      $("pStep").textContent = "Something went wrong";
+      $("pLabel").textContent = st.label;
+      $("pHint").textContent = "Fix the problem above, then copy the setup command again and paste it in Termux. It continues where it stopped.";
+      return;
+    }
+    $("pTitle").textContent = st.done ? "Almost ready" : "Setting up Reel Shelf";
+    $("pStep").textContent = "Step " + st.step + " of " + total;
+    $("pLabel").textContent = st.label;
+    $("pDetail").textContent = st.detail || "";
+    $("pBar").style.width = Math.round(((st.done ? total : st.step - 0.5) / total) * 100) + "%";
+  }
+
+  function stepState(n) {
+    for (let i = 1; i <= 3; i++) $("st" + i).className = i < n ? "done" : i === n ? "now" : "";
+  }
+
+  async function waitForEngine(seconds, hint, fallbackAt) {
+    hint = hint || "The first start can take a minute.";
+    let fellBack = false;
+    starting = true;
+    show("starting");
+    $("stHelp").hidden = true;
+    stepState(1);
+    const t0 = Date.now();
+    while (Date.now() - t0 < seconds * 1000) {
+      if (Date.now() - t0 > 3000) stepState(2);
+      if (await reachable(PHONE)) { stepState(3); await sleep(400); starting = false; return openApp(); }
+      if (fallbackAt && !fellBack && Date.now() - t0 > fallbackAt * 1000) {
+        fellBack = true;  // Termux ignored the background start: opening it starts Reel Shelf instead
+        hint = "Opening Termux. It starts Reel Shelf and brings you back here.";
+        if (RS) RS.openTermux();
+      }
+      const left = Math.round(seconds - (Date.now() - t0) / 1000);
+      $("stHint").textContent = Date.now() - t0 > 20000 ? "Still loading (the AI model takes a while the first time). " + left + " s" : hint;
+      await sleep(1500);
+    }
+    starting = false;
+    $("stHelp").hidden = false;
+  }
+
+  window.onEngineStart = (r) => {
+    if (r === "started") return waitForEngine(120, null, 15);
+    if (r === "permission") return say("Tap Allow on the Android question.");
+    if (r === "no-termux") return show("install");
+    // Android would not let Reel Shelf start Termux: opening Termux starts Reel Shelf and comes back here by itself
+    setTimeout(() => RS && RS.openTermux(), 900);
+    waitForEngine(120, "Opening Termux. It starts Reel Shelf and brings you back here.");
+  };
+
+  async function check() {
+    if (starting) return;
+    const server = RS ? RS.server() : PHONE;
+    if (await reachable(server)) return openApp();
+    const st = await setupStatus();
+    if (st && st.step !== undefined) return showProgress(st);
+    if (!server.includes("localhost")) {
+      show(flag("setup") ? "start" : "setup");
+      $("pcBox").open = true;
+      return say("Cannot reach your PC at " + server.split("?")[0] + ". Is reel-watcher app --lan running?");
+    }
+    if (RS && !RS.hasTermux()) {
+      show("install");
+      $("playWarn").hidden = true;
+      return;
+    }
+    if (RS && RS.termuxSource() === "play" && !flag("playok")) { show("install"); $("playWarn").hidden = false; return; }
+    if (screen === "progress") return;  // setup feed paused between steps; keep showing the last state
+    show(flag("setup") ? "start" : "setup");
+  }
+  window.onAppResume = () => { if (screen !== "starting") check(); };
+
+  // keep watching while setup runs, so the progress screen appears as soon as the command is pasted
+  (async function poll() {
+    for (;;) {
+      await sleep(2000);
+      if (screen !== "setup" && screen !== "progress") continue;
+      const st = await setupStatus();
+      if (st && st.step !== undefined) {
+        showProgress(st);
+        if (st.done) { await waitForEngine(120); }
+      } else if (screen === "progress" && await reachable(PHONE)) {
+        openApp();
+      }
+    }
+  })();
+
+  $("getTermux").onclick = () => RS ? RS.installTermux() : window.open("https://f-droid.org/packages/com.termux/");
+  const copySetup = () => {
+    if (RS) RS.copyAndOpenTermux(CMD); else navigator.clipboard && navigator.clipboard.writeText(CMD);
+    say("Command copied. In Termux: long-press, Paste, Enter.");
+  };
+  $("setupBtn").onclick = copySetup;
+  $("pRetry").onclick = copySetup;
+  $("pTermux").onclick = () => RS && RS.openTermux();
+  $("stTermux").onclick = () => RS && RS.openTermux();
+  $("stSetup").onclick = () => { setFlag("setup", false); show("setup"); };
+  $("redoSetup").onclick = () => { setFlag("setup", false); show("setup"); };
+  $("usePlay").onclick = () => { setFlag("playok", true); show(flag("setup") ? "start" : "setup"); };
+  $("alreadySetUp").onclick = () => { setFlag("setup", true); show("start"); };
   $("start").onclick = () => {
     if (!RS) return say("Open this page inside the Reel Shelf app.");
     RS.rememberPhone();
-    const r = RS.startEngine();
-    if (r === "no-termux") return say("Termux is not installed yet. Follow the setup steps below.");
-    if (r === "permission") return say("Tap Allow, then tap Start Reel Shelf again.");
-    if (r !== "started") return say("Could not start (" + r + "). Open Termux and type: reel-shelf");
-    say("Starting... the first start can take a minute.");
-    waitAndOpen("http://localhost:8765/", 40);
+    onEngineStart(RS.startEngine());
   };
-  $("pc").onclick = () => { const a = $("addr").value.trim(); if (!a) return say("Type the address shown on your PC."); RS ? RS.setServer(a) : (location.href = a); };
-  $("getTermux").onclick = () => RS && RS.installTermux();
-  $("copy").onclick = () => RS ? RS.copy(CMD) : navigator.clipboard.writeText(CMD);
-  if (RS && !RS.hasTermux()) say("Termux is not installed yet. To use Reel Shelf without a PC, follow the setup steps below.");
-  else waitAndOpen(server, 2);
+  $("pc").onclick = () => {
+    const a = $("addr").value.trim();
+    if (!a) return say("Type the address shown on your PC.");
+    RS ? RS.setServer(a) : (location.href = a);
+  };
+  const saved = RS ? RS.server() : PHONE;
+  if (!saved.includes("localhost")) $("addr").value = saved;
+  check();
 </script>
 </body>
 </html>

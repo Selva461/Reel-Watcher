@@ -10,7 +10,9 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 import android.os.Environment;
+import android.provider.Settings;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.URLUtil;
@@ -34,6 +36,7 @@ public class MainActivity extends Activity {
     private static final int FILE_REQUEST = 1;
     private static final int PERMISSION_REQUEST = 2;
     private static final String TERMUX = "com.termux";
+    private static final String RUN_COMMAND = "com.termux.permission.RUN_COMMAND";
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
@@ -186,34 +189,87 @@ public class MainActivity extends Activity {
             openExternal(Uri.parse("https://f-droid.org/packages/com.termux/"));
         }
 
-        /** Starts `reel-shelf --no-open` in Termux's background (needs allow-external-apps, set by the setup script). */
+        /** "play" when Termux came from the Play Store (a different build that cannot be started by other apps), else "ok" or "none". */
+        @JavascriptInterface
+        public String termuxSource() {
+            if (!termuxInstalled()) return "none";
+            try {
+                String installer = Build.VERSION.SDK_INT >= 30
+                        ? getPackageManager().getInstallSourceInfo(TERMUX).getInstallingPackageName()
+                        : getPackageManager().getInstallerPackageName(TERMUX);
+                return "com.android.vending".equals(installer) ? "play" : "ok";
+            } catch (Exception e) {
+                return "ok";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean getFlag(String name) {
+            return prefs.getBoolean("flag_" + name, false);
+        }
+
+        @JavascriptInterface
+        public void setFlag(String name, boolean value) {
+            prefs.edit().putBoolean("flag_" + name, value).apply();
+        }
+
+        /** Copies the setup command and opens Termux, so the user only has to paste. */
+        @JavascriptInterface
+        public void copyAndOpenTermux(String text) {
+            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(ClipData.newPlainText("Reel Shelf", text));
+            runOnUiThread(this::openTermux);
+        }
+
+        @JavascriptInterface
+        public void openAppSettings() {
+            Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()));
+            runOnUiThread(() -> startActivity(i));
+        }
+
+        /**
+         * Starts `reel-shelf --no-open` in Termux's background (needs allow-external-apps, set by the setup script).
+         * Returns started, permission (Android is asking), denied (Android refused), or no-termux.
+         * When it is not "started", the start page opens Termux instead, which starts Reel Shelf by itself.
+         */
         @JavascriptInterface
         public String startEngine() {
             if (!termuxInstalled()) return "no-termux";
-            if (checkSelfPermission("com.termux.permission.RUN_COMMAND") != PackageManager.PERMISSION_GRANTED) {
-                runOnUiThread(() -> requestPermissions(new String[]{"com.termux.permission.RUN_COMMAND"}, PERMISSION_REQUEST));
+            if (checkSelfPermission(RUN_COMMAND) != PackageManager.PERMISSION_GRANTED) {
+                if (prefs.getBoolean("asked", false) && !shouldShowRequestPermissionRationale(RUN_COMMAND)) return "denied";
+                prefs.edit().putBoolean("asked", true).apply();
+                runOnUiThread(() -> requestPermissions(new String[]{RUN_COMMAND}, PERMISSION_REQUEST));
                 return "permission";
             }
-            try {
-                Intent intent = new Intent();
-                intent.setClassName(TERMUX, "com.termux.app.RunCommandService");
-                intent.setAction("com.termux.RUN_COMMAND");
-                intent.putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/reel-shelf");
-                intent.putExtra("com.termux.RUN_COMMAND_ARGUMENTS", new String[]{"--no-open"});
-                intent.putExtra("com.termux.RUN_COMMAND_BACKGROUND", true);
-                startService(intent);
-                return "started";
-            } catch (Exception e) {
-                return "error: " + e.getMessage();
-            }
+            return runInTermux();
         }
+    }
+
+    private String runInTermux() {
+        try {
+            Intent intent = new Intent();
+            intent.setClassName(TERMUX, "com.termux.app.RunCommandService");
+            intent.setAction("com.termux.RUN_COMMAND");
+            intent.putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/reel-shelf");
+            intent.putExtra("com.termux.RUN_COMMAND_ARGUMENTS", new String[]{"--no-open"});
+            intent.putExtra("com.termux.RUN_COMMAND_BACKGROUND", true);
+            startService(intent);
+            return "started";
+        } catch (Exception e) {
+            return "denied";
+        }
+    }
+
+    private void callPage(String js) {
+        runOnUiThread(() -> web.evaluateJavascript(js, null));
     }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         if (requestCode == PERMISSION_REQUEST) {
             boolean ok = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
-            toast(ok ? "Allowed. Tap Start again." : "Without this permission, start Reel Shelf from Termux with: reel-shelf");
+            String r = ok ? runInTermux() : "denied";
+            callPage("window.onEngineStart && onEngineStart('" + r + "')");
         }
     }
 
@@ -237,6 +293,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         web.onResume();
+        callPage("window.onAppResume && onAppResume()");
     }
 
     @Override
