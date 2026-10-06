@@ -2,7 +2,7 @@
 # Reel Shelf on an Android phone, no PC needed. Everything installed here is free.
 # Run inside Termux (from F-Droid):  curl -fsSL <raw url of this file> | bash
 set -u
-REPO="${REEL_SHELF_REPO:-https://github.com/selva461/Reel-Watcher.git}"
+REPO="${REEL_SHELF_REPO:-https://github.com/Selva461/Reel-Watcher.git}"
 BRANCH="${REEL_SHELF_BRANCH:-ccr-d0c0b070-bdpssy}"
 APP="$HOME/Reel-Watcher"
 say() { printf '\n\033[1;33m== %s\033[0m\n' "$1"; }

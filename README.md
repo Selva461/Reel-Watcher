@@ -54,15 +54,14 @@ uv run reel-watcher app --lan            # also usable from your phone on the sa
 2. Open Termux and paste:
 
    ```bash
-   pkg install -y git && git clone -b ccr-d0c0b070-bdpssy https://github.com/selva461/Reel-Watcher.git ~/Reel-Watcher && bash ~/Reel-Watcher/android/termux-setup.sh
+   pkg install -y git && git clone -b ccr-d0c0b070-bdpssy https://github.com/Selva461/Reel-Watcher.git ~/Reel-Watcher && bash ~/Reel-Watcher/android/termux-setup.sh
    ```
 
    It installs Python, FFmpeg, Tesseract (text), whisper.cpp (speech) and a small AI vision model
    (`qwen2.5vl:3b`, about 3 GB), then adds the `reel-shelf` command. It takes 15-30 minutes once.
-   (The repository must be public for this to work without a GitHub login.)
 3. Start it any time with `reel-shelf`, or install the **Reel Shelf APK** and tap **Start Reel Shelf**.
-   The APK is built for free by GitHub Actions on every change and published under the `apk-latest` release
-   of this repository: open the release on your phone, download `ReelShelf.apk`, and allow installing it.
+   The APK is built for free by GitHub Actions on every change. On your phone open
+   https://github.com/Selva461/Reel-Watcher/releases/tag/apk-latest , download `ReelShelf.apk`, and allow installing it.
 4. Android Settings, Apps, Termux, Battery: **Unrestricted**, so scans keep running with the screen off.
 
 Without the APK you can also open http://localhost:8765 in Chrome and choose **Add to Home screen**.
@@ -131,7 +130,7 @@ Open **PowerShell** (Start menu, type "PowerShell", press Enter) and run these o
 winget install --id Git.Git -e        # skip if you already have git
 # close and reopen PowerShell after installing git, then:
 cd $HOME
-git clone https://github.com/selva461/Reel-Watcher.git
+git clone https://github.com/Selva461/Reel-Watcher.git
 cd Reel-Watcher
 git checkout ccr-d0c0b070-bdpssy      # the branch with the Windows version (until it is merged)
 ```

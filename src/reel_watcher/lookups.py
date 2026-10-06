@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-UA = "ReelShelf/0.3 (personal use; https://github.com/selva461/Reel-Watcher)"
+UA = "ReelShelf/0.3 (personal use; https://github.com/Selva461/Reel-Watcher)"
 ANILIST = "https://graphql.anilist.co"
 JIKAN = "https://api.jikan.moe/v4"
 WIKIDATA = "https://www.wikidata.org/w/api.php"
