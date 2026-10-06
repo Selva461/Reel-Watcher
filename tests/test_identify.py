@@ -93,7 +93,7 @@ def test_wikidata_movie(monkeypatch):
     monkeypatch.setattr(lookups, "http", fake_http([(lambda m, u, b: "wikidata" in u, route)]))
     hit = lookups.resolve_name("Parasite", "movie")
     assert hit["ext_key"] == "wikidata:Q61448040" and hit["type"] == "movie" and hit["year"] == 2019
-    assert hit["language"] == "Korean" and hit["genres"] == ["thriller film"]
+    assert hit["language"] == "Korean" and hit["genres"] == ["Thriller"]
 
 
 def test_trace_moe_and_saucenao(monkeypatch):
@@ -101,13 +101,15 @@ def test_trace_moe_and_saucenao(monkeypatch):
         (lambda m, u, b: u.startswith(lookups.TRACE), {"result": [{"anilist": {"id": 101348, "title": {"romaji": "Vinland Saga", "english": "Vinland Saga"}},
                                                                     "episode": 12, "from": 521.4, "similarity": 0.96}]}),
         (lambda m, u, b: u.startswith(lookups.SAUCE), {"header": {"status": 0}, "results": [
-            {"header": {"similarity": "71.2"}, "data": {"source": "Vagabond", "part": "210"}},
-            {"header": {"similarity": "40"}, "data": {"source": "https://x"}}]})]))
+            {"header": {"similarity": "88.0", "index_id": 18}, "data": {"source": "adult index, never used"}},
+            {"header": {"similarity": "71.2", "index_id": 37}, "data": {"source": "Vagabond", "part": "210"}},
+            {"header": {"similarity": "40", "index_id": 37}, "data": {"source": "https://x"}}]})]))
     t = lookups.trace_moe(b"jpg")
     assert t == {"ext_key": "anilist:101348", "anilist_id": 101348, "name": "Vinland Saga", "names": ["Vinland Saga", "Vinland Saga"],
                  "episode": 12, "at_s": 521.4, "score": 0.96}
     assert b"filename=\"frame.jpg\"" in lookups.http.calls[0][2]
-    assert lookups.saucenao(b"jpg") == {"name": "Vagabond", "part": "210", "score": pytest.approx(0.712), "source_url": ""}
+    assert lookups.saucenao(b"jpg") == {"name": "Vagabond", "kind": "manga", "part": "210", "year": None, "imdb": None,
+                                        "score": pytest.approx(0.712), "source_url": ""}
 
 
 def test_quota_errors(monkeypatch):
@@ -119,6 +121,9 @@ def test_quota_errors(monkeypatch):
         lookups.trace_moe(b"x")
     monkeypatch.setattr(lookups, "http", fake_http([(lambda m, u, b: True, {"header": {"status": -2, "message": "Daily Search Limit Exceeded."}})]))
     with pytest.raises(lookups.QuotaExceeded):
+        lookups.saucenao(b"x")
+    monkeypatch.setattr(lookups, "http", fake_http([(lambda m, u, b: True, {"header": {"status": -2, "message": "Search Rate Too High. 4 searches every 30 seconds."}})]))
+    with pytest.raises(lookups.RateLimited):  # a short pause, not a lost day
         lookups.saucenao(b"x")
 
 

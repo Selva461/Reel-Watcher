@@ -106,13 +106,16 @@ def extract_candidates(sources: list[tuple[str, str]]) -> list[dict]:
     found: dict[str, dict] = {}
 
     def add(name, where, weight, evidence):
+        yr = re.search(r"\b(19[2-9]\d|20[0-4]\d)\b", name or "")
         n = clean_name(name, strict=weight < 2)
         if not n:
             return
         k = lookups.norm(n)
         if len(k) < 3:
             return
-        c = found.setdefault(k, {"name": n, "key": k, "score": 0.0, "sources": [], "evidence": evidence.strip()[:200], "_seen": set()})
+        c = found.setdefault(k, {"name": n, "key": k, "score": 0.0, "sources": [], "evidence": evidence.strip()[:200], "_seen": set(), "year": None})
+        if yr and not c["year"]:
+            c["year"] = int(yr.group(1))
         bonus = 1.0 if where == "creator_comment" else 0.0
         if (where, evidence) not in c["_seen"]:
             c["_seen"].add((where, evidence))
@@ -167,14 +170,23 @@ def comment_sources(comments: list[dict], creator: str | None) -> list[tuple[str
 SOURCE_LABEL = {"creator_comment": "comment", "comment": "comment", "text": "text", "speech": "speech", "caption": "caption"}
 
 
+SINGLE_WORD_RISK = 2.5  # one common word ("Dark", "Monster", "Up") needs a labelled clue or several sources
+
+
 def resolve_candidates(cands: list[dict], kind: str = "", resolver=lookups.resolve_name, max_lookups: int = 8,
-                       min_score: float = 1.0) -> list[dict]:
-    """Check the top candidates in the free databases. Returns confirmed titles (deduped by database id)."""
+                       min_score: float = 1.0, language: str | None = None) -> list[dict]:
+    """Check the top candidates in the free databases. Returns titles (deduped by database id), each with
+    confidence 'confirmed', or 'check' when another work with the same name fits almost as well."""
     hint = kind if kind in ("anime", "manga", "movie", "series", "book", "game") else ""
     out: dict[str, dict] = {}
     for c in [c for c in cands if c["score"] >= min_score][:max_lookups]:
+        kw = {}
+        if c.get("year"):
+            kw["year"] = c["year"]
+        if language:
+            kw["language"] = language
         try:
-            hit = resolver(c["name"], hint)
+            hit = resolver(c["name"], hint, **kw)
         except lookups.QuotaExceeded:
             raise
         except Exception:  # noqa: BLE001  one bad lookup must not lose the others
@@ -185,9 +197,17 @@ def resolve_candidates(cands: list[dict], kind: str = "", resolver=lookups.resol
         if prev:
             prev["clue_score"] += c["score"]
             continue
+        weak_word = len(c["name"].split()) == 1 and c["name"].lower() in COMMON_TITLE_WORDS and c["score"] < SINGLE_WORD_RISK
+        sure = not hit.get("ambiguous") and not weak_word
         out[hit["ext_key"]] = {**hit, "source": SOURCE_LABEL.get(c["sources"][0], c["sources"][0]), "evidence": c["evidence"],
-                               "confidence": "confirmed", "clue_score": c["score"], "raw": c["name"]}
+                               "confidence": "confirmed" if sure else "check", "clue_score": c["score"], "raw": c["name"]}
     return sorted(out.values(), key=lambda t: -t["clue_score"])
+
+
+# real titles that are also everyday words: only trusted with a strong clue
+COMMON_TITLE_WORDS = {"dark", "monster", "up", "her", "us", "it", "you", "friends", "lost", "heat", "split", "glass", "run", "crash",
+                      "drive", "home", "family", "love", "life", "gold", "money", "fire", "ice", "rain", "spirit", "vikings",
+                      "lucifer", "god", "hero", "beast", "jailer", "master", "leo", "animal", "fighter", "dangal", "pathaan"}
 
 
 CHAT_RX = re.compile(r"\b(?:delivered|seen|typing|online|last seen|reply|message|whatsapp|imessage|sent)\b|\b\d{1,2}:\d{2}\s?(?:am|pm)?\b", re.I)

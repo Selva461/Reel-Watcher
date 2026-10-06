@@ -53,7 +53,7 @@ class App:
     # ------------------------------------------------------------ settings
 
     def settings(self) -> dict:
-        s = {"online": True, "quote_style": "bold"}
+        s = {"online": True, "quote_style": "bold", "region": "IN"}
         try:
             s.update(json.loads(self.settings_path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
@@ -62,10 +62,12 @@ class App:
 
     def save_settings(self, body: dict) -> dict:
         s = self.settings()
-        s.update({k: v for k, v in body.items() if k in ("online", "quote_style")})
+        s.update({k: v for k, v in body.items() if k in ("online", "quote_style", "region")})
+        s["region"] = re.sub(r"[^A-Z]", "", str(s.get("region") or "IN").upper())[:2] or "IN"
         self.settings_path.write_text(json.dumps(s), encoding="utf-8")
         if self.engine:
             self.engine.online = bool(s["online"])
+            self.engine.region = s["region"]
         return s
 
     # ------------------------------------------------------------ home and collections
@@ -199,9 +201,37 @@ class App:
         self.lib.update_title(tid, **body)
         return self.title(tid)
 
+    def refresh_title(self, tid: int) -> dict:
+        if not self.lib.one("SELECT id FROM titles WHERE id=?", (tid,)):
+            raise ApiError(404, "Title not found")
+        if not self.settings()["online"]:
+            raise ApiError(400, "Turn on online lookups in Settings to fetch details")
+        eng = self.engine or worker.Engine(self.lib)
+        eng.region = self.settings()["region"]
+        eng.ensure_details(tid, force=True)
+        return self.title(tid)
+
+    def switch_find(self, fid: int, ext_key: str) -> dict:
+        """The user picked one of the alternatives ("not this Monster, the 2004 one")."""
+        f = self.lib.find(fid)
+        if not f:
+            raise ApiError(404, "Not found")
+        alt = next((a for a in f["alts"] if a.get("ext_key") == ext_key), None)
+        if not alt:
+            raise ApiError(400, "Pick one of the suggestions")
+        cur = self.lib.one("SELECT ext_key, name, type, year, language FROM titles WHERE id=?", (f["title_id"],)) if f["title_id"] else None
+        tid = self.lib.upsert_title(alt["ext_key"], alt["name"], type=alt.get("type") or "other", year=alt.get("year"), language=alt.get("language") or "")
+        alts = [a for a in f["alts"] if a.get("ext_key") != ext_key]
+        if cur:
+            alts.insert(0, {k: cur[k] for k in ("ext_key", "name", "type", "year", "language")})
+        self.lib.update_find(fid, title_id=tid, alts=json.dumps(alts, ensure_ascii=False))
+        if self.engine and self.settings()["online"]:
+            self.engine.ensure_details(tid)
+        return self.confirm_find(fid)
+
     def check_list(self) -> dict:
         rows = self.lib.q(
-            "SELECT f.id, f.item_id, f.title_id, f.name_raw, f.source, f.evidence, f.detail, t.name, t.type, t.year, i.kind item_kind, "
+            "SELECT f.id, f.item_id, f.title_id, f.name_raw, f.source, f.evidence, f.detail, f.alts, t.name, t.type, t.year, i.kind item_kind, "
             "json_extract(i.meta,'$.thumb') thumb, i.status item_status FROM finds f JOIN items i ON i.id=f.item_id "
             "LEFT JOIN titles t ON t.id=f.title_id WHERE f.kind='title' AND f.confidence='check' ORDER BY f.item_id DESC, f.id")
         return {"finds": rows}
@@ -467,6 +497,16 @@ def _ptitle(app, m, q, body):
     return app.patch_title(int(m["id"]), body or {})
 
 
+@route("POST", r"/api/titles/(?P<id>\d+)/refresh")
+def _refresh(app, m, q, body):
+    return app.refresh_title(int(m["id"]))
+
+
+@route("POST", r"/api/finds/(?P<id>\d+)/switch")
+def _switch(app, m, q, body):
+    return app.switch_find(int(m["id"]), (body or {}).get("ext_key", ""))
+
+
 @route("GET", "/api/check")
 def _check(app, m, q, body):
     return app.check_list()
@@ -712,6 +752,7 @@ def main(argv: list[str] | None = None) -> int:
     app = App(lib, engine)
     if engine:
         engine.online = bool(app.settings()["online"])
+        engine.region = app.settings()["region"]
         engine.start()
     token = secrets.token_urlsafe(12) if a.lan else None
     host = "0.0.0.0" if a.lan else "127.0.0.1"

@@ -17,7 +17,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import gif, identify, lookups, scanner
+from . import details, gif, identify, lookups, scanner
 from .library import Library
 
 BLOCK_RE = re.compile(r"login|rate.?limit|429|401|checkpoint|not available", re.I)
@@ -27,6 +27,20 @@ QUOTE_STYLE_DEFAULT = "bold"
 def tomorrow_ts() -> float:
     t = time.localtime()
     return time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, 0, 5, 0, 0, 0, -1))
+
+
+def next_month_ts() -> float:
+    t = time.localtime()
+    return time.mktime((t.tm_year, t.tm_mon + 1, 1, 0, 30, 0, 0, 0, -1))
+
+
+def days_left_in_month() -> int:
+    t = time.localtime()
+    first_next = time.localtime(next_month_ts())
+    return max(1, int((time.mktime((first_next.tm_year, first_next.tm_mon, 1, 0, 0, 0, 0, 0, -1)) - time.mktime(t)) // 86400) + 1)
+
+
+RETRY_SOON = 120  # seconds to wait after a service asks us to slow down
 
 
 def item_kind(item: dict) -> str:
@@ -50,6 +64,8 @@ class Engine:
         self._vision_lock = threading.Lock()
         self.warnings: list[str] = []
         self.current: dict[str, str] = {}
+        self.region = "IN"  # country for "where to watch" (TMDB, optional)
+        self._trace_cap: tuple[str, int] | None = None
 
     # ------------------------------------------------------------ lifecycle
 
@@ -124,20 +140,53 @@ class Engine:
     # ------------------------------------------------------------ shared helpers
 
     def save_title(self, hit: dict) -> int:
-        return self.lib.upsert_title(hit["ext_key"], hit["name"], type=hit.get("type") or "other", year=hit.get("year"),
-                                     language=hit.get("language") or "", genres=hit.get("genres") or [],
-                                     cover=hit.get("cover") or "", extra=hit.get("extra") or {})
+        tid = self.lib.upsert_title(hit["ext_key"], hit["name"], type=hit.get("type") or "other", year=hit.get("year"),
+                                    language=hit.get("language") or "", genres=hit.get("genres") or [],
+                                    cover=hit.get("cover") or "", extra=hit.get("extra") or {})
+        self.ensure_details(tid)
+        return tid
+
+    def ensure_details(self, tid: int, force: bool = False) -> dict:
+        """Fetch full details once per title (synopsis, status, studio/director, where to watch, related works)."""
+        t = self.lib.one("SELECT * FROM titles WHERE id=?", (tid,))
+        if not t or not self.online or t["ext_key"].startswith("name:"):
+            return {}
+        if t["extra"].get("checked_at") and not force:
+            return t["extra"]
+        d = details.enrich(t, self.region)
+        self.lib.merge_title_extra(tid, d, details.cover_from(d))
+        return d
+
+    def _service_allowed(self, svc: str) -> tuple[bool, float]:
+        """trace.moe gives 100 free searches a MONTH: spread what is left over the remaining days.
+        SauceNAO has a daily allowance. Returns (allowed now, when to retry if not)."""
+        if svc == "trace":
+            day = time.strftime("%Y-%m-%d")
+            if lookups.DAILY_LIMITS.get("trace"):
+                cap = lookups.DAILY_LIMITS["trace"]
+            else:
+                if not self._trace_cap or self._trace_cap[0] != day:
+                    try:
+                        left = lookups.trace_me()["left"]
+                    except (lookups.ServiceError, lookups.RateLimited, KeyError, ValueError):
+                        left = 3 * days_left_in_month()
+                    self._trace_cap = (day, -1 if left <= 0 else max(1, left // days_left_in_month()))
+                cap = self._trace_cap[1]
+                if cap < 0:
+                    return False, next_month_ts()
+            return self.lib.quota_take("trace", cap), tomorrow_ts()
+        return self.lib.quota_take(svc, lookups.DAILY_LIMITS[svc]), tomorrow_ts()
 
     def unverified_title(self, name: str, kind: str) -> int:
         t = kind if kind in ("movie", "series", "anime", "manga", "book", "game") else "other"
         return self.lib.upsert_title("name:" + lookups.norm(name), name, type=t)
 
-    def resolve(self, name: str, kind_hint: str) -> dict | None:
+    def resolve(self, name: str, kind_hint: str, **kw) -> dict | None:
         if not self.online:
             return None
         try:
-            return lookups.resolve_name(name, kind_hint)
-        except (lookups.ServiceError, OSError):
+            return lookups.resolve_name(name, kind_hint, **kw)
+        except (lookups.ServiceError, lookups.RateLimited, OSError):
             return None
 
     def thumb(self, src: Path, item_id: int, prefix: str) -> str:
@@ -199,8 +248,8 @@ class Engine:
             if found:
                 for t in found[:3]:
                     lib.add_find(iid, "title", title_id=self.save_title(t), name_raw=t["raw"], source="text", evidence=t["evidence"],
-                                 confidence="confirmed", score=t.get("score", 1.0))
-                lib.update_item(iid, status="done", stage="")
+                                 confidence=t["confidence"], score=t.get("score", 1.0), alts=t.get("alternatives") or [])
+                lib.update_item(iid, status="done" if any(t["confidence"] == "confirmed" for t in found) else "check", stage="")
                 return
         if "ai" not in meta:  # the guess is shown right away; scene search may replace it later
             lib.update_item(iid, stage="AI looking at the picture")
@@ -217,17 +266,26 @@ class Engine:
         if not self.online:
             lib.update_item(iid, status="check" if guesses else "skipped", stage="", error="" if guesses else "no name found")
             return
-        # scene search: anime (trace.moe) then manga (SauceNAO); skipped when the AI is sure it is a live-action movie/series
-        live_action = guesses and all(g.get("type") in ("movie", "series") for g in guesses)
-        services = [] if live_action or kind in ("movie", "series", "book", "game") else \
-            (["sauce", "trace"] if kind == "manga" else ["trace", "sauce"])
+        # scene search. trace.moe (anime, 100 free a month) is kept for pictures that look like anime;
+        # SauceNAO covers manga panels and also movie/show frames (its IMDb indexes)
+        gtypes = {g.get("type") for g in guesses}
+        live_action = bool(guesses) and gtypes <= {"movie", "series"}
+        if kind in ("book", "game"):
+            services = []
+        elif live_action or kind in ("movie", "series"):
+            services = ["sauce"]
+        elif kind == "manga" or "manga" in gtypes:
+            services = ["sauce", "trace"]
+        else:
+            services = ["trace", "sauce"]
         scene = meta.setdefault("scene", {})
         data = None
         for svc in services:
             if svc in scene:
                 continue
-            if not lib.quota_take(svc, lookups.DAILY_LIMITS[svc]):
-                lib.update_item(iid, status="waiting_quota", next_try_at=tomorrow_ts(), stage="", meta=meta)
+            allowed, retry_at = self._service_allowed(svc)
+            if not allowed:
+                lib.update_item(iid, status="waiting_quota", next_try_at=retry_at, stage="", meta=meta)
                 return
             if data is None:
                 data = self._scene_bytes(path)
@@ -236,7 +294,10 @@ class Engine:
                 res = lookups.trace_moe(data) if svc == "trace" else lookups.saucenao(data)
             except lookups.QuotaExceeded:
                 lib.quota_exhaust(svc)
-                lib.update_item(iid, status="waiting_quota", next_try_at=tomorrow_ts(), stage="", meta=meta)
+                lib.update_item(iid, status="waiting_quota", next_try_at=next_month_ts() if svc == "trace" else tomorrow_ts(), stage="", meta=meta)
+                return
+            except lookups.RateLimited:  # busy or too fast: a short pause, the search was not used up
+                lib.update_item(iid, status="waiting_quota", next_try_at=time.time() + RETRY_SOON, stage="", meta=meta)
                 return
             except (lookups.ServiceError, OSError) as e:
                 res = None
@@ -249,7 +310,7 @@ class Engine:
         lib.update_item(iid, status="check" if guesses else "skipped", stage="", error="" if guesses else "no name found")
 
     def _resolver(self):
-        return lambda name, hint: self.resolve(name, hint)
+        return lambda name, hint, **kw: self.resolve(name, hint, **kw)
 
     @staticmethod
     def _scene_bytes(path: Path) -> bytes:
@@ -267,13 +328,13 @@ class Engine:
     def _accept_scene(self, iid: int, svc: str, res: dict | None) -> bool:
         if not res:
             return False
-        if svc == "trace" and res.get("score", 0) >= 0.87 and res.get("anilist_id"):
+        if svc == "trace" and res.get("score", 0) >= 0.9 and res.get("anilist_id"):  # trace.moe: below 90% is usually wrong
             hit = None
             if self.online:
                 try:
                     hits = lookups.anilist(id_=int(res["anilist_id"]))
                     hit = hits[0] if hits else None
-                except (lookups.ServiceError, OSError, ValueError):
+                except (lookups.ServiceError, lookups.RateLimited, OSError, ValueError):
                     hit = None
             hit = hit or {"ext_key": res["ext_key"], "name": res["name"] or "Unknown anime", "type": "anime"}
             at = res.get("at_s") or 0
@@ -281,9 +342,12 @@ class Engine:
                                              f"at {int(at // 60)}:{int(at % 60):02d}" if at else "") if x)
             self._replace_ai(iid, hit, "scene", detail, f"trace.moe {round(res['score'] * 100)}% match", res["score"])
             return True
-        if svc == "sauce" and res.get("score", 0) >= 0.75:
-            hit = self.resolve(res["name"], "manga") or {"ext_key": "name:" + lookups.norm(res["name"]), "name": res["name"], "type": "manga"}
-            detail = f"Chapter {res['part']}" if res.get("part") else ""
+        if svc == "sauce" and res.get("score", 0) >= 0.8:
+            kind = res.get("kind") or "manga"
+            hit = self.resolve(res["name"], kind, **({"year": res["year"]} if res.get("year") else {})) or \
+                {"ext_key": "name:" + lookups.norm(res["name"]), "name": res["name"], "type": kind, "year": res.get("year")}
+            part = res.get("part") or ""
+            detail = (f"Chapter {part}" if kind == "manga" else f"Episode {part}" if part else "") if part else ""
             self._replace_ai(iid, hit, "scene", detail, f"SauceNAO {round(res['score'] * 100)}% match", res["score"])
             return True
         return False
@@ -340,21 +404,22 @@ class Engine:
         sources += [("text", t) for t in dict.fromkeys(screen) if t]
         sources += identify.comment_sources(comments, meta.get("author"))
         cands = identify.extract_candidates(sources)
+        lang = (rec.get("transcript") or {}).get("language")
         try:
-            found = identify.resolve_candidates(cands, kind, resolver=self._resolver()) if self.online else []
+            found = identify.resolve_candidates(cands, kind, resolver=self._resolver(), language=lang) if self.online else []
         except lookups.QuotaExceeded:
             found = []
         keys = {t["ext_key"] for t in found}
         for t in found:
             self.lib.add_find(iid, "title", title_id=self.save_title(t), name_raw=t["raw"], source=t["source"], evidence=t["evidence"],
-                              confidence="confirmed", score=t.get("score", 1.0))
+                              confidence=t["confidence"], score=t.get("score", 1.0), alts=t.get("alternatives") or [])
         analysis = rec.get("analysis") if isinstance(rec.get("analysis"), dict) else {}
         ai = [t for t in analysis.get("titles") or [] if isinstance(t, dict) and str(t.get("name") or "").strip()]
         ai = [t for t in ai if lookups.norm(str(t["name"])) not in {lookups.norm(f["raw"]) for f in found}]
         n_ai = self.add_ai_guesses(iid, ai[:5], kind, skip_keys=keys)
-        if found:
+        if any(t["confidence"] == "confirmed" for t in found):
             return "done"
-        return "check" if n_ai else "skipped"
+        return "check" if (n_ai or found) else "skipped"
 
     def _reel_quote(self, iid, video, rec, words) -> str:
         screen = [f.get("visual", {}).get("on_screen_text") or "" for f in rec.get("frames") or []]

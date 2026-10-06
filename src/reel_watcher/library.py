@@ -99,6 +99,8 @@ def _row(r: sqlite3.Row | None) -> dict | None:
     if r is None:
         return None
     d = dict(r)
+    if "alts" in d and isinstance(d["alts"], str):
+        d["alts"] = json.loads(d["alts"] or "[]")
     for k in ("meta", "params", "extra"):
         if k in d and isinstance(d[k], str):
             d[k] = json.loads(d[k] or "{}")
@@ -120,6 +122,9 @@ class Library:
         with self.lock:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.executescript(SCHEMA)
+            cols = {r[1] for r in self.db.execute("PRAGMA table_info(finds)")}
+            if "alts" not in cols:  # libraries created before alternatives were stored
+                self.db.execute("ALTER TABLE finds ADD COLUMN alts TEXT DEFAULT '[]'")
             self.db.commit()
 
     # ------------------------------------------------------------ low level
@@ -302,11 +307,21 @@ class Library:
 
     def add_find(self, item_id: int, kind: str, **fields) -> int:
         f = {"title_id": None, "name_raw": "", "quote": "", "source": "", "evidence": "", "confidence": "check",
-             "score": 0.0, "detail": "", "media": "", **fields}
-        return self.x("INSERT INTO finds(item_id, title_id, kind, name_raw, quote, source, evidence, confidence, score, detail, media, created_at) "
-                      "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+             "score": 0.0, "detail": "", "media": "", "alts": [], **fields}
+        return self.x("INSERT INTO finds(item_id, title_id, kind, name_raw, quote, source, evidence, confidence, score, detail, media, alts, created_at) "
+                      "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                       (item_id, f["title_id"], kind, f["name_raw"], f["quote"], f["source"], f["evidence"][:500], f["confidence"],
-                       f["score"], f["detail"], f["media"], time.time()))
+                       f["score"], f["detail"], f["media"], json.dumps(f["alts"], ensure_ascii=False), time.time()))
+
+    def merge_title_extra(self, title_id: int, fields: dict, cover: str = "") -> None:
+        with self.lock:
+            t = self.one("SELECT extra, cover FROM titles WHERE id=?", (title_id,))
+            if not t:
+                return
+            extra = {**(t["extra"] or {}), **fields}
+            self.db.execute("UPDATE titles SET extra=?, cover=? WHERE id=?",
+                            (json.dumps(extra, ensure_ascii=False), t["cover"] or cover, title_id))
+            self.db.commit()
 
     def clear_finds(self, item_id: int) -> None:
         self.x("DELETE FROM finds WHERE item_id=?", (item_id,))

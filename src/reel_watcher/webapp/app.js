@@ -211,32 +211,63 @@ function bindWatchToggles(after) {
   });
 }
 
+function safeUrl(u) { return /^https?:\/\//i.test(String(u || "")) ? String(u) : ""; }
+function extLink(label, url) { const u = safeUrl(url); return u ? `<a class="btn" style="min-height:40px" href="${esc(u)}" target="_blank" rel="noopener">${esc(label)}</a>` : ""; }
+function fact(label, value) { return value ? `<div class="card"><span class="small muted">${esc(label)}</span><br><strong>${esc(value)}</strong></div>` : ""; }
+function timeAgo(ts) { const d = new Date(ts * 1000); return d.toLocaleDateString(undefined, { day: "numeric", month: "short" }); }
+
 async function titleScreen(id) {
   const t = await api(`/api/titles/${id}`);
   const back = history.length > 1 ? "javascript:history.back()" : "#/";
   const ex = t.extra || {};
   const why = t.finds.find((f) => f.evidence)?.evidence || "";
+  const isAnime = t.type === "anime", isManga = t.type === "manga";
+  const scores = [ex.score ? `AniList ${ex.score}%` : "", ex.mal_score ? `MAL ${ex.mal_score}` : "", ex.tvmaze_rating ? `TVmaze ${ex.tvmaze_rating}` : "",
+    ex.tmdb_score ? `TMDB ${Number(ex.tmdb_score).toFixed(1)}` : ""].filter(Boolean).join(" · ");
+  const length = isManga ? [ex.chapters ? ex.chapters + " chapters" : "", ex.volumes ? ex.volumes + " volumes" : ""].filter(Boolean).join(", ")
+    : [ex.seasons ? ex.seasons + " seasons" : "", ex.episodes ? ex.episodes + " episodes" : "", ex.duration_min && t.type === "movie" ? ex.duration_min + " min" : ""].filter(Boolean).join(", ");
+  const people = isManga ? (ex.authors || ex.author || []).join(", ") : isAnime ? (ex.studios || []).join(", ") : (ex.director || []).join(", ");
+  const peopleLabel = isManga ? "Author" : isAnime ? "Studio" : "Director";
+  const watch = (ex.where_to_watch || []).map((w) => extLink(w.site + (w.language ? ` (${w.language})` : ""), w.url)).join("");
+  const regional = (ex.streaming_in_region || []).map((n) => `<span class="tag">${esc(n)}</span>`).join(" ");
+  const cover = safeUrl(t.cover);
   $app.innerHTML = `${header("", back, `<button class="icon-btn" id="fav" aria-label="${t.favorite ? "Remove from favorites" : "Add to favorites"}" aria-pressed="${!!t.favorite}">${ICON.heart(t.favorite)}</button>`)}
-    <div class="row" style="align-items:flex-start">${t.cover ? `<img class="thumb" src="${esc(t.cover)}" alt="">` : ""}
-      <div class="stack" style="gap:8px"><h1>${esc(t.name)}</h1>
-        <div class="row wrap" style="gap:8px">${[t.year, TYPE_LABEL[t.type], t.language, ...(t.genres || []).slice(0, 3), ex.episodes ? ex.episodes + " episodes" : "", ex.chapters ? ex.chapters + " chapters" : ""]
-          .filter(Boolean).map((x) => `<span class="tag">${esc(x)}</span>`).join("")}</div></div></div>
-    <div class="seg" role="group" aria-label="Status">${[["to_watch", "To watch"], ["watching", "Watching"], ["watched", "Watched"]].map(([v, l]) => `<button data-w="${v}" aria-pressed="${t.watch === v}">${l}</button>`).join("")}</div>
+    <div class="row" style="align-items:flex-start">${cover ? `<img class="thumb big" style="width:110px" src="${esc(cover)}" alt="">` : ""}
+      <div class="stack" style="gap:8px"><h1>${esc(t.name)}</h1>${ex.native_title && ex.native_title !== t.name ? `<span class="muted small">${esc(ex.native_title)}</span>` : ""}
+        <div class="row wrap" style="gap:8px">${[t.year, TYPE_LABEL[t.type], t.language, ...(t.genres || []).slice(0, 3)].filter(Boolean).map((x) => `<span class="tag">${esc(x)}</span>`).join("")}</div></div></div>
+    <div class="seg" role="group" aria-label="Status">${[["to_watch", isManga ? "To read" : "To watch"], ["watching", isManga ? "Reading" : "Watching"], ["watched", isManga ? "Read" : "Watched"]].map(([v, l]) => `<button data-w="${v}" aria-pressed="${t.watch === v}">${l}</button>`).join("")}</div>
+    ${ex.synopsis ? `<div class="card stack"><span class="label">Story</span><p id="syn" style="margin:0;white-space:pre-line;line-height:1.5;max-height:7.5em;overflow:hidden">${esc(ex.synopsis)}</p>
+      ${ex.synopsis.length > 260 ? `<button class="btn" style="min-height:36px" id="more">Read more</button>` : ""}</div>` : ""}
+    <div class="grid2">${fact("Status", [ex.status, ex.end_year && ex.status === "Finished" ? `(${t.year || ""}${t.year ? "–" : ""}${ex.end_year})` : ""].filter(Boolean).join(" ")) + fact(isManga ? "Length" : "Length", length)
+      + fact(peopleLabel, people) + fact("Season", ex.season) + fact("Network", ex.network) + fact("Cast", (ex.cast || []).slice(0, 3).join(", "))
+      + fact("Ratings", scores) + fact("Based on", ex.source && ex.source !== "Original" ? ex.source : "")}</div>
+    ${ex.next_episode && ex.next_episode.episode ? `<div class="card small">Episode ${esc(ex.next_episode.episode)} airs ${esc(new Date(ex.next_episode.at * 1000).toLocaleString())}</div>` : ""}
+    ${watch || regional ? `<div class="stack"><h2>${isManga ? "Where to read" : "Where to watch"}</h2>${regional ? `<div class="row wrap" style="gap:6px">${regional}<span class="small muted">in ${esc(ex.region || "")}</span></div>` : ""}
+      <div class="row wrap" style="gap:8px">${watch}${extLink("All options", ex.watch_page)}</div></div>` : ""}
+    ${(ex.related || []).length ? `<div class="stack"><h2>Related</h2>${ex.related.map((r) => `<div class="card row between"><span><strong>${esc(r.name)}</strong><br><span class="small muted">${esc([r.relation, TYPE_LABEL[r.type], r.year].filter(Boolean).join(" · "))}</span></span></div>`).join("")}</div>` : ""}
     ${why ? `<div class="card stack"><span class="label">Why it was saved</span><span>${esc(why)}</span></div>` : ""}
     <div class="stack"><h2>Found in ${t.finds.length} ${t.finds.length === 1 ? "save" : "saves"}</h2>
       ${t.finds.map((f) => `<div class="list-item">${thumb(f.thumb)}<div class="grow stack" style="gap:6px">
         <span class="row wrap" style="gap:6px"><strong>${esc(f.author ? "@" + f.author : f.item_kind === "image" ? "Your screenshot" : "Reel")}</strong>${confTag(f.confidence)}</span>
         ${f.evidence ? `<span class="soft small">${esc(f.evidence)}</span>` : ""}
         <span class="small muted">${esc(SOURCE_LABEL[f.source] || f.source)}${f.detail ? " · " + esc(f.detail) : ""} · ${esc((f.collections || []).join(", "))}</span>
-        <span class="row wrap" style="gap:14px">${f.url ? `<a href="${esc(f.url)}" target="_blank" rel="noopener">Open reel</a>` : ""}
+        ${(f.alts || []).length && f.confidence === "check" ? `<span class="small">Could also be:</span><span class="row wrap" style="gap:6px">${f.alts.map((a) => `<button class="chip" data-switch="${f.id}" data-key="${esc(a.ext_key)}">${esc([a.name, a.year, TYPE_LABEL[a.type]].filter(Boolean).join(" · "))}</button>`).join("")}</span>` : ""}
+        <span class="row wrap" style="gap:14px">${safeUrl(f.url) ? `<a href="${esc(f.url)}" target="_blank" rel="noopener">Open reel</a>` : ""}
           <button class="btn" style="min-height:36px" data-fix="${f.id}">Wrong name?</button>
           ${f.confidence === "check" ? `<button class="btn" style="min-height:36px" data-ok="${f.id}">It is right</button>` : ""}</span>
       </div></div>`).join("")}</div>
+    <div class="row wrap" style="gap:8px">${extLink("AniList", (ex.url || "").includes("anilist") ? ex.url : "")}${extLink("MyAnimeList", ex.mal_url)}${extLink("IMDb", ex.imdb)}${extLink("Wikipedia", ex.wikipedia)}${extLink("TVmaze", ex.tvmaze)}${extLink("Official site", ex.official_site)}${extLink("Wikidata", (ex.url || "").includes("wikidata") ? ex.url : "")}</div>
+    <div class="row between"><span class="small muted">${(ex.sources || []).length ? "Details from " + esc(ex.sources.join(", ")) + (ex.checked_at ? " · " + esc(timeAgo(ex.checked_at)) : "") : "No details fetched yet"}</span>
+      <button class="btn" style="min-height:40px" id="refresh">Refresh details</button></div>
+    ${ex.cross_check ? `<div class="card small" style="background:var(--warn-bg);color:var(--warn-fg)">Check: ${esc(ex.cross_check)}</div>` : ""}
     <label class="field" for="notes">My notes<textarea id="notes" class="input" placeholder="Add a note, e.g. watch with friends">${esc(t.notes || "")}</textarea></label>`;
   bind("[data-w]", "click", async (e, b) => { await api(`/api/titles/${id}`, { method: "PATCH", body: { watch: b.dataset.w } }); titleScreen(id); });
   bind("#fav", "click", async () => { await api(`/api/titles/${id}`, { method: "PATCH", body: { favorite: !t.favorite } }); titleScreen(id); });
+  bind("#more", "click", (e, b) => { document.getElementById("syn").style.maxHeight = "none"; b.remove(); });
+  bind("#refresh", "click", async (e, b) => { b.disabled = true; b.textContent = "Fetching..."; try { await api(`/api/titles/${id}/refresh`, { method: "POST", body: {} }); toast("Details updated"); titleScreen(id); } catch (err) { toast(err.message); b.disabled = false; b.textContent = "Refresh details"; } });
   bind("#notes", "change", async (e, el) => { await api(`/api/titles/${id}`, { method: "PATCH", body: { notes: el.value } }); toast("Note saved"); });
   bind("[data-ok]", "click", async (e, b) => { await api(`/api/finds/${b.dataset.ok}/confirm`, { method: "POST", body: {} }); toast("Confirmed"); titleScreen(id); });
+  bind("[data-switch]", "click", async (e, b) => { const it = await api(`/api/finds/${b.dataset.switch}/switch`, { method: "POST", body: { ext_key: b.dataset.key } }); toast("Changed"); location.hash = `#/t/${it.finds.find((f) => f.id === Number(b.dataset.switch)).title_id}`; });
   bind("[data-fix]", "click", (e, b) => renameDialog(b.dataset.fix, (it) => { const f = it.finds[0]; location.hash = f && f.title_id ? `#/t/${f.title_id}` : "#/"; }));
 }
 
@@ -392,12 +423,14 @@ async function itemScreen(id) {
       <div class="card"><span class="small muted">Match</span><br><strong>${esc(best.evidence && /%/.test(best.evidence) ? best.evidence.match(/\d+%/)[0] : best.confidence === "check" ? "Unsure" : "Strong")}</strong></div></div>` : ""}
     ${statusText && best ? `<span class="small muted">${esc(statusText)}</span>` : ""}
     ${!busy && alts.length ? `<div class="stack"><strong>${alts.length > 1 ? "Not right? Pick another" : "Is this right?"}</strong>
+      ${best && best.alts && best.alts.length && best.confidence === "check" ? `<span class="small">Same name, different work:</span><span class="row wrap" style="gap:6px">${best.alts.map((a) => `<button class="chip" data-switch="${best.id}" data-key="${esc(a.ext_key)}">${esc([a.name, a.year, TYPE_LABEL[a.type]].filter(Boolean).join(" · "))}</button>`).join("")}</span>` : ""}
       ${alts.map((f, n) => `<div class="card row between"><span><strong>${esc(f.name || f.name_raw)}</strong><br><span class="small muted">${esc(TYPE_LABEL[f.type] || "")} · ${esc(CONF[f.confidence][0])}</span></span>
         <button class="btn ${n === 0 ? "primary" : ""}" data-pick="${f.id}">${f.confidence === "check" ? "This one" : "Keep"}</button></div>`).join("")}</div>` : ""}
     ${!busy && it.kind === "image" ? `<button class="btn block" id="fix" ${alts.length ? "" : 'data-new="1"'}>Type the name myself</button>` : ""}
     ${!busy && best && best.title_id ? `<a class="btn primary block" href="#/t/${best.title_id}">Open in my list</a>` : ""}`;
   if (busy) every(1500, () => { if (location.hash === `#/item/${id}`) itemScreen(id); });
   bind("[data-pick]", "click", async (e, b) => { const r = await api(`/api/finds/${b.dataset.pick}/confirm`, { method: "POST", body: {} }); toast("Saved to your list"); location.hash = `#/t/${r.finds[0].title_id}`; });
+  bind("[data-switch]", "click", async (e, b) => { const r = await api(`/api/finds/${b.dataset.switch}/switch`, { method: "POST", body: { ext_key: b.dataset.key } }); toast("Changed"); location.hash = `#/t/${r.finds.find((f) => f.id === Number(b.dataset.switch)).title_id}`; });
   bind("#fix", "click", () => {
     if (alts.length) renameDialog(alts[0].id, (r) => { location.hash = `#/t/${r.finds[0].title_id}`; });
     else toast("Pick one of the guesses first, or wait for the search to finish");
@@ -537,7 +570,11 @@ async function settingsScreen() {
     <div class="card stack"><strong>Use it on your phone</strong>
       <span class="small soft">Phone only: install it on the phone (see README, "Phone without a PC") and open http://localhost:8765.<br>
       With your PC: run <code>reel-watcher app --lan</code> on the PC and scan the QR code it shows. Then use your browser's "Add to Home screen".</span></div>
+    <div class="card"><label class="field" for="region">Your country (for "where to watch")<select class="input" id="region">${[["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"], ["AU", "Australia"], ["SG", "Singapore"], ["MY", "Malaysia"], ["AE", "United Arab Emirates"], ["LK", "Sri Lanka"], ["DE", "Germany"], ["FR", "France"], ["JP", "Japan"]]
+      .map(([v, l]) => `<option value="${v}" ${s.region === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+      <span class="small muted">Streaming services per country need a free TMDB key (see README). Anime streaming links come from AniList without a key.</span></div>
     <a class="btn" href="/api/export.csv">Export everything (CSV)</a>`;
+  bind("#region", "change", async (e, el) => { await api("/api/settings", { method: "POST", body: { region: el.value } }); toast("Country saved"); });
   bind("#online", "click", async (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; await api("/api/settings", { method: "POST", body: { online: on } }); b.setAttribute("aria-checked", on); toast(on ? "Online lookups on" : "Online lookups off"); });
 }
 

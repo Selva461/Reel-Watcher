@@ -53,7 +53,9 @@ def env(tmp_path, monkeypatch):
         calls["ocr"] += 1
         return ocr.get(p.name, "")
     monkeypatch.setattr(study, "ocr_image", fake_ocr)
-    monkeypatch.setattr(lookups, "resolve_name", lambda name, hint="", min_score=0.82: HITS.get(name.lower().split(":")[0].strip()))
+    monkeypatch.setattr(lookups, "resolve_name", lambda name, hint="", min_score=0.82, **kw: HITS.get(name.lower().split(":")[0].strip()))
+    enriched = []
+    monkeypatch.setattr(worker.details, "enrich", lambda t, region="IN": enriched.append(t["name"]) or {"checked_at": 1, "synopsis": "S", "poster": "P"})
     monkeypatch.setattr(lookups, "anilist", lambda search=None, id_=None, media_type=None: [HITS["frieren"]] if id_ == 2 else [])
     trace = {"res": None}
     sauce = {"res": None}
@@ -70,7 +72,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(lookups, "trace_moe", fake_trace)
     monkeypatch.setattr(lookups, "saucenao", fake_sauce)
     monkeypatch.setattr(lookups, "DAILY_LIMITS", {"trace": 5, "sauce": 5})
-    return {"lib": lib, "tmp": tmp_path, "calls": calls, "ocr": ocr, "trace": trace, "sauce": sauce}
+    monkeypatch.setattr(lookups, "trace_me", lambda: {"quota": 100, "used": 0, "left": 100})
+    return {"lib": lib, "tmp": tmp_path, "calls": calls, "ocr": ocr, "trace": trace, "sauce": sauce, "enriched": enriched}
 
 
 def add_image(env, name, seed, collection="Screenshots"):
@@ -145,6 +148,38 @@ def test_quota_wait_keeps_ai_guess_then_resumes(env, monkeypatch):
     assert env["calls"]["trace"] == 1 and env["calls"]["sauce"] == 1
 
 
+def test_trace_monthly_budget_and_busy_signal(env, monkeypatch):
+    lib = env["lib"]
+    monkeypatch.setattr(lookups, "DAILY_LIMITS", {"trace": 0, "sauce": 5})
+    monkeypatch.setattr(lookups, "trace_me", lambda: {"quota": 100, "used": 100, "left": 0})
+    eng = worker.Engine(lib, vision_factory=lambda: FakeVision({"is_media": True, "guesses": [{"name": "Frieren", "type": "anime"}]}))
+    iid = add_image(env, "t1.png", 15)
+    it = run_one(eng)
+    assert it["status"] == "waiting_quota" and it["next_try_at"] >= worker.next_month_ts() - 1  # month used up: wait for next month
+    assert env["calls"]["trace"] == 0
+    monkeypatch.setattr(lookups, "trace_me", lambda: {"quota": 100, "used": 10, "left": 90})
+    eng2 = worker.Engine(lib, vision_factory=lambda: FakeVision({"is_media": True, "guesses": []}))
+    env["trace"]["res"] = lookups.RateLimited("api.trace.moe: HTTP 429")
+    lib.update_item(iid, next_try_at=0)
+    import time as _t
+    it = run_one(eng2)
+    assert it["status"] == "waiting_quota" and it["next_try_at"] - _t.time() < 300  # busy: retry in a couple of minutes
+    assert lib.quota_take("trace", 1000)  # the day was not marked as used up
+
+
+def test_details_fetched_once_per_title(env):
+    iid = add_image(env, "d.png", 16)
+    env["ocr"]["d.png"] = "VINLAND SAGA"
+    eng = worker.Engine(env["lib"], vision_factory=lambda: FakeVision({"is_media": True, "guesses": []}))
+    run_one(eng)
+    iid2 = add_image(env, "d2.png", 17)
+    env["ocr"]["d2.png"] = "VINLAND SAGA"
+    run_one(eng)
+    t = env["lib"].one("SELECT extra, cover FROM titles WHERE name='Vinland Saga'")
+    assert env["enriched"] == ["Vinland Saga"] and t["extra"]["synopsis"] == "S" and t["cover"] == "P"
+    del iid, iid2
+
+
 def test_service_limit_reached_mid_run(env):
     iid = add_image(env, "z.png", 5)
     env["trace"]["res"] = lookups.QuotaExceeded("api.trace.moe: HTTP 402")
@@ -170,12 +205,18 @@ def test_manga_scene_match_and_other_and_live_action(env):
     eng2 = worker.Engine(env["lib"], vision_factory=lambda: FakeVision({"is_media": False, "guesses": []}))
     assert run_one(eng2)["status"] == "other"
 
+    # live action: SauceNAO's movie/show (IMDb) indexes are tried, anime-only trace.moe is not spent
     film = add_image(env, "film.png", 10)
     before = dict(env["calls"])
-    eng3 = worker.Engine(env["lib"], vision_factory=lambda: FakeVision({"is_media": True, "guesses": [{"name": "Parasite", "type": "movie"}]}))
-    assert run_one(eng3)["status"] == "check"
-    assert env["calls"]["trace"] == before["trace"] and env["calls"]["sauce"] == before["sauce"]  # no free scene search for live action
-    assert finds(env["lib"], film)[0]["title"] == "Parasite"
+    env["sauce"]["res"] = {"name": "Parasite", "kind": "movie", "part": "", "year": 2019, "imdb": "tt6751668", "score": 0.86, "source_url": ""}
+    eng3 = worker.Engine(env["lib"], vision_factory=lambda: FakeVision({"is_media": True, "guesses": [{"name": "Dark", "type": "series"}]}))
+    assert run_one(eng3)["status"] == "done"
+    f = finds(env["lib"], film)
+    assert [(x["title"], x["confidence"], x["source"]) for x in f] == [("Parasite", "matched", "scene")]  # the AI guess was replaced
+    assert env["calls"]["trace"] == before["trace"] and env["calls"]["sauce"] == before["sauce"] + 1
+    film2 = add_image(env, "film2.png", 14)
+    env["sauce"]["res"] = None
+    assert run_one(eng3)["status"] == "check" and finds(env["lib"], film2)[0]["source"] == "ai"  # guess kept for you to check
     del meme
 
 

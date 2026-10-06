@@ -68,6 +68,42 @@ uv run reel-watcher app --lan            # also usable from your phone on the sa
 Without the APK you can also open http://localhost:8765 in Chrome and choose **Add to Home screen**.
 On a phone, a reel takes longer than on a PC (a few minutes each); connect your PC with `--lan` for speed.
 
+### How accurate names and details are found
+
+Each name is checked against real databases before it is called **Confirmed**:
+
+| Kind | Name check | Details shown |
+|---|---|---|
+| Anime | AniList, cross-checked with MyAnimeList (Jikan) | story, status, season, episodes, studio, AniList and MAL scores, official streaming links, sequels and the manga it is based on |
+| Manga | AniList, cross-checked with MyAnimeList | story, status, chapters, volumes, author, where to read, the anime adaptation |
+| Series | Wikidata (also searched in the reel's language, e.g. Tamil) | Wikipedia story, cast, TVmaze status, network, seasons, episodes, rating |
+| Movies | Wikidata | Wikipedia story, director, cast, language, runtime, IMDb link |
+
+Same name, different work ("Monster" 2004 vs 2023, "Vikram Vedha" 2017 vs 2022): the year in the reel, its
+type, its language and popularity decide; if two are still too close the find is marked **Check this** and the
+app offers **Could also be** buttons. Single everyday words ("Dark", "Up") need a strong clue before they are confirmed.
+
+Real free limits the app respects (it paces itself and waits instead of failing):
+AniList 30 to 90 requests a minute, Jikan 60 a minute, TVmaze 20 per 10 seconds, SauceNAO 4 per 30 seconds,
+trace.moe **100 screenshot searches a month** (spread over the days left in the month; text in a screenshot is
+always tried first because it costs nothing).
+
+Optional free keys (no payment, just an account), set before starting the app:
+- `SAUCENAO_API_KEY` from saucenao.com: about 200 screenshot searches a day instead of the anonymous allowance.
+- `TMDB_API_KEY` from themoviedb.org (free for personal use): posters and the streaming services in your country.
+
+### Check it against the real services yourself
+
+```powershell
+uv run reel-watcher selftest                                  # every free service, one request each
+uv run reel-watcher selftest --image C:\path\to\screenshot.jpg  # also the screenshot search
+uv run reel-watcher lookup "Vikram Vedha" --type movie --year 2017 --lang ta
+uv run reel-watcher lookup "Vagabond" --type manga
+uv run reel-watcher lookup --image C:\path\to\screenshot.jpg
+```
+
+Add `--json` and paste the output into an issue or a chat if something looks wrong.
+
 ## What you need
 
 - Windows 10 or 11, 64-bit.

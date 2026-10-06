@@ -40,6 +40,13 @@ def build(data_dir: Path | str) -> Library:
     for ext, name, kind, year, lang, genres, extra in TITLES:
         tids[name] = lib.upsert_title(ext, name, type=kind, year=year, language=lang, genres=genres, extra=extra)
     lib.update_title(tids["Parasite"], watch="watched")
+    lib.merge_title_extra(tids["Frieren: Beyond Journey's End"], {
+        "synopsis": "An elf mage outlives the hero party she travelled with and sets out to understand the people she lost.",
+        "status": "Finished", "season": "Fall 2023", "episodes": 28, "studios": ["Madhouse"], "score": 90, "mal_score": 9.3,
+        "where_to_watch": [{"site": "Crunchyroll", "url": "https://www.crunchyroll.com/", "language": None}],
+        "related": [{"relation": "Source", "name": "Frieren", "type": "manga", "year": 2020, "ext_key": "anilist:118586"}],
+        "url": "https://anilist.co/anime/154587", "mal_url": "https://myanimelist.net/anime/52991",
+        "sources": ["AniList", "MyAnimeList"], "checked_at": 1790000000})
     lib.update_title(tids["Frieren: Beyond Journey's End"], favorite=1)
 
     def reel(code, coll, title, source, evidence, lang="en", conf="confirmed", n=0, detail="", author="creator_a"):
@@ -55,7 +62,8 @@ def build(data_dir: Path | str) -> Library:
     reel("DEMO4", "Movies", "Parasite", "caption", "movie name: Parasite", "ko", n=3)
     reel("DEMO5", "Movies", "3 Idiots", "speech", "watch 3 Idiots this weekend", "hi", n=4, author="creator_c")
     reel("DEMO6", "Movies", "Vikram Vedha", "comment", "its Vikram Vedha", "ta", n=5)
-    reel("DEMO7", "Movies", "Dark", "text", "DARK", "en", conf="check", n=6)
+    dark = reel("DEMO7", "Movies", "Dark", "text", "DARK", "en", conf="check", n=6)
+    lib.x("UPDATE finds SET alts=? WHERE item_id=?", ('[{"ext_key": "wikidata:Q1167447", "name": "Dark", "type": "movie", "year": 2005, "language": "English"}]', dark))
     lib.add_item("reel:IDLE1", "reel", "https://www.instagram.com/reel/IDLE1/", ["Movies"], status="idle")
     lib.add_item("reel:IDLE2", "reel", "https://www.instagram.com/reel/IDLE2/", ["Manga"], status="idle")
 

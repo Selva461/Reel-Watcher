@@ -204,6 +204,12 @@ def test_ui_home_collection_and_title(page):
     pg.get_by_text("Frieren: Beyond Journey's End").click()
     pg.get_by_role("heading", name="Frieren: Beyond Journey's End").wait_for()
     assert pg.get_by_text("28 episodes").is_visible() and pg.get_by_text("Number one has to be Frieren").first.is_visible()
+    assert pg.get_by_text("An elf mage outlives").is_visible() and pg.get_by_text("Madhouse").is_visible()
+    assert pg.get_by_text("AniList 90% · MAL 9.3").is_visible() and pg.get_by_text("Details from AniList, MyAnimeList").is_visible()
+    assert pg.get_by_role("link", name="Crunchyroll").get_attribute("href") == "https://www.crunchyroll.com/"
+    assert pg.get_by_text("Source · Manga · 2020").is_visible() and pg.get_by_role("link", name="MyAnimeList").count() == 1
+    pg.get_by_role("button", name="Refresh details").click()
+    pg.get_by_text("Turn on online lookups in Settings to fetch details").wait_for()  # tests run offline
     pg.get_by_role("button", name="Watching").click()
     pg.wait_for_selector('[data-w="watching"][aria-pressed="true"]')
     pg.get_by_role("button", name="Remove from favorites").click()
@@ -277,6 +283,19 @@ def test_ui_motivation_gif_styles_and_actions(page):
     no_side_scroll(pg)
 
 
+def test_ui_same_name_switch(page):
+    pg = page
+    tid = pg.running["lib"].one("SELECT title_id FROM finds WHERE name_raw='Dark'")["title_id"]
+    pg.goto(pg.running["base"] + f"/#/t/{tid}")
+    pg.get_by_text("Could also be:").wait_for()
+    pg.get_by_role("button", name="Dark · 2005 · Movie").click()
+    pg.get_by_text("Changed").wait_for()
+    pg.get_by_role("heading", name="Dark").wait_for()
+    assert pg.get_by_text("2005").first.is_visible()
+    f = pg.running["lib"].one("SELECT f.confidence, f.alts, t.ext_key FROM finds f JOIN titles t ON t.id=f.title_id WHERE f.name_raw='Dark'")
+    assert f["ext_key"] == "wikidata:Q1167447" and f["confidence"] == "confirmed" and f["alts"][0]["year"] == 2017  # the old pick became the alternative
+
+
 def test_ui_check_identify_and_read(page):
     pg = page
     pg.get_by_text("2 unsure guesses to confirm").click()
@@ -290,6 +309,11 @@ def test_ui_check_identify_and_read(page):
     pg.select_option("#rt", "series")
     pg.get_by_role("button", name="Save").click()
     pg.get_by_text("Nothing to check. Nice.").wait_for()
+    pg.goto(pg.running["base"] + "/#/settings")
+    pg.select_option("#region", "US")
+    pg.get_by_text("Country saved").wait_for()
+    assert pg.running["app"].settings()["region"] == "US"
+    pg.goto(pg.running["base"] + "/#/")
 
     pg.locator("nav.tabs").get_by_text("Identify").click()
     pg.get_by_role("tab", name="Reel link").click()
