@@ -1,0 +1,10 @@
+{
+  "name": "Reel Shelf",
+  "short_name": "Reel Shelf",
+  "description": "Your saved reels and screenshots, turned into lists of titles and motivation clips.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#15161A",
+  "theme_color": "#15161A",
+  "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}]
+}

@@ -8,6 +8,7 @@ USAGE = """usage: reel-watcher <command> [options]
 commands:
   export   convert an Instagram data export (saved_posts.json) into a URL list
   study    fetch (Apify) and analyze saved reels locally; --local analyzes mp4 files; dry run by default
+  app      run the Reel Shelf app: phone UI, collections, search, screenshots, background jobs
   advice   render an advice library JSON to a static HTML page (optional)
 
 Run `reel-watcher <command> --help` for options."""
@@ -27,6 +28,8 @@ def main() -> int:
         from .study import main as run
     elif cmd == "export":
         from .ig_export import main as run
+    elif cmd == "app":
+        from .server import main as run
     elif cmd == "advice":
         from .advice_library import main as run
     else:
