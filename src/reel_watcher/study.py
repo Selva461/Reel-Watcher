@@ -110,10 +110,11 @@ YTDLP_MAX_BLOCKED = 3  # consecutive blocked downloads before the run stops
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 
-def ytdlp_download(url: str, work: Path) -> dict:
-    """Download one post with yt-dlp (no login, no cookies). Returns the yt-dlp info dict."""
+def ytdlp_download(url: str, work: Path, comments: bool = False) -> dict:
+    """Download one post with yt-dlp (no login, no cookies). Returns the yt-dlp info dict.
+    comments=True also fetches the first page of comments Instagram shows without login (info["comments"])."""
     from yt_dlp import YoutubeDL
-    opts = {"outtmpl": str(work / "%(id)s_%(autonumber)02d.%(ext)s"), "format": "bv*+ba/b", "merge_output_format": "mp4",
+    opts = {"getcomments": comments, "outtmpl": str(work / "%(id)s_%(autonumber)02d.%(ext)s"), "format": "bv*+ba/b", "merge_output_format": "mp4",
             "quiet": True, "no_warnings": True, "noprogress": True, "retries": 3, "socket_timeout": 60}
     with YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=True) or {}
@@ -142,13 +143,13 @@ def ytdlp_meta(info: dict) -> dict:
     }
 
 
-def prepare_ytdlp(item: dict, work_parent: Path) -> dict:
+def prepare_ytdlp(item: dict, work_parent: Path, comments: bool = False) -> dict:
     """Download one item into work_parent/<code>/. Returns a prepared unit (same shape as the Apify route)."""
     work = work_parent / item["code"]
     shutil.rmtree(work, ignore_errors=True)  # never pick up files from an earlier attempt
     work.mkdir(parents=True, exist_ok=True)
     try:
-        info = ytdlp_download(item["url"], work)
+        info = ytdlp_download(item["url"], work, comments) if comments else ytdlp_download(item["url"], work)
     except Exception as e:  # noqa: BLE001  (yt-dlp DownloadError and friends)
         shutil.rmtree(work, ignore_errors=True)
         msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e))
@@ -157,7 +158,9 @@ def prepare_ytdlp(item: dict, work_parent: Path) -> dict:
     if not vids:
         shutil.rmtree(work, ignore_errors=True)
         return {"item": item, "error": "ytdlp_no_video: image-only posts cannot be downloaded for free; skipped"}
-    return {"item": {**item, "kind": "reel"}, "meta": ytdlp_meta(info), "work": work, "media": vids[:1]}
+    cm = [{"author": c.get("author"), "text": c.get("text"), "likes": c.get("like_count")} for c in (info.get("comments") or [])
+          if isinstance(c, dict) and c.get("text")]
+    return {"item": {**item, "kind": "reel"}, "meta": ytdlp_meta(info), "work": work, "media": vids[:1], "comments": cm[:60]}
 
 
 def ytdlp_producer(todo, q, stop, work_parent, sleep_s):
@@ -424,7 +427,9 @@ Return ONLY a JSON object with keys:
 "why_it_works": one line
 "workflow": {{"tool": "", "technique": "", "setup_steps": []}} (concrete AI tool, technique or setup being shown; leave empty strings if the post is not about a tool or workflow)
 "cta_asset": {{"offered": true or false, "word": "the WORD to comment, or \"\"", "asset_type": "repo|prompt library|template|guide|course|tool access|free trial|other|\"\"", "what_it_is": "what the viewer receives, as specific as the post allows", "delivery": "DM|link in bio|link in caption|other|\"\"", "value_for_viewer": "high|medium|low", "why": "why it would or would not be useful to the viewer"}} (offered=true whenever the post promises an external asset, repo, prompt pack, template or resource in exchange for commenting, DMing, or a link)
-"takeaway": {{"relevant": true or false, "area": "short topic label", "insight": "what this implies for how the viewer could work, beyond content", "action": "one concrete thing to try, install or change"}}"""
+"takeaway": {{"relevant": true or false, "area": "short topic label", "insight": "what this implies for how the viewer could work, beyond content", "action": "one concrete thing to try, install or change"}}
+"titles": list of {{"name": "official title", "type": "movie|series|anime|manga|book|game", "year": number or null, "evidence": "where it is named or shown"}} for every movie, series, anime, manga, book or game the post names, shows or recommends; [] if none. Use only names that are spoken, written or clearly recognisable; never invent one
+"motivational_quote": {{"text": "the single most motivating sentence, word for word as spoken or shown", "start_s": seconds, "end_s": seconds}} or null if there is none"""
 
 
 # ---------------------------------------------------------------- turbo: OCR + dedupe + one contact-sheet VLM call
