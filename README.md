@@ -1,4 +1,4 @@
-# reel-watcher (Windows edition)
+# Reel Shelf (reel-watcher, Windows + Android edition)
 
 A Windows port of [jakeb144/reel-watcher](https://github.com/jakeb144/reel-watcher) by Jacob Bruce
 ([Instagram](https://www.instagram.com/itsjakebruce/)). The original runs only on Apple Silicon Macs (MLX + Apple Vision);
@@ -21,13 +21,61 @@ tricks, any "comment WORD and I'll send you X" giveaway, and a one-line verdict 
 one searchable JSON file per reel. Everything except the media download runs on your machine, and nothing costs money:
 no account, no API key, no credit card.
 
+## Reel Shelf: the app
+
+`reel-watcher app` is a phone-friendly app on top of the reel reader. Everything in it is free.
+
+- **Collections, read one by one.** Import Instagram's data ZIP; every collection (Movies, Series, Anime, Manga,
+  Motivation, ...) shows up separately. Tap **Read this collection** to process it in the background.
+- **Names, not just notes.** For title collections it lists every movie, series, anime, manga, book or game a reel
+  mentions: from on-screen text, speech, the caption and the **comments** (creator's comments and repeated answers
+  count most). Names are checked in AniList and Wikidata, so you get the official title, year, original language and genres.
+- **Screenshots too.** Pick one screenshot, or **scan whole folders** (thousands of images) in the background.
+  Text in the image is read first; images with no readable name use free scene search (trace.moe for anime,
+  SauceNAO for manga). The AI's guess is shown right away, marked **Check this**, until something confirms it.
+- **Motivation clips.** For motivation/quote collections it cuts the motivating line out of the reel as a GIF with
+  word-by-word captions (Bold, Clean or Typewriter) or as a short video with sound. Save, share or copy the text.
+- **Search with filters.** Title, creator or genre; title language, the language spoken in the reel, type, genre,
+  status (to watch, watching, watched, favorites), found from (reel, screenshot, comment), confidence, collection, year, sort.
+- **Background jobs.** Reels and screenshot folders are processed side by side, survive closing the app or a restart,
+  and wait politely when a free service's daily limit is reached (they continue the next day by themselves).
+
+### Run the app on your PC
+
+```powershell
+uv run reel-watcher app --open           # opens http://localhost:8765
+uv run reel-watcher app --demo --open    # try it first with sample data
+uv run reel-watcher app --lan            # also usable from your phone on the same Wi-Fi: scan the QR code it prints
+```
+
+### Run it on an Android phone, no PC needed
+
+1. Install **Termux** from F-Droid (free): https://f-droid.org/packages/com.termux/
+2. Open Termux and paste:
+
+   ```bash
+   pkg install -y git && git clone -b ccr-d0c0b070-bdpssy https://github.com/selva461/Reel-Watcher.git ~/Reel-Watcher && bash ~/Reel-Watcher/android/termux-setup.sh
+   ```
+
+   It installs Python, FFmpeg, Tesseract (text), whisper.cpp (speech) and a small AI vision model
+   (`qwen2.5vl:3b`, about 3 GB), then adds the `reel-shelf` command. It takes 15-30 minutes once.
+   (The repository must be public for this to work without a GitHub login.)
+3. Start it any time with `reel-shelf`, or install the **Reel Shelf APK** and tap **Start Reel Shelf**.
+   The APK is built for free by GitHub Actions on every change and published under the `apk-latest` release
+   of this repository: open the release on your phone, download `ReelShelf.apk`, and allow installing it.
+4. Android Settings, Apps, Termux, Battery: **Unrestricted**, so scans keep running with the screen off.
+
+Without the APK you can also open http://localhost:8765 in Chrome and choose **Add to Home screen**.
+On a phone, a reel takes longer than on a PC (a few minutes each); connect your PC with `--lan` for speed.
+
 ## What you need
 
 - Windows 10 or 11, 64-bit.
-- RAM decides the model. `--model-size auto` (default) picks `small` below 32 GB and `large` otherwise.
+- RAM decides the model. `--model-size auto` (default) picks `phone` below 12 GB, `small` below 32 GB and `large` otherwise.
 
   | PC RAM | Setting | Vision model (Ollama) | Whisper | First download |
   |---|---|---|---|---|
+  | 8 GB (and phones) | `phone` | `qwen2.5vl:3b` | `base` | about 3 GB |
   | 16 GB | `small` | `qwen2.5vl:7b` | `small` | about 7 GB |
   | 32 GB or more | `large` | `qwen3-vl:30b` | `large-v3-turbo` | about 21 GB |
 

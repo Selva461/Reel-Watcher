@@ -37,8 +37,17 @@ uv run reel-watcher study --input urls.tsv --out-root .\out --run --limit 3    #
 | `media.py` | ffprobe/ffmpeg helpers, scene cuts, Instagram URL parsing, preflight |
 | `ig_export.py` | Instagram data-export (saved_posts JSON/HTML) to URL list |
 | `advice_library.py` | Optional renderer: advice library JSON to one static HTML page |
+| `library.py` | Reel Shelf SQLite library: items, collections, titles, finds, jobs, free-service quotas |
+| `identify.py` | Title clues from text/speech/caption/comments, database checks, AI image guesses |
+| `lookups.py` | Free services: AniList, Wikidata, trace.moe, SauceNAO (network faked in tests) |
+| `scanner.py` | Folder scanning with duplicate detection |
+| `worker.py` | Background engine: reels and screenshots in parallel, resumable |
+| `gif.py` | Motivation clips: quote span, ASS captions, GIF/MP4 via ffmpeg |
+| `server.py`, `webapp/` | `reel-watcher app`: JSON API + phone UI (plain JS, no build step) |
+| `demo.py` | Sample library for `--demo` and UI tests |
+| `android/` | Termux setup scripts and the Android APK shell (built by GitHub Actions) |
 
-Tests live in `tests/`; they use no network and no models (Ollama, OCR and whisper are faked).
+Tests live in `tests/`; they use no network and no models (Ollama, OCR and whisper are faked). `tests/test_app.py` drives the UI in Chromium at phone size.
 
 ## Extend
 
