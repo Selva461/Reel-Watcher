@@ -602,9 +602,35 @@ async function settingsScreen() {
     <div class="card"><label class="field" for="region">Your country (for "where to watch")<select class="input" id="region">${[["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"], ["AU", "Australia"], ["SG", "Singapore"], ["MY", "Malaysia"], ["AE", "United Arab Emirates"], ["LK", "Sri Lanka"], ["DE", "Germany"], ["FR", "France"], ["JP", "Japan"]]
       .map(([v, l]) => `<option value="${v}" ${s.region === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
       <span class="small muted">Streaming services per country need a free TMDB key (see README). Anime streaming links come from AniList without a key.</span></div>
-    <a class="btn" href="/api/export.csv">Export everything (CSV)</a>`;
+    <a class="btn" href="/api/export.csv">Export everything (CSV)</a>
+    <div class="card stack" id="ver"><strong>Version</strong><span class="small muted">Checking...</span></div>`;
+  versionCard();
   bind("#region", "change", async (e, el) => { await api("/api/settings", { method: "POST", body: { region: el.value } }); toast("Country saved"); });
   bind("#online", "click", async (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; await api("/api/settings", { method: "POST", body: { online: on } }); b.setAttribute("aria-checked", on); toast(on ? "Online lookups on" : "Online lookups off"); });
+}
+
+async function versionCard() {
+  const box = document.getElementById("ver");
+  if (!box) return;
+  let v;
+  try { v = await api("/api/version"); } catch (err) { box.innerHTML = `<strong>Version</strong><span class="small muted">${esc(err.message)}</span>`; return; }
+  box.innerHTML = `<strong>Version</strong><span class="small soft">${esc(v.version)}${v.date ? " · " + esc(v.date) : ""}</span>
+    ${v.can_update ? `<button class="btn" id="upd">Update now</button>` : `<span class="small muted">Updates: run the setup command again.</span>`}
+    ${v.warnings.length ? `<span class="small muted">Recent problems:<br>${v.warnings.map(esc).join("<br>")}</span>` : ""}`;
+  bind("#upd", "click", async (e, b) => {
+    b.disabled = true;
+    b.textContent = "Downloading the latest version...";
+    try {
+      const r = await api("/api/update", { method: "POST", body: {} });
+      if (!r.updated) { toast("Already up to date"); b.textContent = "Up to date"; return; }
+      b.textContent = "Restarting...";
+      for (let i = 0; i < 40; i++) {
+        await new Promise((ok) => setTimeout(ok, 1500));
+        try { const n = await api("/api/version"); if (n.version === r.version) { location.reload(); return; } } catch (err) { /* still restarting */ }
+      }
+      b.textContent = "Restart is taking long: open Termux";
+    } catch (err) { toast(err.message); b.disabled = false; b.textContent = "Update now"; }
+  });
 }
 
 // ------------------------------------------------------------------ router

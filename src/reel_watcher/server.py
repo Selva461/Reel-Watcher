@@ -18,6 +18,7 @@ import secrets
 import socket
 import sys
 import threading
+import time
 import urllib.parse
 import webbrowser
 import zipfile
@@ -30,6 +31,7 @@ from .library import Library
 
 WEB = Path(__file__).with_name("webapp")
 QUICK_JOB = "Quick identify"
+REPO_DIR = Path(__file__).resolve().parents[2]  # the git checkout the app runs from (installed in place)
 LANG_CODES = {"English": "en", "Hindi": "hi", "Tamil": "ta", "Telugu": "te", "Malayalam": "ml", "Kannada": "kn", "Japanese": "ja",
               "Korean": "ko", "Spanish": "es", "French": "fr", "German": "de", "Chinese": "zh", "Portuguese": "pt", "Arabic": "ar"}
 CONF_RANK = "MIN(CASE f.confidence WHEN 'confirmed' THEN 0 WHEN 'matched' THEN 1 ELSE 2 END)"
@@ -49,6 +51,43 @@ class App:
         self.lib = lib
         self.engine = engine
         self.settings_path = lib.dir / "settings.json"
+        self.repo = REPO_DIR if (REPO_DIR / ".git").exists() else None
+        self.restart = None  # set by main(): replaces this process with a fresh one after an update
+
+    # ------------------------------------------------------------ version and self-update
+
+    def _git(self, *args, timeout: float = 20) -> str:
+        import subprocess
+        r = subprocess.run(["git", "-C", str(self.repo), *args], capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            raise ApiError(502, "Update failed: " + ((r.stderr or r.stdout).strip().splitlines() or ["git error"])[-1][:200])
+        return r.stdout.strip()
+
+    def version(self) -> dict:
+        out = {"version": "unknown", "date": "", "can_update": bool(self.repo and self.restart), "warnings": []}
+        if self.engine:
+            out["warnings"] = list(dict.fromkeys(self.engine.warnings))[-5:]
+        if self.repo:
+            try:
+                out["version"], out["date"] = self._git("log", "-1", "--format=%h|%cd", "--date=format:%d %b %Y %H:%M").split("|")
+            except (ApiError, OSError, ValueError):
+                pass
+        return out
+
+    def update(self) -> dict:
+        """Download the latest code (git pull) and restart into it. Library and settings are kept."""
+        if not self.repo or not self.restart:
+            raise ApiError(400, "This copy cannot update itself. Reinstall it with the setup command.")
+        before = self._git("rev-parse", "--short", "HEAD")
+        try:
+            self._git("pull", "--ff-only", timeout=120)
+        except OSError as e:
+            raise ApiError(502, f"Update failed: {e}") from e
+        after = self._git("rev-parse", "--short", "HEAD")
+        if after == before:
+            return {"updated": False, "version": after}
+        self.restart()
+        return {"updated": True, "from": before, "version": after}
 
     # ------------------------------------------------------------ settings
 
@@ -504,6 +543,16 @@ def _home(app, m, q, body):
     return app.home()
 
 
+@route("GET", "/api/version")
+def _version(app, m, q, body):
+    return app.version()
+
+
+@route("POST", "/api/update")
+def _update(app, m, q, body):
+    return app.update()
+
+
 @route("GET", "/api/collections")
 def _cols(app, m, q, body):
     return {"collections": app.collections()}
@@ -810,6 +859,14 @@ def main(argv: list[str] | None = None) -> int:
         engine.online = bool(app.settings()["online"])
         engine.region = app.settings()["region"]
         engine.start()
+    def restart():
+        def later():
+            time.sleep(1.0)  # let the answer reach the phone first
+            if engine:
+                engine.stop(3)
+            os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])  # half-done items are re-queued on start
+        threading.Thread(target=later, daemon=True).start()
+    app.restart = restart
     token = secrets.token_urlsafe(12) if a.lan else None
     host = "0.0.0.0" if a.lan else "127.0.0.1"
     srv = make_server(app, host, a.port, token)

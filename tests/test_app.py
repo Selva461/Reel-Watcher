@@ -444,4 +444,34 @@ def test_ui_import_and_settings(page):
     sw.click()
     pg.get_by_text("Online lookups on").wait_for()
     assert pg.running["app"].settings()["online"] is True
+    pg.get_by_text("Updates: run the setup command again.").wait_for()  # test server has no restart hook
     assert Path(pg.running["lib"].dir / "settings.json").exists()
+
+
+def test_api_version_and_self_update(tmp_path, monkeypatch):
+    import subprocess
+    for k, v in {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}.items():
+        monkeypatch.setenv(k, v)
+    git = lambda *a: subprocess.run(["git", *a], check=True, capture_output=True, text=True).stdout.strip()
+    git("init", "-q", "--bare", str(tmp_path / "up.git"))
+    git("clone", "-q", str(tmp_path / "up.git"), str(tmp_path / "dev"))
+    (tmp_path / "dev" / "f.txt").write_text("1", encoding="utf-8")
+    git("-C", str(tmp_path / "dev"), "add", "f.txt")
+    git("-C", str(tmp_path / "dev"), "commit", "-qm", "one")
+    git("-C", str(tmp_path / "dev"), "push", "-q", "origin", "HEAD")
+    git("clone", "-q", str(tmp_path / "up.git"), str(tmp_path / "phone"))
+    app = server.App(demo.build(tmp_path / "lib"))
+    assert app.version()["can_update"] is False  # no restart hook: not running as the app
+    app.repo, restarts = tmp_path / "phone", []
+    app.restart = lambda: restarts.append(1)
+    v = app.version()
+    assert v["can_update"] and v["version"] == git("-C", str(tmp_path / "phone"), "rev-parse", "--short", "HEAD")
+    assert app.update() == {"updated": False, "version": v["version"]} and not restarts
+    (tmp_path / "dev" / "f.txt").write_text("2", encoding="utf-8")
+    git("-C", str(tmp_path / "dev"), "commit", "-qam", "two")
+    git("-C", str(tmp_path / "dev"), "push", "-q", "origin", "HEAD")
+    r = app.update()
+    assert r["updated"] and r["from"] == v["version"] and r["version"] != v["version"] and restarts == [1]
+    (tmp_path / "up.git").rename(tmp_path / "gone.git")  # no connection to the server
+    with pytest.raises(server.ApiError, match="Update failed"):
+        app.update()
