@@ -428,7 +428,8 @@ async function itemScreen(id) {
   const at = steps.findIndex(([k]) => k === it.stage);
   const best = it.finds[0];
   const alts = it.finds.filter((f) => f.kind === "title");
-  const statusText = { waiting_quota: "Waiting for the free search limit; it continues automatically", other: "This does not look like a movie, show, anime or manga", skipped: it.error || "No name found",
+  const statusText = { waiting_quota: it.kind === "reel" ? "Instagram is limiting downloads for now; it continues automatically"
+    : "Waiting for the free search limit; it continues automatically", other: "This does not look like a movie, show, anime or manga", skipped: it.error || "No name found",
     failed: it.error || "Something went wrong", duplicate: "Same picture as one you already have" }[it.status];
   $app.innerHTML = `${header(busy ? "Identifying..." : best ? "Match found" : "No match yet", "#/identify")}
     <div class="row" style="align-items:flex-start">${thumb(it.meta.thumb, "thumb big")}
@@ -603,10 +604,30 @@ async function settingsScreen() {
       .map(([v, l]) => `<option value="${v}" ${s.region === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
       <span class="small muted">Streaming services per country need a free TMDB key (see README). Anime streaming links come from AniList without a key.</span></div>
     <a class="btn" href="/api/export.csv">Export everything (CSV)</a>
-    <div class="card stack" id="ver"><strong>Version</strong><span class="small muted">Checking...</span></div>`;
+    <div class="card stack" id="ver"><strong>Version</strong><span class="small muted">Checking...</span></div>
+    <div class="card stack"><strong>Self-check</strong><span class="small muted">Tries every feature on this device for real: text reader, speech, AI model, web search, databases. Takes 1 to 3 minutes.</span>
+      <button class="btn" id="chk">Run self-check</button><div class="stack" id="chkout" style="gap:6px"></div></div>`;
   versionCard();
+  showCheck(await api("/api/selfcheck"));
+  bind("#chk", "click", async () => { showCheck(await api("/api/selfcheck", { method: "POST", body: {} })); });
   bind("#region", "change", async (e, el) => { await api("/api/settings", { method: "POST", body: { region: el.value } }); toast("Country saved"); });
   bind("#online", "click", async (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; await api("/api/settings", { method: "POST", body: { online: on } }); b.setAttribute("aria-checked", on); toast(on ? "Online lookups on" : "Online lookups off"); });
+}
+
+function showCheck(st) {
+  const out = document.getElementById("chkout");
+  const btn = document.getElementById("chk");
+  if (!out || !btn) return;
+  const rows = st.rows || [];
+  btn.disabled = !!st.running;
+  btn.textContent = st.running ? "Checking..." : rows.length ? "Run self-check again" : "Run self-check";
+  const passed = rows.filter((r) => r.ok).length;
+  out.innerHTML = (rows.length && !st.running ? `<strong>${passed} of ${rows.length} passed</strong>` : "") +
+    rows.map((r) => `<div class="row" style="align-items:flex-start;gap:8px"><span aria-hidden="true">${r.ok ? "✓" : "✗"}</span>
+      <span><strong>${esc(r.name)}</strong> <span class="small muted">${r.ok ? "PASS" : "FAIL"}</span><br><span class="small muted">${esc(r.detail)}</span>
+      ${r.hint ? `<br><span class="small">${esc(r.hint)}</span>` : ""}</span></div>`).join("") +
+    (st.running ? `<span class="small muted">Now: ${esc(st.current || "starting")}...</span>` : "");
+  if (st.running) setTimeout(async () => { if (location.hash === "#/settings") showCheck(await api("/api/selfcheck")); }, 1500);
 }
 
 async function versionCard() {

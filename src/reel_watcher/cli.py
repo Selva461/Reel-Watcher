@@ -10,7 +10,8 @@ commands:
   study    fetch (Apify) and analyze saved reels locally; --local analyzes mp4 files; dry run by default
   app      run the Reel Shelf app: phone UI, collections, search, screenshots, background jobs
   lookup   check a name or screenshot against the live free databases (what the app would pick, with details)
-  selftest check that every free service is reachable from this device
+  check    test every feature on this device for real (text reader, speech, AI model, web search, databases)
+  selftest check that every free service is reachable from this device (raw answers)
   advice   render an advice library JSON to a static HTML page (optional)
 
 Run `reel-watcher <command> --help` for options."""
@@ -32,6 +33,8 @@ def main() -> int:
         from .ig_export import main as run
     elif cmd == "app":
         from .server import main as run
+    elif cmd == "check":
+        from .checks import main as run
     elif cmd in ("lookup", "selftest"):
         from .verify import main as verify_main
         return verify_main([cmd, *rest])

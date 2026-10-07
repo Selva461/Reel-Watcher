@@ -75,6 +75,15 @@ A newer APK is signed differently, so uninstall the old Reel Shelf app before in
 Without the APK you can also open http://localhost:8765 in Chrome and choose **Add to Home screen**.
 On a phone, a reel takes longer than on a PC (a few minutes each); connect your PC with `--lan` for speed.
 
+### Testing and security
+
+- **Settings > Self-check** (or `reel-watcher check`) tries every feature on your device for real and says what to
+  fix. **Settings > Update now** installs the latest fixes.
+- [TESTING.md](TESTING.md): step-by-step test cases with the expected result for each, to check on your phone.
+- Security: the app only answers this device (or, with `--lan`, devices that have the access code), refuses
+  requests made by other web sites, shows all outside text as text, and stays inside your storage folders.
+  Dependencies are scanned for known vulnerabilities on every change and weekly.
+
 ### How accurate names and details are found
 
 Each name is checked against real databases before it is called **Confirmed**:

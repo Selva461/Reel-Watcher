@@ -78,6 +78,27 @@ class App:
                 pass
         return out
 
+    def start_check(self) -> dict:
+        from . import checks
+        st = getattr(self, "_check", None)
+        if st and st.get("running"):
+            return st
+        self._check = {"running": True, "current": "", "rows": [], "started": time.time()}
+
+        def progress(name, rows):
+            self._check.update(current=name, rows=list(rows))
+
+        def run():
+            try:
+                checks.run_checks(self.lib.dir, progress)
+            finally:
+                self._check["running"] = False
+        threading.Thread(target=run, daemon=True, name="self-check").start()
+        return self._check
+
+    def check_status(self) -> dict:
+        return getattr(self, "_check", None) or {"running": False, "current": "", "rows": []}
+
     def update(self) -> dict:
         """Download the latest code (git pull) and restart into it. Library and settings are kept."""
         if not self.repo or not self.restart:
@@ -575,6 +596,16 @@ def _home(app, m, q, body):
 @route("GET", "/api/version")
 def _version(app, m, q, body):
     return app.version()
+
+
+@route("POST", "/api/selfcheck")
+def _selfcheck(app, m, q, body):
+    return app.start_check()
+
+
+@route("GET", "/api/selfcheck")
+def _selfcheck_status(app, m, q, body):
+    return app.check_status()
 
 
 @route("POST", "/api/update")

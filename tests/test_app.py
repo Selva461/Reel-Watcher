@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -497,6 +498,22 @@ def test_ui_import_and_settings(page):
     pg.get_by_text("Online lookups on").wait_for()
     assert pg.running["app"].settings()["online"] is True
     pg.get_by_text("Updates: run the setup command again.").wait_for()  # test server has no restart hook
+    from reel_watcher import checks
+
+    def fake_checks(data_dir=None, progress=None):
+        rows = [{"name": "Text reader (OCR)", "ok": True, "detail": "read: 'VINLAND SAGA'", "hint": "", "seconds": 0.1},
+                {"name": "AI model (Ollama)", "ok": False, "detail": "Ollama: HTTP 500: out of memory", "hint": "Optional.", "seconds": 0.1}]
+        for i in range(len(rows) + 1):
+            progress(rows[i]["name"] if i < len(rows) else "", rows[:i])
+            time.sleep(0.4)
+        return rows
+    real, checks.run_checks = checks.run_checks, fake_checks
+    try:
+        pg.get_by_role("button", name="Run self-check").click()
+        pg.get_by_text("1 of 2 passed").wait_for(timeout=10000)
+        pg.get_by_text("Ollama: HTTP 500: out of memory").wait_for()
+    finally:
+        checks.run_checks = real
     assert Path(pg.running["lib"].dir / "settings.json").exists()
 
 

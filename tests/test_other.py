@@ -83,3 +83,26 @@ def test_outdated_packages_are_reported(monkeypatch):
     assert len(out) == 1 and out[0].startswith("pillow 12.2.9 has known security problems")
     versions["pillow"] = "12.3.0"
     assert security.outdated() == []
+
+
+def test_self_check_reports_pass_and_fail_with_hints(monkeypatch, tmp_path):
+    from reel_watcher import checks, lookups, study
+    monkeypatch.setattr(study, "ocr_image", lambda p: "VINLAND SAGA")
+    monkeypatch.setattr(lookups, "fetch_html", lambda url, data=None, timeout=20: (_ for _ in ()).throw(lookups.ServiceError("blocked")))
+    monkeypatch.setattr(lookups, "wikipedia_search", lambda q, limit=6: [{"title": "Scene (2026 film) - Wikipedia",
+                                                                           "url": "https://en.wikipedia.org/wiki/Scene_(2026_film)", "snippet": ""}])
+    monkeypatch.setattr(lookups, "anilist", lambda s=None, id_=None, media_type=None: [{"name": "Frieren: Beyond Journey's End"}])
+    monkeypatch.setattr(lookups, "wikidata", lambda s, limit=7, language="en": [{"name": "Parasite", "year": 2019, "type": "movie"}])
+    monkeypatch.setattr(lookups, "jikan_check", lambda i, t="anime": {"mal_title": "Sousou no Frieren"})
+    monkeypatch.setattr(lookups, "tvmaze", lambda n, y=None: {"network": "Netflix"})
+    monkeypatch.setattr(lookups, "trace_me", lambda: {"left": 80, "quota": 100})
+    monkeypatch.setattr(checks, "check_ai_model", lambda: (_ for _ in ()).throw(RuntimeError("Ollama: HTTP 500: model requires more system memory")))
+    monkeypatch.setattr(checks, "check_instagram", lambda: (True, "HTTP 200"))
+    seen = []
+    rows = {r["name"]: r for r in checks.run_checks(tmp_path / "lib", progress=lambda name, rs: seen.append(name))}
+    assert rows["Text reader (OCR)"]["ok"] and rows["Web search: Wikipedia"]["ok"]
+    assert rows["Finds a new film by web search"]["ok"] and "Scene (2026" in rows["Finds a new film by web search"]["detail"]
+    assert not rows["Web search: DuckDuckGo"]["ok"] and "Bing and Wikipedia are used instead" in rows["Web search: DuckDuckGo"]["hint"]
+    ai = rows["AI model (Ollama)"]
+    assert not ai["ok"] and "more system memory" in ai["detail"] and "everything else still works" in ai["hint"]
+    assert rows["Library storage"]["ok"] and seen[0] == "Library storage" and seen[-1] == ""
