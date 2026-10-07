@@ -73,3 +73,13 @@ def test_ollama_error_reason_is_readable(monkeypatch):
     monkeypatch.setattr(model.urllib.request, "urlopen", fail)
     with pytest.raises(RuntimeError, match="HTTP 500: model requires more system memory"):
         model.ollama_request("/api/chat", {"x": 1})
+
+
+def test_outdated_packages_are_reported(monkeypatch):
+    from reel_watcher import security
+    versions = {"pillow": "12.2.9", "yt-dlp": "2026.8.19"}
+    monkeypatch.setattr(security.metadata, "version", lambda p: versions[p])
+    out = security.outdated()
+    assert len(out) == 1 and out[0].startswith("pillow 12.2.9 has known security problems")
+    versions["pillow"] = "12.3.0"
+    assert security.outdated() == []

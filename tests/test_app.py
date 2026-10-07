@@ -14,12 +14,18 @@ from PIL import Image
 
 from reel_watcher import demo, ig_export, server, study, worker
 
+try:
+    from playwright.sync_api import expect
+except ImportError:  # pragma: no cover  UI tests are skipped without Playwright
+    expect = None
+
 CHROME = next((p for p in ("/opt/pw-browsers/chromium-1194/chrome-linux/chrome",) if os.path.exists(p)), None) or \
     shutil.which("chromium") or shutil.which("google-chrome") or shutil.which("chromium-browser")
 
 
 @pytest.fixture
 def running(tmp_path, monkeypatch):
+    monkeypatch.setenv("REEL_SHELF_ROOTS", str(tmp_path))
     monkeypatch.setattr(study, "ocr_image", lambda p: "")
     lib = demo.build(tmp_path / "lib")
     eng = worker.Engine(lib, vision_factory=None, online=False, idle_wait=0.05, watch_every=3600)
@@ -143,7 +149,8 @@ def test_api_folders_and_identify_image(running):
         Image.new("RGB", (90, 160), (n * 50, 20, 200 - n * 30)).save(p)
     fs = call(b, "/api/fs?path=" + urllib.request.quote(str(tmp)))[1]
     assert any(d["name"] == "pics" for d in fs["dirs"]) and call(b, "/api/fs?path=" + urllib.request.quote(str(folder)))[1]["images"] == 5
-    assert call(b, "/api/folders", "POST", {"folders": ["/definitely/missing"]})[0] == 400
+    assert call(b, "/api/folders", "POST", {"folders": ["/definitely/missing"]})[0] == 403  # outside storage
+    assert call(b, "/api/folders", "POST", {"folders": [str(tmp / "missing")]})[0] == 400
     job = call(b, "/api/folders", "POST", {"folders": [str(folder)], "collection": "Shots"})[1]["job"]
     running["app"].engine.run_until_idle(20)
     import time
@@ -167,11 +174,52 @@ def test_lan_token_required(tmp_path):
     try:
         assert call(base, "/api/home")[0] == 401
         assert call(base, "/api/home", headers={"X-Token": "secret123"})[0] == 200
-        req = urllib.request.Request(base + "/?t=secret123")
-        with urllib.request.urlopen(req) as r:
-            assert "rs_token=secret123" in r.headers.get("Set-Cookie", "")
+        assert call(base, "/api/home", headers={"X-Token": "secret12"})[0] == 401
+        import http.client
+        h = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+        h.request("GET", "/?t=secret123")
+        r = h.getresponse()
+        cookie = r.getheader("Set-Cookie", "")
+        # the code is moved into an HttpOnly cookie and removed from the address bar
+        assert r.status == 303 and r.getheader("Location") == "/" and "rs_token=secret123" in cookie and "HttpOnly" in cookie
+        h.close()
+        assert call(base, "/api/home", headers={"Cookie": "rs_token=secret123"})[0] == 200
     finally:
         srv.shutdown()
+
+
+def test_security_rebinding_csrf_and_headers(running):
+    """Attacks a web page in the phone's browser could try against the local server."""
+    b = running["base"]
+    port = b.rsplit(":", 1)[1]
+    import http.client
+
+    def raw(method, path, headers, body=None):
+        h = http.client.HTTPConnection("127.0.0.1", int(port))
+        h.request(method, path, body=body, headers=headers)
+        r = h.getresponse()
+        out = (r.status, dict(r.getheaders()), r.read())
+        h.close()
+        return out
+    # DNS rebinding: a site whose name now points at 127.0.0.1 is refused by name
+    assert raw("GET", "/api/home", {"Host": f"evil.example:{port}"})[0] == 421
+    assert raw("GET", "/api/home", {"Host": f"localhost:{port}"})[0] == 200
+    assert raw("GET", "/api/home", {"Host": f"[::1]:{port}"})[0] == 200
+    # cross-site request forgery: a plain form post, or JSON from another site's page, changes nothing
+    before = running["app"].settings()["region"]
+    body = json.dumps({"region": "ZZ"})
+    assert raw("POST", "/api/settings", {"Host": f"localhost:{port}", "Content-Type": "text/plain"}, body)[0] == 403
+    assert raw("POST", "/api/settings", {"Host": f"localhost:{port}", "Content-Type": "application/x-www-form-urlencoded"}, "region=ZZ")[0] == 403
+    assert raw("POST", "/api/settings", {"Host": f"localhost:{port}", "Content-Type": "application/json", "Origin": "https://evil.example"}, body)[0] == 403
+    assert running["app"].settings()["region"] == before != "ZZ"  # the blocked calls changed nothing
+    st, _, out = raw("POST", "/api/settings", {"Host": f"localhost:{port}", "Content-Type": "application/json", "Origin": f"http://localhost:{port}"},
+                     json.dumps({"region": "US"}))
+    assert st == 200 and json.loads(out)["region"] == "US"
+    # browser protections on the page itself
+    st, hdr, _ = raw("GET", "/", {"Host": f"localhost:{port}"})
+    assert "script-src 'self'" in hdr["Content-Security-Policy"] and "frame-ancestors 'none'" in hdr["Content-Security-Policy"]
+    assert hdr["X-Frame-Options"] == "DENY" and hdr["X-Content-Type-Options"] == "nosniff" and hdr["Referrer-Policy"] == "no-referrer"
+    assert raw("POST", "/api/settings", {"Host": f"localhost:{port}", "Content-Type": "application/json", "Content-Length": "-5"})[0] in (400, 403)
 
 
 # ---------------------------------------------------------------- UI in a real browser at phone size
@@ -188,6 +236,8 @@ def page(running):
         pg = ctx.new_page()
         errors = []
         pg.on("pageerror", lambda e: errors.append(str(e)))
+        # the app must work under its own Content Security Policy: any violation fails the test
+        pg.on("console", lambda m: errors.append(m.text) if "Content Security Policy" in m.text else None)
         pg.goto(running["base"] + "/")
         pg.running = running
         pg.errors = errors
@@ -215,10 +265,10 @@ def test_ui_home_collection_and_title(page):
     pg.get_by_text("Marked as watched").wait_for()
     assert pg.get_by_role("button", name="Mark Pluto as not watched").get_attribute("aria-pressed") == "true"
     pg.get_by_role("button", name="Watched", exact=True).click()
-    pg.wait_for_function("document.querySelectorAll('.list-item').length === 1")
+    expect(pg.locator(".list-item")).to_have_count(1)
     assert pg.locator(".list-item .title").inner_text() == "Pluto"
     pg.get_by_role("button", name="All", exact=True).click()
-    pg.wait_for_function("document.querySelectorAll('.list-item').length === 3")
+    expect(pg.locator(".list-item")).to_have_count(3)
     pg.get_by_text("Frieren: Beyond Journey's End").click()
     pg.get_by_role("heading", name="Frieren: Beyond Journey's End").wait_for()
     assert pg.get_by_text("28 episodes").is_visible() and pg.get_by_text("Number one has to be Frieren").first.is_visible()
@@ -245,15 +295,16 @@ def test_ui_search_language_and_filters(page):
     pg.locator("nav.tabs").get_by_text("Search").click()
     pg.locator("#q").wait_for()
     pg.get_by_role("button", name="Korean").click()
-    pg.wait_for_function("document.querySelectorAll('#results .list-item').length === 1")
+    expect(pg.locator("#results .list-item")).to_have_count(1)
     assert pg.locator("#results .title").inner_text() == "Parasite"
     pg.get_by_role("button", name="Tamil").click()
-    pg.wait_for_function("document.querySelectorAll('#results .list-item').length === 2")
+    expect(pg.locator("#results .list-item")).to_have_count(2)
     pg.get_by_role("button", name="All").first.click()
     pg.fill("#q", "idiots")
-    pg.wait_for_function("document.querySelectorAll('#results .list-item').length === 1 && document.querySelector('#results .title').textContent === '3 Idiots'")
+    expect(pg.locator("#results .list-item")).to_have_count(1)
+    expect(pg.locator("#results .title")).to_have_text("3 Idiots")
     pg.fill("#q", "")
-    pg.wait_for_function("document.querySelectorAll('#results .list-item').length > 5")
+    pg.locator("#results .list-item").nth(5).wait_for()
     pg.get_by_role("link", name="All filters").click()
     pg.get_by_role("heading", name="Filters").wait_for()
     pg.locator('[data-k="type"][data-v="anime"]').click()
@@ -262,7 +313,7 @@ def test_ui_search_language_and_filters(page):
     pg.get_by_role("link", name="Show 1 result").wait_for()
     pg.select_option("#sort", "az")
     pg.get_by_role("link", name="Show 1 result").click()
-    pg.wait_for_function("document.querySelectorAll('#results .list-item').length === 1")
+    expect(pg.locator("#results .list-item")).to_have_count(1)
     assert pg.locator("#results .title").inner_text() == "Vinland Saga"
     assert pg.get_by_role("link", name="All filters, 2 active").is_visible()
     pg.get_by_role("link", name="All filters, 2 active").click()
@@ -279,7 +330,7 @@ def test_ui_motivation_gif_styles_and_actions(page):
     pg.get_by_role("button", name="Switch to list view").click()
     pg.get_by_text("Rest if you must, but do not quit.").wait_for()
     pg.get_by_role("button", name="Favorites").click()
-    pg.wait_for_function("document.querySelectorAll('.list-item').length === 1")
+    expect(pg.locator(".list-item")).to_have_count(1)
     pg.get_by_role("button", name="All", exact=True).click()
     pg.get_by_role("button", name="Switch to grid view").click()
     pg.locator(".tile").first.click()
@@ -296,7 +347,7 @@ def test_ui_motivation_gif_styles_and_actions(page):
     fav = pg.locator("#fav")
     before = fav.get_attribute("aria-pressed")
     fav.click()
-    pg.wait_for_function(f"document.querySelector('#fav').getAttribute('aria-pressed') !== '{before}'")
+    expect(pg.locator("#fav")).not_to_have_attribute("aria-pressed", before)
     assert pg.get_by_role("link", name="Next").count() + pg.get_by_role("link", name="Previous").count() == 1
     no_side_scroll(pg)
 
@@ -410,7 +461,7 @@ def test_ui_folder_scan_and_progress(page):
     pg.get_by_role("button", name="Start scanning in background").click()
     pg.get_by_role("heading", name="Running in background").wait_for()
     pg.get_by_text("Scan Screenshots").first.wait_for()
-    pg.wait_for_function("[...document.querySelectorAll('.card')].some(c => c.textContent.includes('Scan Screenshots') && c.textContent.includes('Done'))", timeout=20000)
+    pg.locator(".card", has_text="Scan Screenshots").filter(has_text="Done").first.wait_for(timeout=20000)
     job = pg.running["lib"].one("SELECT params FROM jobs WHERE name='Scan Screenshots'")
     assert job["params"]["watch"] is False and job["params"]["folders"] == [str(folder)]
     no_side_scroll(pg)
@@ -476,6 +527,17 @@ def test_api_version_and_self_update(tmp_path, monkeypatch):
     (tmp_path / "up.git").rename(tmp_path / "gone.git")  # no connection to the server
     with pytest.raises(server.ApiError, match="Update failed"):
         app.update()
+
+
+def test_folder_picker_stays_inside_storage(running):
+    b, tmp = running["base"], running["tmp"]
+    (tmp / "pics").mkdir(exist_ok=True)
+    assert call(b, "/api/fs?path=" + urllib.parse.quote(str(tmp / "pics")))[0] == 200
+    for outside in ("/etc", "/", str(tmp / ".." / "..")):
+        s, r = call(b, "/api/fs?path=" + urllib.parse.quote(outside))
+        assert s == 403 and "storage" in r["error"], outside
+    s, r = call(b, "/api/folders", "POST", {"folders": ["/etc"], "collection": "x"})
+    assert s == 403
 
 
 def test_api_never_crashes_on_bad_input(running):
@@ -545,3 +607,45 @@ def test_ui_every_screen_and_button_survives(page):
                 problems.append((r, label, JUNK.search(text).group(0)))
     assert not pg.errors, pg.errors[:5]
     assert not problems, problems[:10]
+
+
+XSS = '"><img src=x onerror="window.__xss=1"><svg onload="window.__xss=2">'
+
+
+def test_ui_hostile_text_is_never_run(page):
+    """Names, captions, comments and web results come from strangers: whatever they contain is shown as text."""
+    pg, lib = page, page.running["lib"]
+    tid = lib.upsert_title("web:evil", "Evil" + XSS, type="movie", year=2026, language="Tamil" + XSS, genres=["Drama" + XSS],
+                           extra={"synopsis": "Story" + XSS, "url": "javascript:window.__xss=3",
+                                  "where_to_watch": [{"site": "Bad" + XSS, "url": "javascript:window.__xss=4", "language": XSS}],
+                                  "related": [{"relation": XSS, "name": "Rel" + XSS, "type": "movie", "year": 1, "ext_key": XSS}],
+                                  "wikipedia": "javascript:window.__xss=5", "studios": [XSS], "cast": [XSS]})
+    coll = "Coll" + XSS
+    iid, _ = lib.add_item("reel:EVIL", "reel", "javascript:window.__xss=6", [coll], status="check")
+    lib.merge_meta(iid, author="bad" + XSS, caption=XSS, transcript=XSS, steps={"Web" + XSS: {"ok": False, "detail": XSS}})
+    lib.update_item(iid, error=XSS)
+    lib.add_find(iid, "title", title_id=tid, name_raw=XSS, source=XSS, evidence=XSS, detail=XSS, confidence="check",
+                 alts=[{"ext_key": XSS, "name": XSS, "type": "movie", "year": 2}])
+    qid, _ = lib.add_item("reel:EVILQ", "reel", "javascript:window.__xss=7", ["Motivation"], status="done")
+    lib.add_find(qid, "quote", quote="Quote" + XSS, source="speech", confidence="confirmed", media=XSS, detail=XSS)
+    quote = lib.one("SELECT id FROM finds WHERE item_id=? AND kind='quote'", (qid,))["id"]
+    for r in ["#/", f"#/t/{tid}", f"#/item/{iid}", f"#/c/{urllib.parse.quote(coll)}", "#/c/Motivation", f"#/q/{quote}",
+              "#/check", "#/search", "#/progress"]:
+        pg.goto(pg.running["base"] + "/" + r)
+        pg.wait_for_timeout(400)
+        assert pg.evaluate("window.__xss === undefined"), r
+        assert pg.locator("main img[src='x'], main svg[onload]").count() == 0, r
+        bad = pg.evaluate("[...document.querySelectorAll('a[href]')].map(a => a.getAttribute('href')).filter(h => /^\\s*javascript:/i.test(h))")
+        assert not bad, (r, bad)
+    pg.goto(pg.running["base"] + f"/#/t/{tid}")
+    pg.get_by_text("Evil" + XSS).first.wait_for()  # shown as plain text
+
+
+def test_csv_export_neutralises_formulas(running):
+    lib = running["lib"]
+    tid = lib.upsert_title("web:f", '=HYPERLINK("http://evil.example","x")', type="movie")
+    iid, _ = lib.add_item("reel:F1", "reel", "https://www.instagram.com/reel/F1/", ["Movies"], status="done")
+    lib.add_find(iid, "title", title_id=tid, name_raw="x", source="text", confidence="confirmed")
+    s, body = call(running["base"], "/api/export.csv")
+    text = body.decode() if isinstance(body, bytes) else body
+    assert s == 200 and "'=HYPERLINK" in text and "\n=HYPERLINK" not in text

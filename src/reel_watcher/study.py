@@ -115,7 +115,9 @@ def ytdlp_download(url: str, work: Path, comments: bool = False) -> dict:
     comments=True also fetches the first page of comments Instagram shows without login (info["comments"])."""
     from yt_dlp import YoutubeDL
     opts = {"getcomments": comments, "outtmpl": str(work / "%(id)s_%(autonumber)02d.%(ext)s"), "format": "bv*+ba/b", "merge_output_format": "mp4",
-            "quiet": True, "no_warnings": True, "noprogress": True, "retries": 3, "socket_timeout": 60}
+            "quiet": True, "no_warnings": True, "noprogress": True, "retries": 3, "socket_timeout": 60,
+            # only Instagram, safe file names, and no huge downloads, whatever the page claims
+            "allowed_extractors": ["instagram.*"], "restrictfilenames": True, "max_filesize": 300 * 2**20}
     with YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=True) or {}
 

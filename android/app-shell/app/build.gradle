@@ -13,8 +13,26 @@ android {
         versionCode 2
         versionName '0.3'
     }
+    // Release builds are not debuggable. They are signed with your own key when the GitHub secrets
+    // ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD are set
+    // (then each new APK installs over the old one); otherwise with a throwaway key made on the build machine.
+    signingConfigs {
+        own {
+            def ks = System.getenv("RS_KEYSTORE")
+            if (ks) {
+                storeFile file(ks)
+                storePassword System.getenv("RS_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("RS_KEY_ALIAS")
+                keyPassword System.getenv("RS_KEY_PASSWORD")
+            }
+        }
+    }
     buildTypes {
-        release { minifyEnabled false }
+        release {
+            minifyEnabled false
+            debuggable false
+            signingConfig System.getenv("RS_KEYSTORE") ? signingConfigs.own : signingConfigs.debug
+        }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

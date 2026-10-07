@@ -152,3 +152,14 @@ def test_describe_unknown_layout(tmp_path):
     f.write_text("﻿" + json.dumps({"something_new": [{"x": {"y": "https://www.instagram.com/stories/a/1/"}}]}), encoding="utf-8")
     assert ig_export.read_export(f) == {}
     assert ig_export.describe(f) == "saved_collections.json: {something_new: [1 x {x: {y: link}}]}"
+
+
+def test_zip_bomb_is_refused(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.setattr(ig_export, "MAX_EXPORT_FILE", 1000)
+    z = tmp_path / "bomb.zip"
+    with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as f:
+        f.writestr("saved/saved_posts.json", "[" + " " * 50000 + "]")  # tiny compressed, large expanded
+    assert z.stat().st_size < 1000
+    with pytest.raises(ValueError, match="larger than"):
+        ig_export.read_export(z)

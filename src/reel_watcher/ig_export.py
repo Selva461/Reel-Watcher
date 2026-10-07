@@ -198,6 +198,7 @@ def outline(node, depth: int = 0) -> str:
     return type(node).__name__
 
 
+MAX_EXPORT_FILE = 150 * 2**20  # a very large saved list is a few MB; more than this is not an Instagram export
 EXPORT_FILES = ("saved_collections.json", "saved_posts.json", "saved_collections.html", "saved_posts.html")
 
 
@@ -229,7 +230,11 @@ def _gather(path: Path) -> dict[str, str]:
             for n in z.namelist():
                 base = n.rsplit("/", 1)[-1].lower()
                 if base in EXPORT_FILES:
-                    files[base] = z.read(n).decode("utf-8", errors="replace")
+                    with z.open(n) as f:  # read at most the limit: a small zip can expand to gigabytes
+                        data = f.read(MAX_EXPORT_FILE + 1)
+                    if len(data) > MAX_EXPORT_FILE:
+                        raise ValueError(f"{base} is larger than {MAX_EXPORT_FILE // 2**20} MB")
+                    files[base] = data.decode("utf-8", errors="replace")
     elif path.is_dir():
         for p in path.rglob("*"):
             if p.name.lower() in EXPORT_FILES:

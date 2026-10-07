@@ -29,7 +29,7 @@ def id_from_url(url: str) -> str | None:
     """'ig_<shortcode>' parsed offline from an Instagram reel/post URL, else None."""
     u = urllib.parse.urlparse(url)
     host = (u.hostname or "").lower().removeprefix("www.")
-    if host.endswith("instagram.com"):
+    if u.scheme in ("http", "https", "") and (host == "instagram.com" or host.endswith(".instagram.com")):
         m = re.search(r"/(?:reels?|p|tv)/([A-Za-z0-9_-]+)", u.path)
         if m:
             return "ig_" + m.group(1)

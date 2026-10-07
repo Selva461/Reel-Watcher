@@ -3,13 +3,35 @@ name: Tests
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 4 * * 1"  # weekly: catches newly published advisories in unchanged dependencies
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      # actions pinned to exact commits (tag in the comment); Dependabot proposes updates
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: uv sync
+      - run: uv sync --locked
       - run: uv run pytest -q
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+      - name: Known vulnerabilities in every locked dependency (pip-audit)
+        run: |
+          uv export --locked --all-groups --no-hashes --no-emit-project > requirements-audit.txt
+          uvx pip-audit -r requirements-audit.txt --no-deps --disable-pip --strict --progress-spinner off

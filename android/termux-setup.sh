@@ -32,7 +32,7 @@ pkg install -y git ffmpeg tesseract python-numpy python-pillow cmake clang make 
 step 3 "Getting Reel Shelf"
 if [ -d "$APP/.git" ]; then git -C "$APP" fetch origin "$BRANCH" && git -C "$APP" checkout "$BRANCH" && git -C "$APP" pull --ff-only origin "$BRANCH"
 else git clone -b "$BRANCH" "$REPO" "$APP"; fi
-pip install --upgrade yt-dlp segno
+pip install --upgrade "yt-dlp>=2026.7.4" "segno>=1.6"  # older yt-dlp has known security advisories
 # --no-deps: the PC-only parts (faster-whisper, RapidOCR) have no Android builds; the phone uses whisper.cpp and Tesseract
 pip install --no-deps -e "$APP"
 
@@ -40,7 +40,8 @@ step 4 "Speech-to-text (whisper.cpp, can take 10 minutes)"
 if ! command -v whisper-cli >/dev/null 2>&1; then pkg install -y whisper-cpp >/dev/null 2>&1 || true; fi
 if ! command -v whisper-cli >/dev/null 2>&1; then
   echo "Building whisper.cpp from source (about 5-10 minutes, once)..."
-  [ -d "$HOME/whisper.cpp" ] || git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$HOME/whisper.cpp"
+  # pinned release, not whatever is newest that day (supply chain)
+  [ -d "$HOME/whisper.cpp" ] || git clone --depth 1 --branch v1.9.5 https://github.com/ggml-org/whisper.cpp "$HOME/whisper.cpp"
   cmake -S "$HOME/whisper.cpp" -B "$HOME/whisper.cpp/build" -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF >/dev/null
   cmake --build "$HOME/whisper.cpp/build" -j 4 --target whisper-cli
   ln -sf "$HOME/whisper.cpp/build/bin/whisper-cli" "$PREFIX/bin/whisper-cli"

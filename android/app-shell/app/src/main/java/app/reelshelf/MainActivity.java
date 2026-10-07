@@ -39,6 +39,7 @@ public class MainActivity extends Activity {
     private static final String RUN_COMMAND = "com.termux.permission.RUN_COMMAND";
 
     private WebView web;
+    private volatile String currentUrl = "";
     private ValueCallback<Uri[]> fileCallback;
     private SharedPreferences prefs;
 
@@ -60,6 +61,11 @@ public class MainActivity extends Activity {
 
         web.addJavascriptInterface(new Bridge(), "ReelShelf");
         web.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                currentUrl = url == null ? "" : url;
+            }
+
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri u = request.getUrl();
@@ -137,25 +143,39 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Only the built-in start page and the Reel Shelf server may use the bridge, never another site shown in the app. */
+    private boolean trustedPage() {
+        String u = currentUrl;
+        if (u.startsWith(START_PAGE)) return true;
+        Uri page = Uri.parse(u);
+        Uri server = Uri.parse(serverUrl());
+        return page.getScheme() != null && page.getScheme().startsWith("http") && page.getHost() != null
+                && page.getHost().equals(server.getHost()) && page.getPort() == server.getPort();
+    }
+
     /** Methods the start page (and the app) can call: window.ReelShelf.* */
     private class Bridge {
         @JavascriptInterface
         public String server() {
+            if (!trustedPage()) return "untrusted";
             return serverUrl();
         }
 
         @JavascriptInterface
         public boolean hasTermux() {
+            if (!trustedPage()) return false;
             return termuxInstalled();
         }
 
         @JavascriptInterface
         public void open() {
+            if (!trustedPage()) return;
             runOnUiThread(() -> web.loadUrl(serverUrl()));
         }
 
         @JavascriptInterface
         public void setServer(String url) {
+            if (!trustedPage()) return;
             String u = url == null ? "" : url.trim();
             if (u.isEmpty()) u = DEFAULT_URL;
             if (!u.startsWith("http://") && !u.startsWith("https://")) u = "http://" + u;
@@ -167,11 +187,13 @@ public class MainActivity extends Activity {
         /** Remember "this phone" as the server without reloading the page (the start page keeps polling). */
         @JavascriptInterface
         public void rememberPhone() {
+            if (!trustedPage()) return;
             prefs.edit().putString("url", DEFAULT_URL).apply();
         }
 
         @JavascriptInterface
         public void copy(String text) {
+            if (!trustedPage()) return;
             ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
             cm.setPrimaryClip(ClipData.newPlainText("Reel Shelf", text));
             toast("Copied. Paste it in Termux.");
@@ -179,6 +201,7 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void openTermux() {
+            if (!trustedPage()) return;
             Intent i = getPackageManager().getLaunchIntentForPackage(TERMUX);
             if (i != null) startActivity(i);
             else openExternal(Uri.parse("https://f-droid.org/packages/com.termux/"));
@@ -186,12 +209,14 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void installTermux() {
+            if (!trustedPage()) return;
             openExternal(Uri.parse("https://f-droid.org/packages/com.termux/"));
         }
 
         /** "play" when Termux came from the Play Store (a different build that cannot be started by other apps), else "ok" or "none". */
         @JavascriptInterface
         public String termuxSource() {
+            if (!trustedPage()) return "untrusted";
             if (!termuxInstalled()) return "none";
             try {
                 String installer = Build.VERSION.SDK_INT >= 30
@@ -205,17 +230,20 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public boolean getFlag(String name) {
+            if (!trustedPage()) return false;
             return prefs.getBoolean("flag_" + name, false);
         }
 
         @JavascriptInterface
         public void setFlag(String name, boolean value) {
+            if (!trustedPage()) return;
             prefs.edit().putBoolean("flag_" + name, value).apply();
         }
 
         /** Copies the setup command and opens Termux, so the user only has to paste. */
         @JavascriptInterface
         public void copyAndOpenTermux(String text) {
+            if (!trustedPage()) return;
             ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
             cm.setPrimaryClip(ClipData.newPlainText("Reel Shelf", text));
             runOnUiThread(this::openTermux);
@@ -223,6 +251,7 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void openAppSettings() {
+            if (!trustedPage()) return;
             Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()));
             runOnUiThread(() -> startActivity(i));
         }
@@ -234,6 +263,7 @@ public class MainActivity extends Activity {
          */
         @JavascriptInterface
         public String startEngine() {
+            if (!trustedPage()) return "untrusted";
             if (!termuxInstalled()) return "no-termux";
             if (checkSelfPermission(RUN_COMMAND) != PackageManager.PERMISSION_GRANTED) {
                 if (prefs.getBoolean("asked", false) && !shouldShowRequestPermissionRationale(RUN_COMMAND)) return "denied";

@@ -67,7 +67,7 @@ function store(key, val) {
 
 function every(ms, fn) { timers.push(setInterval(fn, ms)); }
 function header(title, back, right = "") {
-  return `<div class="row between"><div class="row">${back ? `<a class="icon-btn" href="${back}" aria-label="Back">${ICON.back}</a>` : ""}<h1>${esc(title)}</h1></div>${right}</div>`;
+  return `<div class="row between"><div class="row">${back ? `<a class="icon-btn" href="${back === "back" ? "#/" : esc(back)}" ${back === "back" ? "data-back" : ""} aria-label="Back">${ICON.back}</a>` : ""}<h1>${esc(title)}</h1></div>${right}</div>`;
 }
 function tint(name) { let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0; return TINTS[h % TINTS.length]; }
 function thumb(name, cls = "thumb") { return name ? `<img class="${cls}" src="/media/${enc(name)}" alt="" loading="lazy">` : `<span class="${cls}" aria-hidden="true"></span>`; }
@@ -233,7 +233,7 @@ function timeAgo(ts) { const d = new Date(ts * 1000); return d.toLocaleDateStrin
 
 async function titleScreen(id) {
   const t = await api(`/api/titles/${id}`);
-  const back = history.length > 1 ? "javascript:history.back()" : "#/";
+  const back = "back";
   const ex = t.extra || {};
   const why = t.finds.find((f) => f.evidence)?.evidence || "";
   const isAnime = t.type === "anime", isManga = t.type === "manga";
@@ -267,7 +267,7 @@ async function titleScreen(id) {
         ${f.evidence ? `<span class="soft small">${esc(f.evidence)}</span>` : ""}
         <span class="small muted">${esc(SOURCE_LABEL[f.source] || f.source)}${f.detail ? " · " + esc(f.detail) : ""} · ${esc((f.collections || []).join(", "))}</span>
         ${(f.alts || []).length && f.confidence === "check" ? `<span class="small">Could also be:</span><span class="row wrap" style="gap:6px">${f.alts.map((a) => `<button class="chip" data-switch="${f.id}" data-key="${esc(a.ext_key)}">${esc([a.name, a.year, TYPE_LABEL[a.type]].filter(Boolean).join(" · "))}</button>`).join("")}</span>` : ""}
-        <span class="row wrap" style="gap:14px">${safeUrl(f.url) ? `<a href="${esc(f.url)}" target="_blank" rel="noopener">Open reel</a>` : ""}
+        <span class="row wrap" style="gap:14px">${safeUrl(f.url) ? `<a href="${esc(safeUrl(f.url))}" target="_blank" rel="noopener">Open reel</a>` : ""}
           <button class="btn" style="min-height:36px" data-fix="${f.id}">Wrong name?</button>
           ${f.confidence === "check" ? `<button class="btn" style="min-height:36px" data-ok="${f.id}">It is right</button>` : ""}</span>
       </div></div>`).join("")}</div>
@@ -341,7 +341,7 @@ async function quoteScreen(id) {
   const next = i >= 0 && i < list.length - 1 ? list[i + 1] : null;
   const st = store("quoteStyle") || { style: "bold", format: "gif" };
   let media = q.media;
-  $app.innerHTML = `${header("", "javascript:history.back()", `<button class="icon-btn" id="fav" aria-pressed="${!!q.favorite}" aria-label="${q.favorite ? "Remove from favorites" : "Add to favorites"}">${ICON.heart(q.favorite)}</button>`)}
+  $app.innerHTML = `${header("", "back", `<button class="icon-btn" id="fav" aria-pressed="${!!q.favorite}" aria-label="${q.favorite ? "Remove from favorites" : "Add to favorites"}">${ICON.heart(q.favorite)}</button>`)}
     <figure class="stack" style="margin:0;align-items:center"><div class="media-frame" id="mf"></div>
       <figcaption class="small muted" id="mcap"></figcaption></figure>
     <div class="card stack"><span class="label">Caption style</span>
@@ -350,7 +350,7 @@ async function quoteScreen(id) {
       <div class="grid2">${[["gif", "GIF"], ["mp4", "Video with sound"]].map(([v, l]) => `<button class="chip" data-format="${v}" aria-pressed="${st.format === v}">${l}</button>`).join("")}</div></div>
     <blockquote class="card stack" style="margin:0"><p class="quote-text">"${esc(q.quote)}"</p><span class="small muted">${esc(q.author ? "Shared by @" + q.author : "")}</span></blockquote>
     <div class="grid3"><a class="btn primary" id="save" download>Save</a><button class="btn" id="share">Share</button><button class="btn" id="copy">Copy text</button></div>
-    <div class="row">${prev ? `<a class="btn grow" href="#/q/${prev}">Previous</a>` : ""}<a class="btn grow" href="${esc(q.url)}" target="_blank" rel="noopener">Open reel</a>${next ? `<a class="btn grow" href="#/q/${next}">Next</a>` : ""}</div>`;
+    <div class="row">${prev ? `<a class="btn grow" href="#/q/${prev}">Previous</a>` : ""}${safeUrl(q.url) ? `<a class="btn grow" href="${esc(safeUrl(q.url))}" target="_blank" rel="noopener">Open reel</a>` : ""}${next ? `<a class="btn grow" href="#/q/${next}">Next</a>` : ""}</div>`;
   const show = (name) => {
     media = name;
     const mf = document.getElementById("mf");
@@ -658,6 +658,11 @@ async function render() {
 }
 
 window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); });
+// "Back" goes to the previous screen when there is one (no javascript: links: the page's security policy forbids them)
+document.addEventListener("click", (e) => {
+  const a = e.target.closest && e.target.closest("[data-back]");
+  if (a && history.length > 1) { e.preventDefault(); history.back(); }
+});
 render();
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});

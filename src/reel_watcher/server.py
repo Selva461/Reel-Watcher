@@ -36,6 +36,10 @@ LANG_CODES = {"English": "en", "Hindi": "hi", "Tamil": "ta", "Telugu": "te", "Ma
               "Korean": "ko", "Spanish": "es", "French": "fr", "German": "de", "Chinese": "zh", "Portuguese": "pt", "Arabic": "ar"}
 CONF_RANK = "MIN(CASE f.confidence WHEN 'confirmed' THEN 0 WHEN 'matched' THEN 1 ELSE 2 END)"
 MAX_UPLOAD = 60 * 1024 * 1024
+# pages may only run their own script; posters and covers come from the title databases over https
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+       "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self'; "
+       "frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
 
 
 class ApiError(Exception):
@@ -65,8 +69,8 @@ class App:
 
     def version(self) -> dict:
         out = {"version": "unknown", "date": "", "can_update": bool(self.repo and self.restart), "warnings": []}
-        if self.engine:
-            out["warnings"] = list(dict.fromkeys(self.engine.warnings))[-5:]
+        from . import security
+        out["warnings"] = security.outdated() + (list(dict.fromkeys(self.engine.warnings))[-5:] if self.engine else [])
         if self.repo:
             try:
                 out["version"], out["date"] = self._git("log", "-1", "--format=%h|%cd", "--date=format:%d %b %Y %H:%M").split("|")
@@ -138,7 +142,8 @@ class App:
         try:
             counts = ig_export.import_into(self.lib, path)
         except (ValueError, OSError, KeyError, zipfile.BadZipFile) as e:
-            raise ApiError(400, "Could not read that file as an Instagram export. Choose the ZIP from "
+            too_big = "larger than" in str(e)
+            raise ApiError(400, str(e) if too_big else "Could not read that file as an Instagram export. Choose the ZIP from "
                                 "'Download your information' (JSON format).") from e
         if not counts:
             shape = ig_export.describe(path)
@@ -423,7 +428,8 @@ class App:
         code = media.id_from_url(url)
         if not code:
             raise ApiError(400, "Paste an Instagram reel or post link")
-        iid, created = self.lib.add_item(f"reel:{code[3:]}", "reel", url.split("?")[0], [collection or ig_export.UNSORTED],
+        canonical = f"https://www.instagram.com/reel/{code[3:]}/"  # never store or download the pasted address itself
+        iid, created = self.lib.add_item(f"reel:{code[3:]}", "reel", canonical, [collection[:80] or ig_export.UNSORTED],
                                          job_id=self.quick_job())
         if not created and self.lib.item(iid)["status"] in ("idle", "failed"):
             self.lib.update_item(iid, status="waiting", job_id=self.quick_job())
@@ -436,6 +442,7 @@ class App:
                  Path.home() / "Downloads", Path.home()]
         if sys.platform == "win32":
             cands += [Path(f"{d}:\\") for d in "CDEFG"]
+        cands += [Path(x) for x in os.environ.get("REEL_SHELF_ROOTS", "").split(os.pathsep) if x.strip()]  # extra folders, e.g. a second drive
         seen, out = set(), []
         for c in cands:
             try:
@@ -446,10 +453,24 @@ class App:
                 continue
         return out
 
+    def _allowed_folder(self, p: Path) -> bool:
+        """The folder picker and folder scans stay inside the storage roots (phone storage, home folder, PC drives)."""
+        try:
+            rp = p.resolve()
+        except (OSError, RuntimeError):
+            return False
+        for r in self.roots():
+            root = Path(r["path"]).resolve()
+            if rp == root or root in rp.parents:
+                return True
+        return False
+
     def fs(self, path: str | None) -> dict:
         if not path:
             return {"path": "", "parent": None, "dirs": self.roots(), "images": 0}
-        p = Path(path).expanduser()
+        p = Path(str(path)).expanduser()
+        if not self._allowed_folder(p):
+            raise ApiError(403, "Only folders in your storage can be opened")
         if not p.is_dir():
             raise ApiError(404, "Folder not found")
         dirs, images = [], 0
@@ -470,10 +491,14 @@ class App:
         return {"path": str(p), "parent": str(p.parent) if p.parent != p else None, "dirs": dirs[:300], "images": images}
 
     def start_folders(self, body: dict) -> dict:
-        folders = [f for f in body.get("folders") or [] if f and Path(f).expanduser().is_dir()]
+        raw = body.get("folders")
+        folders = [str(f) for f in (raw if isinstance(raw, list) else []) if isinstance(f, str) and f.strip()]
+        if any(not self._allowed_folder(Path(f).expanduser()) for f in folders):
+            raise ApiError(403, "Only folders in your storage can be scanned")
+        folders = [f for f in folders if Path(f).expanduser().is_dir()]
         if not folders:
             raise ApiError(400, "Pick at least one folder")
-        collection = (body.get("collection") or "Screenshots").strip()
+        collection = str(body.get("collection") or "Screenshots").strip()[:80] or "Screenshots"
         job = self.lib.add_job(body.get("name") or "Scan " + ", ".join(Path(f).name for f in folders), "folder",
                                {"folders": folders, "collection": collection, "watch": bool(body.get("watch", True)),
                                 "skip_dupes": bool(body.get("skip_dupes", True)), "scanning": True})
@@ -521,9 +546,12 @@ class App:
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(["Title", "Type", "Year", "Language", "Genres", "Status", "Favorite", "Reels", "Confidence"])
+        def cell(v):  # a title like "=HYPERLINK(...)" must not become a formula in Excel or Sheets
+            v = "" if v is None else str(v)
+            return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
         for r in res:
-            w.writerow([r["name"], r["type"], r["year"] or "", r["language"], "; ".join(r["genres"]), r["watch"], "yes" if r["favorite"] else "",
-                        r["n_reels"], r["confidence"]])
+            w.writerow([cell(x) for x in (r["name"], r["type"], r["year"] or "", r["language"], "; ".join(r["genres"]), r["watch"],
+                                          "yes" if r["favorite"] else "", r["n_reels"], r["confidence"])])
         return buf.getvalue()
 
 
@@ -693,6 +721,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store" if ctype.startswith("application/json") else "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        if ctype.startswith("text/html"):
+            self.send_header("Content-Security-Policy", CSP)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -705,8 +737,8 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized(self, q: dict) -> tuple[bool, dict]:
         if not self.token:
             return True, {}
-        if q.get("t") == self.token:
-            return True, {"Set-Cookie": f"rs_token={self.token}; Path=/; SameSite=Strict; Max-Age=31536000"}
+        if secrets.compare_digest(str(q.get("t") or ""), self.token):
+            return True, {"Set-Cookie": f"rs_token={self.token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000"}
         c = SimpleCookie(self.headers.get("Cookie") or "")
         if "rs_token" in c and secrets.compare_digest(c["rs_token"].value, self.token):
             return True, {}
@@ -714,13 +746,40 @@ class Handler(BaseHTTPRequestHandler):
             return True, {}
         return False, {}
 
+    def _host_ok(self) -> bool:
+        """Without an access code only this device may connect, by name: a web page that points its own domain at
+        127.0.0.1 (DNS rebinding) would otherwise be able to read the library."""
+        if self.token:
+            return True
+        host = (self.headers.get("Host") or "").strip().lower()
+        name = host[1:host.index("]")] if host.startswith("[") and "]" in host else host.rsplit(":", 1)[0]
+        return name in ("localhost", "127.0.0.1", "::1")
+
+    def _same_origin(self, method: str) -> bool:
+        """Changes may only come from Reel Shelf's own pages, not from another web site (cross-site request forgery).
+        Browsers send Origin on cross-site requests and need permission for JSON or file bodies, which is never given."""
+        if method in ("GET", "HEAD"):
+            return True
+        origin = self.headers.get("Origin")
+        if origin and origin != "null" and urllib.parse.urlparse(origin).netloc.lower() != (self.headers.get("Host") or "").lower():
+            return False
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        return ctype in ("application/json", "application/octet-stream")
+
     def _handle(self, method: str):
         u = urllib.parse.urlparse(self.path)
         q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query).items()}
+        if not self._host_ok():
+            return self._send(421, b"Open Reel Shelf at http://localhost:8765", "text/plain; charset=utf-8")
         ok, extra = self._authorized(q)
         if not ok:
             return self._send(401, b"Open the address shown on your PC (it contains the access code).", "text/plain; charset=utf-8")
         path = u.path
+        if path.startswith("/api/") and not self._same_origin(method):
+            return self._json(403, {"error": "Blocked: this request did not come from the Reel Shelf app."}, extra)
+        if self.token and "t" in q and method == "GET" and not path.startswith(("/api/", "/media/")):
+            # access code accepted: keep it out of the address bar and history (the cookie carries it now)
+            return self._send(303, b"", "text/plain", {**extra, "Location": path or "/"})
         try:
             if path.startswith("/api/"):
                 return self._api(method, path, q, extra)
@@ -750,7 +809,12 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, target.read_bytes(), ctype, extra)
 
     def _body(self) -> bytes:
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError as e:
+            raise ApiError(400, "Bad Content-Length") from e
+        if n < 0:
+            raise ApiError(400, "Bad Content-Length")
         if n > MAX_UPLOAD:
             raise ApiError(413, "File too large")
         return self.rfile.read(n) if n else b""
