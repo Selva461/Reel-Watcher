@@ -5,6 +5,8 @@
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
     <queries>
         <package android:name="com.termux" />
+        <!-- Google Lens lives in the Google app -->
+        <package android:name="com.google.android.googlequicksearchbox" />
     </queries>
     <application
         android:label="Reel Shelf"

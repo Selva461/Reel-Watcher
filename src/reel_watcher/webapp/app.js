@@ -15,7 +15,7 @@ function esc(v) {
 const enc = encodeURIComponent;
 const TYPE_LABEL = { movie: "Movie", series: "Series", anime: "Anime", manga: "Manga", book: "Book", game: "Game", other: "Other" };
 const SOURCE_LABEL = { web: "Web search", text: "On-screen text", speech: "Said in the reel", caption: "Caption", comment: "Comment", scene: "Screenshot match", ai: "AI guess", user: "You" };
-const CONF = { confirmed: ["Confirmed", "ok"], matched: ["Matched from screenshot", "ok"], check: ["Check this", "warn"] };
+const CONF = { confirmed: ["Verified", "ok"], matched: ["Verified", "ok"], check: ["Possible match", "warn"] };
 const TINTS = ["#F2B544", "#7FB7E8", "#E89A7F", "#B6A3E8", "#E8D27F", "#9CCB8E", "#E8A3C4", "#8FD3CF"];
 const ICON = {
   back: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>',
@@ -88,7 +88,7 @@ const FILTER_GROUPS = [
   ["found_from", "Found from", "", ["Reel", "Screenshot", "Comment"]],
   ["confidence", "Confidence", "", ["confirmed", "matched", "check"]],
 ];
-const VALUE_LABEL = { to_watch: "To watch", watching: "Watching", watched: "Watched", favorites: "Favorites", confirmed: "Confirmed", matched: "Matched from screenshot", check: "Check this", ...TYPE_LABEL };
+const VALUE_LABEL = { to_watch: "To watch", watching: "Watching", watched: "Watched", favorites: "Favorites", confirmed: "Verified", matched: "Verified", check: "Possible match", ...TYPE_LABEL };
 let filters = store("filters") || {};
 function saveFilters() { store("filters", filters); }
 function activeCount() { return Object.entries(filters).reduce((n, [k, v]) => n + (Array.isArray(v) ? v.length : (k === "year_from" || k === "year_to") && v ? 1 : 0), 0); }
@@ -120,7 +120,7 @@ async function homeScreen() {
     ${active.map((j) => `<a class="card" href="#/progress"><span class="coll-icon" style="background:#2C2D34;color:#F2B544">${ICON.folder}</span>
       <span class="stack grow" style="gap:6px"><strong>${esc(j.name)}</strong><span class="bar"><span style="width:${pct(j.done, j.total)}%"></span></span>
       <span class="small muted">${j.scanning ? "Finding images..." : `${fmtN(j.done)} of ${fmtN(j.total)}`} · ${j.state === "paused" ? "paused" : "running in background"}</span></span></a>`).join("")}
-    ${d.check ? `<a class="card" href="#/check"><span class="dot" style="background:var(--accent)"></span><span class="grow"><strong>Check this</strong><br><span class="small muted">${d.check} unsure ${d.check === 1 ? "guess" : "guesses"} to confirm</span></span>${ICON.chev}</a>` : ""}
+    ${d.check ? `<a class="card" href="#/check"><span class="dot" style="background:var(--accent)"></span><span class="grow"><strong>Possible matches</strong><br><span class="small muted">${d.check} unsure ${d.check === 1 ? "guess" : "guesses"} to confirm</span></span>${ICON.chev}</a>` : ""}
     <div class="stack"><div class="row between"><h2>Collections</h2><a class="small" href="#/import">Import from Instagram</a></div>
       ${cols.length ? `<div class="grid2">${cols.map((c) => `
         <a class="card" style="flex-direction:column;align-items:flex-start;gap:10px" href="#/c/${enc(c.name)}">
@@ -431,18 +431,20 @@ async function itemScreen(id) {
   const statusText = { waiting_quota: it.kind === "reel" ? "Instagram is limiting downloads for now; it continues automatically"
     : "Waiting for the free search limit; it continues automatically", other: "This does not look like a movie, show, anime or manga", skipped: it.error || "No name found",
     failed: it.error || "Something went wrong", duplicate: "Same picture as one you already have" }[it.status];
-  $app.innerHTML = `${header(busy ? "Identifying..." : best ? "Match found" : "No match yet", "#/identify")}
+  const END_TITLE = { done: "Verified", check: "Possible match", skipped: "Not found", other: "Not a movie or show", failed: "Could not finish",
+    waiting_quota: "Paused", duplicate: "Already in your library", idle: "Not read yet" };
+  const [why, proof] = String((best && best.evidence) || "").split(" | ");
+  $app.innerHTML = `${header(busy ? "Identifying..." : END_TITLE[it.status] || (best ? "Possible match" : "Not found"), "#/identify")}
     <div class="row" style="align-items:flex-start">${thumb(it.meta.thumb, "thumb big")}
       <div class="stack grow" style="gap:8px">${best && best.kind === "title" ? `<span class="label">${esc(TYPE_LABEL[best.type] || "")}</span><h1 style="font-size:26px">${esc(best.name)}</h1>
         <span class="soft">${esc([best.year, best.extra && best.extra.episodes ? best.extra.episodes + " episodes" : ""].filter(Boolean).join(" · "))}</span>
         ${best.detail ? `<strong style="color:var(--accent)">${esc(best.detail)}</strong>` : ""}${confTag(best.confidence)}`
         : best && best.kind === "quote" ? `<p class="quote-text">"${esc(best.quote)}"</p>` : `<span class="muted">${esc(statusText || "Working on it...")}</span>`}</div></div>
     ${busy ? `<div class="card steps">${steps.map(([k, l], n) => `<div class="step ${n < at ? "done" : n === at ? "now" : "todo"}"><span class="ring">${n < at ? ICON.check.replace('width="20" height="20"', 'width="14" height="14"') : ""}</span><span>${l}</span></div>`).join("")}</div>` : ""}
-    ${!busy && best && best.kind === "title" ? `<div class="grid2">
-      <div class="card"><span class="small muted">Original language</span><br><strong>${esc(best.language || "Unknown")}</strong></div>
-      <div class="card"><span class="small muted">Genre</span><br><strong>${esc((best.genres || []).slice(0, 2).join(", ") || "Unknown")}</strong></div>
-      <div class="card"><span class="small muted">Found by</span><br><strong>${esc(SOURCE_LABEL[best.source] || best.source)}</strong></div>
-      <div class="card"><span class="small muted">Match</span><br><strong>${esc(best.evidence && /%/.test(best.evidence) ? best.evidence.match(/\d+%/)[0] : best.confidence === "check" ? "Unsure" : "Strong")}</strong></div></div>` : ""}
+    ${!busy && best && best.kind === "title" ? `<div class="card stack" style="gap:6px">
+      <span><span class="small muted">Why</span><br><strong>${esc(why ? why.charAt(0).toUpperCase() + why.slice(1) : SOURCE_LABEL[best.source] || best.source)}</strong></span>
+      ${proof ? `<span><span class="small muted">Evidence</span><br><span class="small">${esc(proof)}</span></span>` : ""}
+      <span class="small muted">${esc([best.language, (best.genres || []).slice(0, 2).join(", ")].filter(Boolean).join(" · "))}</span></div>` : ""}
     ${statusText && best ? `<span class="small muted">${esc(statusText)}</span>` : ""}
     ${!busy && alts.length ? `<div class="stack"><strong>${alts.length > 1 ? "Not right? Pick another" : "Is this right?"}</strong>
       ${best && best.alts && best.alts.length && best.confidence === "check" ? `<span class="small">Same name, different work:</span><span class="row wrap" style="gap:6px">${best.alts.map((a) => `<button class="chip" data-switch="${best.id}" data-key="${esc(a.ext_key)}">${esc([a.name, a.year, TYPE_LABEL[a.type]].filter(Boolean).join(" · "))}</button>`).join("")}</span>` : ""}
@@ -451,12 +453,22 @@ async function itemScreen(id) {
     ${!busy && it.meta.steps ? `<details class="card" ${best ? "" : "open"}><summary><strong>What was tried</strong></summary><div class="stack" style="gap:6px;margin-top:8px">
       ${Object.entries(it.meta.steps).map(([k, v]) => `<div class="row" style="align-items:flex-start;gap:8px"><span aria-hidden="true">${v.ok ? "✓" : v.ok === false ? "✗" : "–"}</span>
         <span><strong>${esc(k)}</strong><br><span class="small muted">${esc(v.detail || "")}</span></span></div>`).join("")}</div></details>` : ""}
+    ${!busy && it.kind === "image" && ["skipped", "check"].includes(it.status) ? `<button class="btn block primary" id="lens">Search with Google Lens</button>` : ""}
     ${!busy ? `<button class="btn block" id="fix">Type the name myself</button>` : ""}
     ${!busy && ["skipped", "failed", "check", "other", "waiting_quota"].includes(it.status) ? `<button class="btn block" id="retry">Try again</button>` : ""}
-    ${!busy && best && best.title_id ? `<a class="btn primary block" href="#/t/${best.title_id}">Open in my list</a>` : ""}`;
+    ${!busy && best && best.title_id ? `<a class="btn primary block" href="#/t/${best.title_id}">Open in my list</a>` : ""}
+    ${!busy ? `<button class="btn block link" id="dbg">Copy debug report</button>` : ""}`;
   if (busy) every(1500, () => { if (location.hash === `#/item/${id}`) itemScreen(id); });
-  bind("[data-pick]", "click", async (e, b) => { const r = await api(`/api/finds/${b.dataset.pick}/confirm`, { method: "POST", body: {} }); toast("Saved to your list"); location.hash = `#/t/${r.finds[0].title_id}`; });
-  bind("[data-switch]", "click", async (e, b) => { const r = await api(`/api/finds/${b.dataset.switch}/switch`, { method: "POST", body: { ext_key: b.dataset.key } }); toast("Changed"); location.hash = `#/t/${r.finds.find((f) => f.id === Number(b.dataset.switch)).title_id}`; });
+  bind("[data-pick]", "click", async (e, b) => {
+    try { const r = await api(`/api/finds/${b.dataset.pick}/confirm`, { method: "POST", body: {} }); toast("Saved to your list"); location.hash = `#/t/${r.finds[0].title_id}`; }
+    catch (err) { toast(err.message); }
+  });
+  bind("[data-switch]", "click", async (e, b) => {
+    try { const r = await api(`/api/finds/${b.dataset.switch}/switch`, { method: "POST", body: { ext_key: b.dataset.key } }); toast("Changed"); location.hash = `#/t/${r.finds.find((f) => f.id === Number(b.dataset.switch)).title_id}`; }
+    catch (err) { toast(err.message); }
+  });
+  bind("#lens", "click", () => searchWithLens(id));
+  bind("#dbg", "click", () => copyDebug(`/api/items/${id}/debug`));
   bind("#fix", "click", () => {
     renameDialog(alts.length ? `/api/finds/${alts[0].id}/rename` : `/api/items/${id}/name`, (r) => { location.hash = `#/t/${r.finds[0].title_id}`; });
   });
@@ -465,6 +477,45 @@ async function itemScreen(id) {
     try { await api(`/api/items/${id}/retry`, { method: "POST", body: {} }); toast("Trying again"); itemScreen(id); }
     catch (err) { toast(err.message); b.disabled = false; }
   });
+}
+
+// Google Lens has no free API: the picture is handed to the Lens app (Android share sheet), the user reads the
+// answer there and types it here with "Type the name myself".
+async function searchWithLens(id) {
+  const url = `/api/items/${id}/image`;
+  if (window.ReelShelf && window.ReelShelf.shareImage) {
+    const r = window.ReelShelf.shareImage(url);
+    if (r === "ok") return toast("Opening Google Lens. Then come back and tap Type the name myself.");
+    return toast(r || "Could not open Google Lens");
+  }
+  try {
+    const blob = await (await fetch(url)).blob();
+    const file = new File([blob], "screenshot.jpg", { type: blob.type || "image/jpeg" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: "Search with Google Lens" });
+      return toast("Pick Google Lens (or Google). Then come back and tap Type the name myself.");
+    }
+  } catch (err) {
+    if (err && err.name === "AbortError") return;
+  }
+  window.open("https://lens.google.com/", "_blank", "noopener");
+  toast("Upload the screenshot in Google Lens, then come back and type the name.");
+}
+
+async function copyDebug(url) {
+  let text;
+  try { text = (await api(url)).text; } catch (err) { return toast(err.message); }
+  try {
+    if (window.ReelShelf && window.ReelShelf.copy) window.ReelShelf.copy(text);
+    else await navigator.clipboard.writeText(text);
+    toast("Debug report copied. Paste it in your message to Claude.");
+  } catch (err) {
+    $dlg.innerHTML = `<div class="stack"><h2>Debug report</h2><span class="small muted">Select all and copy:</span>
+      <textarea class="input" style="min-height:240px;font-family:monospace;font-size:11px" readonly>${esc(text)}</textarea>
+      <button class="btn primary" id="dclose">Close</button></div>`;
+    $dlg.showModal();
+    $dlg.querySelector("#dclose").onclick = () => $dlg.close();
+  }
 }
 
 async function searchScreen() {
@@ -552,7 +603,7 @@ async function progressScreen() {
   const d = await api("/api/jobs");
   const visible = d.jobs.slice(0, 12);
   const anyRunning = d.active.some((j) => j.state === "running");
-  const groups = (c) => [["Names found", c.done || 0, "#9CCB8E", "#/search"], ["Check this", c.check || 0, "#F2B544", "#/check"],
+  const groups = (c) => [["Names found", c.done || 0, "#9CCB8E", "#/search"], ["Possible matches", c.check || 0, "#F2B544", "#/check"],
     ["Waiting for free limit", c.waiting_quota || 0, "#7FB7E8", ""], ["Duplicates skipped", c.duplicate || 0, "#8E8B85", ""],
     ["Other (chats, memes)", c.other || 0, "#B6A3E8", ""], ["No name found", (c.skipped || 0) + (c.failed || 0), "#6E6B66", ""]].filter((g) => g[1]);
   $app.innerHTML = `${header("Running in background", "")}
@@ -580,7 +631,7 @@ async function checkScreen() {
   const byItem = {};
   for (const f of d.finds) (byItem[f.item_id] = byItem[f.item_id] || []).push(f);
   const items = Object.values(byItem);
-  $app.innerHTML = `${header("Check this", "#/")}
+  $app.innerHTML = `${header("Possible matches", "#/")}
     <span class="muted">Unsure guesses. Confirm the right one, fix the name, or remove it.</span>
     ${items.length ? items.map((fs) => `<div class="card stack"><div class="row" style="align-items:flex-start">${thumb(fs[0].thumb)}<div class="stack grow" style="gap:8px">
       ${fs.map((f) => `<div class="row between wrap"><span><strong>${esc(f.name || f.name_raw)}</strong><br><span class="small muted">${esc([TYPE_LABEL[f.type], f.year, SOURCE_LABEL[f.source]].filter(Boolean).join(" · "))}</span></span>
@@ -596,7 +647,9 @@ async function settingsScreen() {
   const s = await api("/api/settings");
   $app.innerHTML = `${header("Settings", "#/")}
     <div class="card"><div class="opt"><span class="grow"><span>Online lookups</span><br><span class="small muted">AniList, Wikidata, trace.moe, SauceNAO. All free; needed to confirm names.</span></span>
-      <button class="switch" role="switch" aria-label="Online lookups" aria-checked="${!!s.online}" id="online"><span></span></button></div></div>
+      <button class="switch" role="switch" aria-label="Online lookups" aria-checked="${!!s.online}" id="online"><span></span></button></div>
+      <div class="opt"><span class="grow"><span>AI guesses</span><br><span class="small muted">Off: names come from the text on screen, the speech, captions and comments, checked in databases and on the web, plus free picture matching. On: also asks the local AI model (needs about 3 GB and is slow on phones). AI guesses are never treated as proof.</span></span>
+      <button class="switch" role="switch" aria-label="AI guesses" aria-checked="${!!s.ai}" id="ai"><span></span></button></div></div>
     <div class="card stack"><strong>Use it on your phone</strong>
       <span class="small soft">Phone only: install it on the phone (see README, "Phone without a PC") and open http://localhost:8765.<br>
       With your PC: run <code>reel-watcher app --lan</code> on the PC and scan the QR code it shows. Then use your browser's "Add to Home screen".</span></div>
@@ -606,11 +659,15 @@ async function settingsScreen() {
     <a class="btn" href="/api/export.csv">Export everything (CSV)</a>
     <div class="card stack" id="ver"><strong>Version</strong><span class="small muted">Checking...</span></div>
     <div class="card stack"><strong>Self-check</strong><span class="small muted">Tries every feature on this device for real: text reader, speech, AI model, web search, databases. Takes 1 to 3 minutes.</span>
-      <button class="btn" id="chk">Run self-check</button><div class="stack" id="chkout" style="gap:6px"></div></div>`;
+      <button class="btn" id="chk">Run self-check</button><div class="stack" id="chkout" style="gap:6px"></div></div>
+    <div class="card stack"><strong>Something not working?</strong><span class="small muted">Copies a report with the version, settings, recent problems and the last self-check (no pictures, no file contents). Paste it in your message.</span>
+      <button class="btn" id="appdbg">Copy debug report</button></div>`;
   versionCard();
   showCheck(await api("/api/selfcheck"));
+  bind("#appdbg", "click", () => copyDebug("/api/debug"));
   bind("#chk", "click", async () => { showCheck(await api("/api/selfcheck", { method: "POST", body: {} })); });
   bind("#region", "change", async (e, el) => { await api("/api/settings", { method: "POST", body: { region: el.value } }); toast("Country saved"); });
+  bind("#ai", "click", async (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; await api("/api/settings", { method: "POST", body: { ai: on } }); b.setAttribute("aria-checked", on); toast(on ? "AI guesses on" : "AI guesses off"); });
   bind("#online", "click", async (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; await api("/api/settings", { method: "POST", body: { online: on } }); b.setAttribute("aria-checked", on); toast(on ? "Online lookups on" : "Online lookups off"); });
 }
 

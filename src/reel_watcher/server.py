@@ -56,6 +56,8 @@ class App:
         self.engine = engine
         self.settings_path = lib.dir / "settings.json"
         self.repo = REPO_DIR if (REPO_DIR / ".git").exists() else None
+        from . import debuglog
+        debuglog.setup(lib.dir)
         self.restart = None  # set by main(): replaces this process with a fresh one after an update
 
     # ------------------------------------------------------------ version and self-update
@@ -77,6 +79,86 @@ class App:
             except (ApiError, OSError, ValueError):
                 pass
         return out
+
+    # ------------------------------------------------------------ debug reports (pasted to whoever helps you)
+
+    def _header_lines(self) -> list[str]:
+        import platform
+        v = self.version()
+        st = self.settings()
+        return [f"version: {v['version']} ({v['date']}) | python {platform.python_version()} | {platform.system()} {platform.machine()}"
+                f" | termux: {'yes' if os.environ.get('TERMUX_VERSION') or 'com.termux' in str(Path.home()) else 'no'}",
+                f"settings: online={st['online']} ai={st['ai']} region={st['region']}",
+                f"warnings: {'; '.join(v['warnings']) or 'none'}"]
+
+    def item_debug(self, iid: int) -> dict:
+        from . import debuglog
+        it = self.item(iid)
+        m = it["meta"]
+        lines = [f"Reel Shelf debug report: item {iid}", *self._header_lines(),
+                 f"item: kind={it['kind']} status={it['status']} attempts={it.get('attempts')} stage={it.get('stage') or '-'}",
+                 f"error: {it.get('error') or '-'}", f"collections: {', '.join(it.get('collections') or [])}",
+                 f"file: {Path(str(it['source'])).name if it['kind'] == 'image' else it['source']}"]
+        if m.get("ocr") is not None:
+            lines.append(f"text read ({len(m['ocr'].split())} words): {m['ocr'][:700]}")
+        for k in ("caption", "transcript", "reel_language", "author"):
+            if m.get(k):
+                lines.append(f"{k}: {str(m[k])[:400]}")
+        lines.append("steps:")
+        for k, v in (m.get("steps") or {}).items():
+            lines.append(f"  {'OK ' if v.get('ok') else 'ERR' if v.get('ok') is False else ' - '} {k}: {v.get('detail')}")
+        for r in m.get("web") or []:
+            w = r.get("work") or {}
+            lines.append(f"web: query={r.get('query')!r} clue={r.get('clue')!r} -> " +
+                         (f"{w.get('name')} ({w.get('year')}, {w.get('type')}) via {w.get('site')}, {w.get('agree')} sites, "
+                          f"other years={w.get('same_name_other_years')}" if w else "nothing") + f" | notes: {r.get('notes')}")
+        for svc, res in (m.get("scene") or {}).items():
+            lines.append(f"picture {svc}: {json.dumps(res, ensure_ascii=False, default=str)[:300]}")
+        lines.append("decision:")
+        for name, d in (m.get("proof") or {}).items():
+            lines.append(f"  {name}: {d['verdict']} ({d['reason']})")
+            for p in d["proof"]:
+                lines.append(f"     {'counts' if p.get('counts') else 'no    '} {p['kind']}: {p.get('detail', '')[:150]}" + (f" [{p['why']}]" if p.get("why") else ""))
+        lines.append("finds:")
+        for f in it["finds"]:
+            lines.append(f"  {f.get('name') or f.get('name_raw') or f.get('quote', '')[:40]} | {f['confidence']} | {f['source']} | {f['evidence']}")
+        lines.append("events:")
+        lines += [f"  {json.dumps(e, ensure_ascii=False, default=str)[:400]}" for e in debuglog.recent(40, item=iid)]
+        return {"text": "\n".join(lines)}
+
+    def app_debug(self) -> dict:
+        from . import debuglog
+        lines = ["Reel Shelf debug report: app", *self._header_lines()]
+        rows = self.lib.q("SELECT kind, status, COUNT(*) n FROM items GROUP BY kind, status ORDER BY kind, status")
+        lines.append("items: " + ", ".join(f"{r['kind']}/{r['status']}={r['n']}" for r in rows))
+        for j in self.lib.q("SELECT id, name, kind, state FROM jobs ORDER BY id DESC LIMIT 8"):
+            lines.append(f"job {j['id']}: {j['name']} [{j['kind']}] {j['state']} {self.lib.counts(job_id=j['id'])}")
+        if self.engine:
+            lines.append(f"working now: {len(self.engine.current)} | threads alive: {sum(t.is_alive() for t in self.engine.threads)}")
+        lines.append("recent problems:")
+        for r in self.lib.q("SELECT id, kind, status, error, meta FROM items WHERE status IN ('failed','skipped') OR error!='' "
+                            "ORDER BY updated_at DESC LIMIT 12"):
+            bad = [k for k, v in (r["meta"].get("steps") or {}).items() if v.get("ok") is False]
+            lines.append(f"  item {r['id']} {r['kind']} {r['status']}: {r['error'] or '-'}" + (f" | failed steps: {', '.join(bad)}" if bad else ""))
+        chk = self.check_status()
+        if chk.get("rows"):
+            lines.append("last self-check: " + "; ".join(f"{'PASS' if x['ok'] else 'FAIL'} {x['name']}" + ("" if x["ok"] else f" ({x['detail'][:80]})")
+                                                       for x in chk["rows"]))
+        lines.append("events:")
+        ev = debuglog.recent(400)
+        errors = [e for e in ev if e.get("event") == "error"][-15:]
+        lines += [f"  {json.dumps(e, ensure_ascii=False, default=str)[:600]}" for e in errors]
+        lines += [f"  {json.dumps(e, ensure_ascii=False, default=str)[:300]}" for e in ev[-50:] if e not in errors]
+        return {"text": "\n".join(lines)}
+
+    def item_image(self, iid: int) -> Path:
+        it = self.lib.item(iid)
+        if not it or it["kind"] != "image":
+            raise ApiError(404, "No picture for this item")
+        p = Path(str(it["source"]))
+        if not p.is_file() or p.suffix.lower() not in scanner.IMAGE_EXT:
+            raise ApiError(404, "The picture file is gone (moved or deleted)")
+        return p
 
     def start_check(self) -> dict:
         from . import checks
@@ -117,7 +199,7 @@ class App:
     # ------------------------------------------------------------ settings
 
     def settings(self) -> dict:
-        s = {"online": True, "quote_style": "bold", "region": "IN"}
+        s = {"online": True, "quote_style": "bold", "region": "IN", "ai": False}
         try:
             s.update(json.loads(self.settings_path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
@@ -126,12 +208,14 @@ class App:
 
     def save_settings(self, body: dict) -> dict:
         s = self.settings()
-        s.update({k: v for k, v in body.items() if k in ("online", "quote_style", "region")})
+        s.update({k: v for k, v in body.items() if k in ("online", "quote_style", "region", "ai")})
+        s["online"], s["ai"] = bool(s.get("online")), bool(s.get("ai"))
         s["region"] = re.sub(r"[^A-Z]", "", str(s.get("region") or "IN").upper())[:2] or "IN"
         self.settings_path.write_text(json.dumps(s), encoding="utf-8")
         if self.engine:
             self.engine.online = bool(s["online"])
             self.engine.region = s["region"]
+            self.engine.ai = bool(s["ai"])
         return s
 
     # ------------------------------------------------------------ home and collections
@@ -598,6 +682,16 @@ def _version(app, m, q, body):
     return app.version()
 
 
+@route("GET", r"/api/items/(?P<id>\d+)/debug")
+def _item_debug(app, m, q, body):
+    return app.item_debug(int(m["id"]))
+
+
+@route("GET", "/api/debug")
+def _app_debug(app, m, q, body):
+    return app.app_debug()
+
+
 @route("POST", "/api/selfcheck")
 def _selfcheck(app, m, q, body):
     return app.start_check()
@@ -824,6 +918,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             import traceback
             traceback.print_exc()  # full details go to the log (Termux: ~/reel-shelf.log)
+            from .debuglog import log_error
+            log_error("http", e, method=method, path=path)
             return self._json(500, {"error": f"Reel Shelf hit a problem ({type(e).__name__}: {str(e)[:120]}). "
                                              "Try again; if it repeats, update the app in Settings."}, extra)
 
@@ -868,6 +964,11 @@ class Handler(BaseHTTPRequestHandler):
             loose.mkdir(exist_ok=True)
             (loose / kind).write_bytes(raw)
             return self._json(200, self.app.import_export(loose), extra)
+        mi = re.fullmatch(r"/api/items/(\d+)/image", path)
+        if method == "GET" and mi:
+            p = self.app.item_image(int(mi.group(1)))
+            ctype = mimetypes.guess_type(p.name)[0] or "image/jpeg"
+            return self._send(200, p.read_bytes(), ctype, extra)
         if method == "POST" and path == "/api/identify/image":
             raw = self._body()
             name = urllib.parse.unquote(self.headers.get("X-Filename") or "image.jpg")
@@ -959,6 +1060,7 @@ def main(argv: list[str] | None = None) -> int:
     if engine:
         engine.online = bool(app.settings()["online"])
         engine.region = app.settings()["region"]
+        engine.ai = bool(app.settings()["ai"])
         engine.start()
     def restart():
         def later():

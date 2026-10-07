@@ -17,7 +17,8 @@ import time
 import traceback
 from pathlib import Path
 
-from . import details, gif, identify, lookups, scanner
+from . import details, evidence, gif, identify, lookups, scanner
+from .debuglog import log_error, log_event
 from .library import Library
 
 BLOCK_RE = re.compile(r"login|rate.?limit|429|401|checkpoint|not available", re.I)
@@ -41,9 +42,22 @@ def days_left_in_month() -> int:
 
 
 RETRY_SOON = 120  # seconds to wait after a service asks us to slow down
+MAX_ATTEMPTS = 4  # an item that crashed the app this many times is stopped with its reason
+STALE_AFTER = 45 * 60  # a 'working' item nobody touched for this long is queued again
+MAX_INSTAGRAM_WAITS = 6  # a reel Instagram refused this many times (about 6 hours) ends as failed
 
 
 TITLE_KINDS = ("movie", "series", "anime", "manga", "book", "game")
+
+
+def scene_detail(svc: str, res: dict) -> str:
+    """'Episode 3 · at 8:41' (anime) or 'Chapter 210' (manga) from a picture-search result."""
+    if svc == "trace":
+        at = res.get("at_s") or 0
+        return " · ".join(x for x in (f"Episode {res['episode']}" if res.get("episode") else "",
+                                      f"at {int(at // 60)}:{int(at % 60):02d}" if at else "") if x)
+    part = res.get("part") or ""
+    return (f"Chapter {part}" if (res.get("kind") or "manga") == "manga" else f"Episode {part}") if part else ""
 
 
 def item_kind(item: dict) -> str:
@@ -67,6 +81,7 @@ class Engine:
         self._vision_lock = threading.Lock()
         self.warnings: list[str] = []
         self.current: dict[str, str] = {}
+        self.ai = False  # AI picture guesses: off unless the user turns them on (Settings); never counted as proof
         self.region = "IN"  # country for "where to watch" (TMDB, optional)
         self._trace_cap: tuple[str, int] | None = None
 
@@ -123,16 +138,48 @@ class Engine:
                 self.current.pop(name, None)
                 self.stop_ev.wait(self.idle_wait)
                 continue
+            iid = item["id"]
+            if item.get("attempts", 0) > MAX_ATTEMPTS:  # it keeps crashing the app (e.g. Android killed it): stop
+                self.lib.update_item(iid, status="failed", stage="", error=f"Stopped after {MAX_ATTEMPTS} tries"
+                                     + (f". Last problem: {item['error']}" if item.get("error") else "") + ". Tap Try again.")
+                log_event("end", item=iid, status="failed", reason="too many tries")
+                continue
             self.current[name] = item["source"]
+            t0 = time.time()
+            log_event("start", item=iid, kind=item["kind"], attempt=item.get("attempts"))
             try:
                 fn(item)
             except Exception as e:  # noqa: BLE001  one bad item never stops the job
-                self.lib.update_item(item["id"], status="failed", error=f"{type(e).__name__}: {e}"[:300], stage="")
+                log_error("process", e, item=iid)
                 traceback.print_exc()
+                self.lib.update_item(iid, status="failed", stage="", error=f"Unexpected problem ({type(e).__name__}: {str(e)[:150]}). "
+                                     "Tap Try again; if it happens again, copy the debug report.")
+            finally:
+                after = self.lib.one("SELECT status FROM items WHERE id=?", (iid,))
+                if after and after["status"] == "working":  # a code path that forgot to set an end state
+                    self.lib.update_item(iid, status="failed", stage="", error="Ended without a result. Tap Try again.")
+                    log_event("end", item=iid, status="failed", reason="no end state")
+                elif after and after["status"] in ("waiting_quota", "done", "check", "skipped", "other"):
+                    self.lib.x("UPDATE items SET attempts=0 WHERE id=?", (iid,))  # only crash loops count as tries
+                log_event("finished", item=iid, status=(after or {}).get("status"), seconds=round(time.time() - t0, 1))
 
     def _watch_loop(self) -> None:
-        while not self.stop_ev.wait(self.watch_every):
-            self.rescan_watched()
+        while not self.stop_ev.wait(min(self.watch_every, 60)):
+            self.release_stale()
+            if time.time() - getattr(self, "_last_rescan", 0) >= self.watch_every:
+                self._last_rescan = time.time()
+                self.rescan_watched()
+
+    def release_stale(self, max_age: float = STALE_AFTER) -> int:
+        """Watchdog: an item marked working that no worker is handling (and untouched for a long time) is queued again."""
+        busy = set(self.current.values())
+        n = 0
+        for r in self.lib.q("SELECT id, source FROM items WHERE status='working' AND updated_at<?", (time.time() - max_age,)):
+            if r["source"] not in busy:
+                self.lib.update_item(r["id"], status="waiting", stage="")
+                log_event("watchdog", item=r["id"], action="requeued")
+                n += 1
+        return n
 
     def rescan_watched(self) -> None:
         for j in self.lib.q("SELECT * FROM jobs WHERE kind='folder' AND state='running'"):
@@ -222,12 +269,15 @@ class Engine:
     # ------------------------------------------------------------ screenshots
 
     def process_image(self, item: dict) -> None:
-        """Each step runs on its own and records what happened in meta["steps"], so one failing service never stops
-        the others and the app can show what was tried: read text, check names, web search, AI look, scene search."""
+        """Screenshot: read the text, check names in the databases, search the web, then match the picture
+        (anime scenes, manga panels, movie frames). Each step runs on its own, records what happened in meta["steps"]
+        and keeps its results in meta, so a pause for a free-service limit resumes where it stopped. The answer is
+        decided by evidence.verdict: VERIFIED only when two independent sources agree, else POSSIBLE, else NOT FOUND.
+        The AI model is only asked when the user turned "AI guesses" on, and its guesses never count as proof."""
         lib, iid = self.lib, item["id"]
         path = Path(item["source"])
         if not path.exists():
-            lib.update_item(iid, status="skipped", error="file no longer exists")
+            lib.update_item(iid, status="failed", stage="", error="The picture file is gone (moved or deleted)")
             return
         meta = item["meta"]
         kind = item_kind(item)
@@ -236,6 +286,7 @@ class Engine:
         def note(step: str, ok, detail: str) -> None:
             steps[step] = {"ok": ok, "detail": str(detail)[:300]}
             lib.update_item(iid, meta=meta)
+            log_event("step", item=iid, step=step, ok=ok, detail=str(detail)[:200])
 
         if "ocr" not in meta:
             from .study import ocr_image
@@ -251,12 +302,13 @@ class Engine:
             lib.update_item(iid, meta=meta)
         text = meta["ocr"]
         cands = identify.extract_candidates([("text", text)])
-        top = cands[0] if cands else None
         if identify.looks_like_other(text) and not identify.page_clues(text):
             note("Read text", True, "looks like a chat, receipt or payment screen")
-            lib.update_item(iid, status="other", stage="")
+            self._end_image(iid, meta, end="other")
             return
-        if "text_checked" not in meta:
+
+        # names written on the screen, checked in the databases
+        if "db" not in meta:
             lib.update_item(iid, stage="checking names")
             found = []
             if not self.online:
@@ -265,135 +317,207 @@ class Engine:
                 note("Check names", None, "no title-like text")
             else:
                 try:
-                    found = identify.resolve_candidates(cands, kind, resolver=self._resolver(), language=top.get("language"))
-                    note("Check names", bool(found), ", ".join(t["name"] for t in found[:3]) if found else
+                    found = identify.resolve_candidates(cands, kind, resolver=self._resolver(), language=cands[0].get("language"))
+                    note("Check names", True if found else None,
+                         "; ".join(f"{t['name']}: {t['reason']}" for t in found[:3]) if found else
                          "not in the databases: " + ", ".join(c["name"] for c in cands[:3]))
                 except Exception as e:  # noqa: BLE001
                     note("Check names", False, f"lookup failed: {e}")
-            meta["text_checked"] = True
+            meta["db"] = [{k: v for k, v in t.items() if k != "extra"} for t in found]
             lib.update_item(iid, meta=meta)
-            for t in found[:3]:
-                lib.add_find(iid, "title", title_id=self.save_title(t), name_raw=t["raw"], source="text", evidence=t["evidence"],
-                             confidence=t["confidence"], score=t.get("score", 1.0), alts=t.get("alternatives") or [])
-            if any(t["confidence"] == "confirmed" for t in found):
-                lib.update_item(iid, status="done", stage="")
-                return
-        if "web" not in meta and self.online:
-            query = identify.search_query(text, cands, kind)
-            if not query:
-                meta["web"] = {}
-                note("Web search", None, "not enough text to search with")
-            else:
-                lib.update_item(iid, stage="searching the web")
-                work, notes = None, []
-                try:
-                    work, notes = lookups.web_identify(query, name_hint=top["name"] if top else "",
-                                                       kind_hint=(top or {}).get("type") or (kind if kind in TITLE_KINDS else ""),
-                                                       year=(top or {}).get("year"))
-                except Exception as e:  # noqa: BLE001
-                    notes = [f"web search failed: {e}"]
-                meta["web"] = {"query": query, "notes": notes[-4:], "work": work}
-                if work:
-                    tid = self.save_web_work(work, (top or {}).get("language"))
-                    lib.add_find(iid, "title", title_id=tid, name_raw=work["name"], source="web",
-                                 evidence=f"Web search: {work['evidence']}"[:200], confidence="confirmed" if work["sure"] else "check",
-                                 score=0.9 if work["sure"] else 0.5)
-                    note("Web search", True, f"{work['evidence']} ({work['site']})")
-                    if work["sure"]:
-                        lib.update_item(iid, status="done", stage="")
-                        return
-                else:
-                    note("Web search", False, "; ".join(notes[-3:]) or "nothing found")
-        if "ai" not in meta:  # the guess is shown right away; scene search may replace it later
-            lib.update_item(iid, stage="AI looking at the picture")
-            is_media, guesses, v = True, [], None
-            try:
-                v = self.vision()
-                if v is None:
-                    note("AI look", None, "AI model not available on this device" + (f" ({self.warnings[-1]})" if self.warnings else ""))
-                else:
-                    with self.heavy:
-                        is_media, guesses = identify.ai_image_guesses(v, str(path), text)
-                    note("AI look", bool(guesses), ", ".join(g["name"] for g in guesses) if guesses else "no guess")
-            except Exception as e:  # noqa: BLE001  e.g. the model ran out of memory: the other steps still count
-                note("AI look", False, f"AI model failed: {e}")
-            meta["ai"] = {"is_media": is_media, "guesses": guesses, "ran": v is not None}
-            lib.update_item(iid, meta=meta)
-            if v is not None and not is_media and not cands and not self._has_finds(iid):
-                lib.update_item(iid, status="other", stage="")
-                return
-            try:
-                self.add_ai_guesses(iid, guesses, kind)
-            except Exception as e:  # noqa: BLE001
-                note("AI look", False, f"could not save the guesses: {e}")
-        guesses = meta["ai"].get("guesses") or []
-        if not self.online:
-            self._finish_image(iid)
+        if self._verified(iid, meta, text):
             return
-        # scene search. trace.moe (anime, 100 free a month) is kept for pictures that look like anime;
-        # SauceNAO covers manga panels and also movie/show frames (its IMDb indexes)
-        gtypes = {g.get("type") for g in guesses}
-        web_kind = ((meta.get("web") or {}).get("work") or {}).get("type")
-        live_action = (bool(guesses) and gtypes <= {"movie", "series"}) or web_kind in ("movie", "series")
-        if kind in ("book", "game"):
-            services = []
-        elif live_action or kind in ("movie", "series"):
-            services = ["sauce"]
-        elif kind == "manga" or "manga" in gtypes:
-            services = ["sauce", "trace"]
-        else:
-            services = ["trace", "sauce"]
-        scene = meta.setdefault("scene", {})
-        data = None
-        for svc in services:
-            if svc in scene:
-                continue
-            allowed, retry_at = self._service_allowed(svc)
-            if not allowed:
-                lib.update_item(iid, status="waiting_quota", next_try_at=retry_at, stage="", meta=meta)
+
+        # the web: which work is this name (new and regional titles the databases do not have yet)
+        if "web" not in meta and self.online:
+            lib.update_item(iid, stage="searching the web")
+            done = {lookups.norm(t["raw"]) for t in meta["db"] if t["confidence"] == "confirmed"}
+            clues = [c for c in cands if c["key"] not in done and c["score"] >= 1.0][:2]
+            runs = []
+            for c in clues or [None]:
+                query = identify.search_query(text, [c] if c else [], kind)
+                if not query:
+                    continue
+                try:
+                    work, notes = lookups.web_identify(query, name_hint=c["name"] if c else "",
+                                                       kind_hint=(c or {}).get("type") or (kind if kind in TITLE_KINDS else ""),
+                                                       year=(c or {}).get("year"))
+                except Exception as e:  # noqa: BLE001
+                    work, notes = None, [f"web search failed: {e}"]
+                runs.append({"clue": c["name"] if c else "", "where": c["sources"] if c else [], "year": (c or {}).get("year"),
+                             "language": (c or {}).get("language"), "query": query, "work": work, "notes": notes[-4:]})
+            meta["web"] = runs
+            hits = [r for r in runs if r["work"]]
+            errored = runs and not hits and all(any("failed" in n or "Error" in n or "HTTP" in n or ": <" in n for n in r["notes"]) for r in runs)
+            note("Web search", True if hits else False if errored else None,
+                 "; ".join(f"{r['work']['evidence']} ({r['work']['site']})" for r in hits) if hits else
+                 ("; ".join(n for r in runs for n in r["notes"][-2:])[:300] or "nothing found") if runs else "not enough text to search with")
+            if self._verified(iid, meta, text):
                 return
-            if data is None:
-                data = self._scene_bytes(path)
-            lib.update_item(iid, stage="searching anime scenes" if svc == "trace" else "searching manga panels")
-            try:
-                res = lookups.trace_moe(data) if svc == "trace" else lookups.saucenao(data)
-            except lookups.QuotaExceeded:
-                lib.quota_exhaust(svc)
-                lib.update_item(iid, status="waiting_quota", next_try_at=next_month_ts() if svc == "trace" else tomorrow_ts(), stage="", meta=meta)
-                return
-            except lookups.RateLimited:  # busy or too fast: a short pause, the search was not used up
-                lib.update_item(iid, status="waiting_quota", next_try_at=time.time() + RETRY_SOON, stage="", meta=meta)
-                return
-            except (lookups.ServiceError, OSError) as e:
-                res = None
-                scene[svc + "_error"] = str(e)[:120]
-            scene[svc] = res or {}
-            label = "Anime scene search" if svc == "trace" else "Manga and movie scene search"
-            accepted = False
-            try:
-                accepted = self._accept_scene(iid, svc, res)
-            except Exception as e:  # noqa: BLE001
-                scene[svc + "_error"] = str(e)[:120]
-            if scene.get(svc + "_error"):
-                note(label, False, scene[svc + "_error"])
+
+        # the picture itself: free scene searches (not AI)
+        if self.online:
+            web_kinds = {(r.get("work") or {}).get("type") for r in meta.get("web") or []}
+            # trace.moe only knows anime and gives 100 free searches a month: it is kept for anime pictures.
+            # SauceNAO covers anime, manga, movies and shows, so it goes first when the kind is unknown.
+            if kind in ("book", "game"):
+                services = []
+            elif kind in ("movie", "series", "manga") or web_kinds & {"movie", "series"}:
+                services = ["sauce"]
+            elif kind == "anime":
+                services = ["trace", "sauce"]
             else:
-                note(label, accepted, f"{res['name']} ({round(res.get('score', 0) * 100)}%)" if res and res.get("name") else "no match")
-            if accepted:
-                lib.update_item(iid, status="done", stage="")
-                return
-        self._finish_image(iid)
+                services = ["sauce", "trace"]
+            scene = meta.setdefault("scene", {})
+            data = None
+            for svc in services:
+                if svc in scene:
+                    continue
+                if svc == "trace" and kind != "anime" and (scene.get("sauce") or {}).get("kind") not in (None, "anime"):
+                    continue  # SauceNAO already says it is a movie, show or manga
+                allowed, retry_at = self._service_allowed(svc)
+                label = "Anime scene search" if svc == "trace" else "Manga and movie scene search"
+                if not allowed:
+                    note(label, None, "free limit reached; continues automatically " + time.strftime("%d %b %H:%M", time.localtime(retry_at)))
+                    self._end_image(iid, meta, text, waiting_until=retry_at)
+                    return
+                if data is None:
+                    data = self._scene_bytes(path)
+                lib.update_item(iid, stage="searching anime scenes" if svc == "trace" else "searching manga panels")
+                try:
+                    res = lookups.trace_moe(data) if svc == "trace" else lookups.saucenao(data)
+                except lookups.QuotaExceeded:
+                    lib.quota_exhaust(svc)
+                    when = next_month_ts() if svc == "trace" else tomorrow_ts()
+                    note(label, None, "free limit used up; continues automatically " + time.strftime("%d %b", time.localtime(when)))
+                    self._end_image(iid, meta, text, waiting_until=when)
+                    return
+                except lookups.RateLimited:  # busy or too fast: a short pause, the search was not used up
+                    self._end_image(iid, meta, text, waiting_until=time.time() + RETRY_SOON)
+                    return
+                except (lookups.ServiceError, OSError) as e:
+                    res = None
+                    scene[svc + "_error"] = str(e)[:120]
+                scene[svc] = res or {}
+                if scene.get(svc + "_error"):
+                    note(label, False, scene[svc + "_error"])
+                else:
+                    note(label, True if res and res.get("name") else None, f"{res['name']} ({round(res.get('score', 0) * 100)}%)" if res and res.get("name") else "no match")
+                if self._verified(iid, meta, text):
+                    return
 
-    def _has_finds(self, iid: int) -> bool:
-        return bool(self.lib.one("SELECT id FROM finds WHERE item_id=? LIMIT 1", (iid,)))
+        if "ai" not in meta:
+            if not self.ai:
+                meta["ai"] = {"guesses": [], "ran": False}
+            else:
+                lib.update_item(iid, stage="AI looking at the picture")
+                guesses, v = [], None
+                try:
+                    v = self.vision()
+                    if v is None:
+                        note("AI guesses", None, "AI model not available on this device" + (f" ({self.warnings[-1]})" if self.warnings else ""))
+                    else:
+                        with self.heavy:
+                            is_media, guesses = identify.ai_image_guesses(v, str(path), text)
+                        meta["ai_is_media"] = is_media
+                        note("AI guesses", bool(guesses), ", ".join(g["name"] for g in guesses) + " (guesses, not proof)" if guesses else "no guess")
+                except Exception as e:  # noqa: BLE001  e.g. the model ran out of memory: the other steps still count
+                    note("AI guesses", False, f"AI model failed: {e}")
+                meta["ai"] = {"guesses": guesses, "ran": v is not None, "is_media": meta.pop("ai_is_media", None)}
+        self._end_image(iid, meta, text)
 
-    def _finish_image(self, iid: int) -> None:
-        confirmed = self.lib.one("SELECT id FROM finds WHERE item_id=? AND confidence IN ('confirmed','matched') LIMIT 1", (iid,))
-        if confirmed:
-            self.lib.update_item(iid, status="done", stage="", error="")
-        elif self._has_finds(iid):
-            self.lib.update_item(iid, status="check", stage="", error="")
+    # ------------------------------------------------------------ deciding the answer from the evidence
+
+    def _collect(self, meta: dict, text: str) -> dict:
+        """Every piece of evidence gathered so far, grouped per work (database id)."""
+        works: dict[str, dict] = {}
+
+        def add(hit: dict, raw: str, proof: list[dict], tid: int | None = None):
+            w = works.setdefault(hit["ext_key"], {"hit": hit, "raw": raw, "proof": [], "tid": tid})
+            for p in proof:
+                if p not in w["proof"]:
+                    w["proof"].append(p)
+            w["tid"] = w["tid"] or tid
+        cands = identify.extract_candidates([("text", text)])
+
+        def on_screen(name: str) -> list[dict]:
+            c = next((c for c in cands if evidence.exact(c["name"], name)), None)
+            return [evidence.named(w, c["evidence"]) for w in c["sources"]] if c else []
+        for t in meta.get("db") or []:
+            add(t, t["raw"], t.get("proof") or [])
+        for r in meta.get("web") or []:
+            work = r.get("work")
+            if not work:
+                continue
+            tid = r.get("tid")
+            if not tid:
+                tid = r["tid"] = self.save_web_work(work, r.get("language"))
+            t = self.lib.one("SELECT ext_key, name, type, year FROM titles WHERE id=?", (tid,))
+            if not t:
+                continue
+            proof = ([evidence.named(w, r["clue"]) for w in r["where"]] if r["clue"] and evidence.exact(r["clue"], work["name"]) else [])
+            add(dict(t), r["clue"] or work["name"], proof + evidence.web(work, r["clue"], r.get("year")), tid)
+        for svc, label in (("trace", "trace.moe"), ("sauce", "SauceNAO")):
+            res = (meta.get("scene") or {}).get(svc)
+            if not res or not res.get("name"):
+                continue
+            hit = self._scene_hit(svc, res)
+            if hit:
+                add(hit, res["name"], [evidence.picture(label, res)] + on_screen(hit["name"]))
+                works[hit["ext_key"]].setdefault("detail", scene_detail(svc, res))
+        for g in (meta.get("ai") or {}).get("guesses") or []:
+            name = str(g.get("name") or "").strip()
+            if name:
+                gkind = g.get("type") if g.get("type") in TITLE_KINDS else ""
+                hit = self.resolve(name, gkind) or {"ext_key": "name:" + lookups.norm(name), "name": name, "type": gkind or "other"}
+                add(hit, name, [evidence.ai(name, str(g.get("why") or ""))])
+        return works
+
+    def _verified(self, iid: int, meta: dict, text: str) -> bool:
+        """Stop early once one work is verified."""
+        if any(evidence.verdict(w["proof"])[0] == "confirmed" for w in self._collect(meta, text).values()):
+            self._end_image(iid, meta, text)
+            return True
+        return False
+
+    def _end_image(self, iid: int, meta: dict, text: str = "", end: str = "", waiting_until: float | None = None) -> None:
+        """Every screenshot ends here, in exactly one final state with its reason:
+        done (verified), check (possible: confirm or pick), skipped (not found), other (not about a title),
+        or waiting_quota (paused for a free limit, continues by itself at next_try_at)."""
+        lib = self.lib
+        works = {} if end == "other" else self._collect(meta, text)
+        lib.x("DELETE FROM finds WHERE item_id=? AND source!='user'", (iid,))
+        verified = possible = 0
+        proof_log = {}
+        for key, w in sorted(works.items(), key=lambda kv: -len([p for p in kv[1]["proof"] if p.get("counts")])):
+            conf, reason = evidence.verdict(w["proof"])
+            tid = w["tid"] or (self.save_title(w["hit"]) if not w["hit"]["ext_key"].startswith("name:") else
+                               self.unverified_title(w["hit"]["name"], w["hit"].get("type") or ""))
+            kinds = {p["kind"] for p in w["proof"]}
+            source = "user" if "user" in kinds else "web" if "web" in kinds and "database" not in kinds else \
+                "scene" if "picture" in kinds and not kinds & {"database", "web"} else "ai" if kinds == {"ai"} else "text"
+            lib.add_find(iid, "title", title_id=tid, name_raw=w["raw"], source=source, evidence=f"{reason} | {evidence.summary(w['proof'])}",
+                         confidence=conf, detail=w.get("detail") or "", score=len([p for p in w["proof"] if p.get("counts")]) / 4,
+                         alts=w["hit"].get("alternatives") or [])
+            verified += conf == "confirmed"
+            possible += conf != "confirmed"
+            proof_log[w["hit"]["name"]] = {"verdict": conf, "reason": reason, "proof": w["proof"]}
+        meta["proof"] = proof_log
+        if waiting_until:
+            status, error = "waiting_quota", ""
+            lib.update_item(iid, next_try_at=waiting_until)
+        elif end == "other" or (not works and (meta.get("ai") or {}).get("is_media") is False):
+            status, error = "other", ""
+        elif verified:
+            status, error = "done", ""
+        elif possible:
+            status, error = "check", ""
         else:
-            self.lib.update_item(iid, status="skipped", stage="", error="no name found")
+            status = "skipped"
+            tried = [k for k, v in (meta.get("steps") or {}).items() if v.get("ok") is False]
+            error = "Not found" + (f" ({', '.join(tried)} failed)" if tried else "") + ". Try Google Lens, or type the name."
+        lib.update_item(iid, status=status, stage="", error=error, meta=meta)
+        log_event("end", item=iid, status=status, verified=verified, possible=possible)
 
     def save_web_work(self, work: dict, language: str | None = None) -> int:
         """A work found by web search: use the database entry when one matches, else keep what the web said."""
@@ -426,10 +550,9 @@ class Engine:
             im.save(buf, "JPEG", quality=85)
             return buf.getvalue()
 
-    def _accept_scene(self, iid: int, svc: str, res: dict | None) -> bool:
-        if not res:
-            return False
-        if svc == "trace" and res.get("score", 0) >= 0.9 and res.get("anilist_id"):  # trace.moe: below 90% is usually wrong
+    def _scene_hit(self, svc: str, res: dict) -> dict | None:
+        """The work a picture-search result points to (database entry when available)."""
+        if svc == "trace" and res.get("anilist_id"):
             hit = None
             if self.online:
                 try:
@@ -437,26 +560,12 @@ class Engine:
                     hit = hits[0] if hits else None
                 except (lookups.ServiceError, lookups.RateLimited, OSError, ValueError):
                     hit = None
-            hit = hit or {"ext_key": res["ext_key"], "name": res["name"] or "Unknown anime", "type": "anime"}
-            at = res.get("at_s") or 0
-            detail = " · ".join(x for x in (f"Episode {res['episode']}" if res.get("episode") else "",
-                                             f"at {int(at // 60)}:{int(at % 60):02d}" if at else "") if x)
-            self._replace_ai(iid, hit, "scene", detail, f"trace.moe {round(res['score'] * 100)}% match", res["score"])
-            return True
-        if svc == "sauce" and res.get("score", 0) >= 0.8:
+            return hit or {"ext_key": res.get("ext_key") or f"anilist:{res['anilist_id']}", "name": res.get("name") or "Unknown anime", "type": "anime"}
+        if svc == "sauce" and res.get("name"):
             kind = res.get("kind") or "manga"
-            hit = self.resolve(res["name"], kind, **({"year": res["year"]} if res.get("year") else {})) or \
+            return self.resolve(res["name"], kind, **({"year": res["year"]} if res.get("year") else {})) or \
                 {"ext_key": "name:" + lookups.norm(res["name"]), "name": res["name"], "type": kind, "year": res.get("year")}
-            part = res.get("part") or ""
-            detail = (f"Chapter {part}" if kind == "manga" else f"Episode {part}" if part else "") if part else ""
-            self._replace_ai(iid, hit, "scene", detail, f"SauceNAO {round(res['score'] * 100)}% match", res["score"])
-            return True
-        return False
-
-    def _replace_ai(self, iid, hit, source, detail, evidence, score):
-        self.lib.x("DELETE FROM finds WHERE item_id=? AND source='ai'", (iid,))
-        self.lib.add_find(iid, "title", title_id=self.save_title(hit), name_raw=hit["name"], source=source, evidence=evidence,
-                          confidence="matched", score=score, detail=detail)
+        return None
 
     # ------------------------------------------------------------ reels
 
@@ -471,6 +580,12 @@ class Engine:
                                    work_parent, comments=kind != "quote")
         if unit.get("error"):
             if BLOCK_RE.search(unit["error"]):  # Instagram is limiting anonymous downloads: try again in an hour
+                waits = int(item["meta"].get("ig_waits") or 0) + 1
+                if waits > MAX_INSTAGRAM_WAITS:
+                    lib.update_item(iid, status="failed", stage="", error=f"Instagram refused this reel {MAX_INSTAGRAM_WAITS} times. "
+                                    "Open it in Instagram to check it still exists, then tap Try again.")
+                    return
+                lib.merge_meta(iid, ig_waits=waits)
                 lib.update_item(iid, status="waiting_quota", next_try_at=time.time() + 3600, error=unit["error"][:300], stage="")
             else:
                 lib.update_item(iid, status="skipped" if "no_video" in unit["error"] else "failed", error=unit["error"][:300], stage="")
@@ -478,7 +593,7 @@ class Engine:
         work, video, meta = unit["work"], unit["media"][0], unit["meta"]
         try:
             lib.update_item(iid, stage="watching and listening")
-            v = self.vision()
+            v = self.vision() if self.ai else None  # without AI: text on frames + speech + caption + comments
             rec = None
             if v is not None:
                 try:
@@ -527,21 +642,26 @@ class Engine:
                                                    kind_hint=c.get("type") or (kind if kind in TITLE_KINDS else ""), year=c.get("year"))
                 except Exception:  # noqa: BLE001
                     work = None
-                if work and work["sure"]:
+                if work:
+                    proof = [evidence.named(w, c["evidence"]) for w in c["sources"] if evidence.exact(c["name"], work["name"])] + \
+                        evidence.web(work, c["name"], c.get("year"))
+                    conf, reason = evidence.verdict(proof)
                     tid = self.save_web_work(work, c.get("language") or lang)
                     t = self.lib.one("SELECT * FROM titles WHERE id=?", (tid,))
                     if t["ext_key"] not in {f["ext_key"] for f in found}:
                         found.append({"ext_key": t["ext_key"], "name": t["name"], "raw": c["name"], "source": "web",
-                                      "evidence": f"Web search: {work['evidence']}"[:200], "confidence": "confirmed", "score": 0.9,
+                                      "evidence": f"{reason} | {evidence.summary(proof)}"[:300], "confidence": conf, "score": 0.9,
                                       "_tid": tid})
         keys = {t["ext_key"] for t in found}
         for t in found:
+            if t.get("proof") and "reason" in t:  # database finds: the reason the rule gave, plus the evidence
+                t["evidence"] = f"{t['reason']} | {evidence.summary(t['proof'])}"[:300]
             self.lib.add_find(iid, "title", title_id=t.get("_tid") or self.save_title(t), name_raw=t["raw"], source=t["source"], evidence=t["evidence"],
                               confidence=t["confidence"], score=t.get("score", 1.0), alts=t.get("alternatives") or [])
         analysis = rec.get("analysis") if isinstance(rec.get("analysis"), dict) else {}
         ai = [t for t in analysis.get("titles") or [] if isinstance(t, dict) and str(t.get("name") or "").strip()]
         ai = [t for t in ai if lookups.norm(str(t["name"])) not in {lookups.norm(f["raw"]) for f in found}]
-        n_ai = self.add_ai_guesses(iid, ai[:5], kind, skip_keys=keys)
+        n_ai = self.add_ai_guesses(iid, ai[:5], kind, skip_keys=keys) if self.ai else 0
         if any(t["confidence"] == "confirmed" for t in found):
             return "done"
         return "check" if (n_ai or found) else "skipped"

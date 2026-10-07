@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
-from . import lookups
+from . import evidence, lookups
 
 KIND_WORDS = [
     ("quote", r"motivat|quote|inspir|mindset|discipline|affirm|wisdom|self.?improv|success|gym ?mot"),
@@ -290,9 +290,11 @@ def resolve_candidates(cands: list[dict], kind: str = "", resolver=lookups.resol
             prev["clue_score"] += c["score"]
             continue
         weak_word = len(c["name"].split()) == 1 and c["name"].lower() in COMMON_TITLE_WORDS and c["score"] < SINGLE_WORD_RISK
-        sure = not hit.get("ambiguous") and not weak_word
+        ev = [evidence.named(w, c["evidence"]) for w in c["sources"]] + [evidence.database(hit, c["name"], weak_word)]
+        conf, reason = evidence.verdict(ev)
         out[hit["ext_key"]] = {**hit, "source": SOURCE_LABEL.get(c["sources"][0], c["sources"][0]), "evidence": c["evidence"],
-                               "confidence": "confirmed" if sure else "check", "clue_score": c["score"], "raw": c["name"]}
+                               "confidence": conf, "reason": reason, "proof": ev, "clue_score": c["score"], "raw": c["name"],
+                               "clue_year": c.get("year"), "clue_type": c.get("type")}
     return sorted(out.values(), key=lambda t: -t["clue_score"])
 
 

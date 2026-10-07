@@ -132,15 +132,26 @@ def check_storage(data_dir: Path):
     return run
 
 
-def run_checks(data_dir: Path | None = None, progress=None) -> list[dict]:
+def _ai_setting(data_dir: Path) -> bool:
+    import json
+    try:
+        return bool(json.loads((data_dir / "settings.json").read_text(encoding="utf-8")).get("ai"))
+    except (OSError, ValueError):
+        return False
+
+
+def run_checks(data_dir: Path | None = None, progress=None, ai: bool | None = None) -> list[dict]:
     data_dir = Path(data_dir or Path.home() / "ReelShelf")
+    ai = _ai_setting(data_dir) if ai is None else ai
+    ai_check = check_ai_model if ai else (lambda: (True, "AI guesses are off (Settings): not needed"))
     plan = [
         ("Library storage", check_storage(data_dir), "Free some space on the phone."),
         ("Security of installed packages", check_security, "Run the update command shown."),
         ("Text reader (OCR)", check_text_reader, "Phone: pkg install tesseract. PC: uv sync."),
         ("Speech-to-text", check_speech_engine, "Phone: run the setup again (step 4). Reels are still read from text and comments."),
         ("Video tools (ffmpeg)", check_ffmpeg, "Phone: pkg install ffmpeg."),
-        ("AI model (Ollama)", check_ai_model, "Optional. If it says memory: the phone is too small for the model; everything else still works."),
+        ("AI model (Ollama)", ai_check, "Turn AI guesses off in Settings: everything else works without it. "
+                                         "If it says memory, the phone is too small for the model."),
         ("Web search: DuckDuckGo", check_engine("DuckDuckGo"), "Busy or blocked for now; Bing and Wikipedia are used instead."),
         ("Web search: Bing", check_engine("Bing"), "Busy or blocked for now; the other engines are used instead."),
         ("Web search: Wikipedia", check_engine("Wikipedia"), "Check the internet connection."),

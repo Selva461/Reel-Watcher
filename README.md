@@ -31,8 +31,12 @@ no account, no API key, no credit card.
   mentions: from on-screen text, speech, the caption and the **comments** (creator's comments and repeated answers
   count most). Names are checked in AniList and Wikidata, so you get the official title, year, original language and genres.
 - **Screenshots too.** Pick one screenshot, or **scan whole folders** (thousands of images) in the background.
-  Text in the image is read first; images with no readable name use free scene search (trace.moe for anime,
-  SauceNAO for manga). The AI's guess is shown right away, marked **Check this**, until something confirms it.
+  The text in the image is read first and checked in the databases and on the web; then free picture matching
+  (SauceNAO for manga, movies and shows; trace.moe for anime). When nothing is found: **Search with Google Lens**
+  (hands the picture to the Lens app) or type the name. No AI is needed; optional AI guesses can be turned on.
+- **Verified means two sources agree.** A find is Verified only when two independent sources agree on the same work
+  (the name on screen or in the reel, plus a database or web pages; or two picture matches). Anything less is shown
+  as a **Possible match** with the reason and the evidence, so the app does not present a guess as a fact.
 - **Motivation clips.** For motivation/quote collections it cuts the motivating line out of the reel as a GIF with
   word-by-word captions (Bold, Clean or Typewriter) or as a short video with sound. Save, share or copy the text.
 - **Search with filters.** Title, creator or genre; title language, the language spoken in the reel, type, genre,
@@ -96,7 +100,7 @@ Each name is checked against real databases before it is called **Confirmed**:
 | Movies | Wikidata | Wikipedia story, director, cast, language, runtime, IMDb link |
 
 Same name, different work ("Monster" 2004 vs 2023, "Vikram Vedha" 2017 vs 2022): the year in the reel, its
-type, its language and popularity decide; if two are still too close the find is marked **Check this** and the
+type, its language and popularity decide; if two are still too close the find is marked **Possible match** and the
 app offers **Could also be** buttons. Single everyday words ("Dark", "Up") need a strong clue before they are confirmed.
 
 Real free limits the app respects (it paces itself and waits instead of failing):

@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.DownloadManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -12,6 +13,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.Environment;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
@@ -24,6 +26,11 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
+
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
 /**
  * Reel Shelf for Android: a full-screen window onto the Reel Shelf app.
@@ -211,6 +218,62 @@ public class MainActivity extends Activity {
         public void installTermux() {
             if (!trustedPage()) return;
             openExternal(Uri.parse("https://f-droid.org/packages/com.termux/"));
+        }
+
+        /**
+         * Hands a screenshot to Google Lens (inside the Google app), or to the share menu when that app is missing.
+         * The picture is saved to Pictures/ReelShelf first, because other apps can only open shared storage.
+         */
+        @JavascriptInterface
+        public String shareImage(String path) {
+            if (!trustedPage()) return "untrusted";
+            if (path == null || !path.matches("/api/items/\\d+/image")) return "Could not open Google Lens";
+            if (Build.VERSION.SDK_INT < 29) return "Needs Android 10 or newer: save the picture and open it in Google Lens";
+            Uri server = Uri.parse(serverUrl());
+            final String base = server.getScheme() + "://" + server.getEncodedAuthority();
+            new Thread(() -> {
+                try {
+                    HttpURLConnection c = (HttpURLConnection) new URL(base + path).openConnection();
+                    String cookie = CookieManager.getInstance().getCookie(base);
+                    if (cookie != null) c.setRequestProperty("Cookie", cookie);
+                    c.setConnectTimeout(10000);
+                    c.setReadTimeout(30000);
+                    if (c.getResponseCode() != 200) {
+                        toast("Could not load the picture (" + c.getResponseCode() + ")");
+                        return;
+                    }
+                    String mime = c.getContentType() == null ? "image/jpeg" : c.getContentType();
+                    ContentValues v = new ContentValues();
+                    v.put(MediaStore.Images.Media.DISPLAY_NAME, "reelshelf_lens_" + System.currentTimeMillis());
+                    v.put(MediaStore.Images.Media.MIME_TYPE, mime);
+                    v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ReelShelf");
+                    Uri uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+                    if (uri == null) {
+                        toast("Could not save the picture for Google Lens");
+                        return;
+                    }
+                    try (InputStream in = c.getInputStream(); OutputStream out = getContentResolver().openOutputStream(uri)) {
+                        byte[] buf = new byte[65536];
+                        int n;
+                        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                    }
+                    Intent send = new Intent(Intent.ACTION_SEND);
+                    send.setType(mime);
+                    send.putExtra(Intent.EXTRA_STREAM, uri);
+                    send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    Intent lens = new Intent(send).setPackage("com.google.android.googlequicksearchbox");
+                    runOnUiThread(() -> {
+                        try {
+                            startActivity(lens);
+                        } catch (Exception e) {
+                            startActivity(Intent.createChooser(send, "Search with Google Lens"));
+                        }
+                    });
+                } catch (Exception e) {
+                    toast("Could not open Google Lens: " + e.getMessage());
+                }
+            }).start();
+            return "ok";
         }
 
         /** "play" when Termux came from the Play Store (a different build that cannot be started by other apps), else "ok" or "none". */

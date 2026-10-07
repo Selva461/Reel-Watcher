@@ -48,14 +48,20 @@ if ! command -v whisper-cli >/dev/null 2>&1; then
 fi
 command -v whisper-cli >/dev/null 2>&1 && echo "whisper.cpp ready" || echo "whisper.cpp missing: reels will be read without speech"
 
-step 5 "AI vision model (about 3 GB download)"
-if ! command -v ollama >/dev/null 2>&1; then pkg install -y ollama || true; fi
-if command -v ollama >/dev/null 2>&1; then
-  pgrep -x ollama >/dev/null || (ollama serve >/dev/null 2>&1 &)
-  sleep 5
-  ollama pull "${REEL_WATCHER_VLM:-qwen2.5vl:3b}" || echo "Model download failed; run 'ollama pull qwen2.5vl:3b' later on Wi-Fi."
+step 5 "AI model (optional, skipped unless you asked for it)"
+# Names come from text, speech, captions and comments, checked in databases and on the web, plus free picture matching.
+# The 3 GB AI model is only for the optional "AI guesses" setting: run  REEL_SHELF_AI=1 bash termux-setup.sh  to add it.
+if [ "${REEL_SHELF_AI:-0}" = "1" ]; then
+  if ! command -v ollama >/dev/null 2>&1; then pkg install -y ollama || true; fi
+  if command -v ollama >/dev/null 2>&1; then
+    pgrep -x ollama >/dev/null || (ollama serve >/dev/null 2>&1 &)
+    sleep 5
+    ollama pull "${REEL_WATCHER_VLM:-qwen2.5vl:3b}" || echo "Model download failed; run 'ollama pull qwen2.5vl:3b' later on Wi-Fi."
+  else
+    echo "Ollama is not available on this phone: everything else works, AI guesses stay off."
+  fi
 else
-  echo "Ollama not available on this phone: screenshots still work (text + free scene search), AI guesses are off."
+  echo "Skipped (not needed). To add it later: REEL_SHELF_AI=1 bash ~/Reel-Watcher/android/termux-setup.sh"
 fi
 
 step 6 "Connecting the Reel Shelf app"

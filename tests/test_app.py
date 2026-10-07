@@ -369,7 +369,7 @@ def test_ui_same_name_switch(page):
 def test_ui_check_identify_and_read(page):
     pg = page
     pg.get_by_text("2 unsure guesses to confirm").click()
-    pg.get_by_role("heading", name="Check this").wait_for()
+    pg.get_by_role("heading", name="Possible matches").wait_for()
     pg.get_by_role("button", name="Not Berserk").click()
     pg.get_by_text("Removed").wait_for()
     pg.locator("[data-ok]").first.click()
@@ -395,7 +395,7 @@ def test_ui_check_identify_and_read(page):
     Image.new("RGB", (90, 160), (10, 120, 200)).save(img)
     pg.set_input_files("#pic", str(img))
     pg.wait_for_url("**#/item/*")
-    pg.get_by_role("heading", name="No match yet").wait_for(timeout=20000)  # offline + no AI: nothing to confirm
+    pg.get_by_role("heading", name="Not found").wait_for(timeout=20000)  # offline + no AI: nothing to confirm
     pg.get_by_role("button", name="Type the name myself").wait_for()
 
     pg.goto(pg.running["base"] + "/#/c/Movies")
@@ -415,13 +415,13 @@ def test_ui_no_match_shows_steps_retry_and_type_name(page):
     Image.new("RGB", (90, 160), (200, 30, 30)).save(img)
     pg.set_input_files("#pic", str(img))
     pg.wait_for_url("**#/item/*")
-    pg.get_by_role("heading", name="No match yet").wait_for(timeout=20000)
+    pg.get_by_role("heading", name="Not found").wait_for(timeout=20000)
     pg.get_by_text("What was tried").wait_for()
     pg.get_by_text("Read text", exact=True).wait_for()
     pg.get_by_text("no text in the picture").wait_for()
     pg.get_by_role("button", name="Try again").click()
     pg.get_by_text("Trying again").wait_for()
-    pg.get_by_role("heading", name="No match yet").wait_for(timeout=20000)
+    pg.get_by_role("heading", name="Not found").wait_for(timeout=20000)
     pg.get_by_role("button", name="Type the name myself").click()
     pg.fill("#rn", "Scene")
     pg.select_option("#rt", "movie")
@@ -666,3 +666,40 @@ def test_csv_export_neutralises_formulas(running):
     s, body = call(running["base"], "/api/export.csv")
     text = body.decode() if isinstance(body, bytes) else body
     assert s == 200 and "'=HYPERLINK" in text and "\n=HYPERLINK" not in text
+
+
+def test_debug_reports_image_for_lens_and_ai_setting(running):
+    b, lib, app = running["base"], running["lib"], running["app"]
+    shot = lib.one("SELECT id FROM items WHERE kind='image' LIMIT 1")["id"]
+    s, r = call(b, f"/api/items/{shot}/debug")
+    text = r["text"]
+    assert s == 200 and text.startswith(f"Reel Shelf debug report: item {shot}") and "version:" in text and "steps:" in text
+    assert str(running["tmp"]) not in text  # file names only, never full folder paths
+    s, r = call(b, "/api/debug")
+    assert s == 200 and "items: " in r["text"] and "recent problems:" in r["text"]
+    s, body = call(b, f"/api/items/{shot}/image")
+    assert s == 200 and body[:3] == b"\xff\xd8\xff"  # the original picture, for Google Lens
+    reel = lib.one("SELECT id FROM items WHERE kind='reel' LIMIT 1")["id"]
+    assert call(b, f"/api/items/{reel}/image")[0] == 404 and call(b, "/api/items/999999/debug")[0] == 404
+    assert app.settings()["ai"] is False                                   # AI guesses are off unless turned on
+    assert call(b, "/api/settings", "POST", {"ai": True})[1]["ai"] is True and app.engine.ai is True
+    call(b, "/api/settings", "POST", {"ai": False})
+    assert app.engine.ai is False
+
+
+def test_ui_not_found_offers_lens_and_debug_report(page):
+    pg = page
+    pg.goto(pg.running["base"] + "/#/identify")
+    img = pg.running["tmp"] / "plain.png"
+    Image.new("RGB", (90, 160), (30, 160, 60)).save(img)
+    pg.set_input_files("#pic", str(img))
+    pg.wait_for_url("**#/item/*")
+    pg.get_by_role("heading", name="Not found").wait_for(timeout=20000)
+    pg.get_by_role("button", name="Search with Google Lens").wait_for()
+    pg.get_by_role("button", name="Copy debug report").click()
+    pg.get_by_text("Debug report copied").wait_for()
+    copied = pg.evaluate("navigator.clipboard.readText()")
+    assert copied.startswith("Reel Shelf debug report: item") and "Read text" in copied
+    pg.goto(pg.running["base"] + "/#/settings")
+    pg.get_by_role("switch", name="AI guesses").wait_for()
+    assert pg.get_by_role("switch", name="AI guesses").get_attribute("aria-checked") == "false"

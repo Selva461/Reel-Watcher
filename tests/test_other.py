@@ -99,10 +99,11 @@ def test_self_check_reports_pass_and_fail_with_hints(monkeypatch, tmp_path):
     monkeypatch.setattr(checks, "check_ai_model", lambda: (_ for _ in ()).throw(RuntimeError("Ollama: HTTP 500: model requires more system memory")))
     monkeypatch.setattr(checks, "check_instagram", lambda: (True, "HTTP 200"))
     seen = []
-    rows = {r["name"]: r for r in checks.run_checks(tmp_path / "lib", progress=lambda name, rs: seen.append(name))}
+    rows = {r["name"]: r for r in checks.run_checks(tmp_path / "lib", progress=lambda name, rs: seen.append(name), ai=True)}
     assert rows["Text reader (OCR)"]["ok"] and rows["Web search: Wikipedia"]["ok"]
     assert rows["Finds a new film by web search"]["ok"] and "Scene (2026" in rows["Finds a new film by web search"]["detail"]
     assert not rows["Web search: DuckDuckGo"]["ok"] and "Bing and Wikipedia are used instead" in rows["Web search: DuckDuckGo"]["hint"]
     ai = rows["AI model (Ollama)"]
-    assert not ai["ok"] and "more system memory" in ai["detail"] and "everything else still works" in ai["hint"]
+    assert not ai["ok"] and "more system memory" in ai["detail"] and "everything else works without it" in ai["hint"]
+    assert {r["name"]: r for r in checks.run_checks(tmp_path / "lib", ai=False)}["AI model (Ollama)"]["ok"]  # off: not needed
     assert rows["Library storage"]["ok"] and seen[0] == "Library storage" and seen[-1] == ""
