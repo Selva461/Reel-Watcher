@@ -47,6 +47,9 @@ jobs:
           name: ReelShelf-apk
           path: ReelShelf.apk
       - name: Publish to the "apk-latest" release (direct download link for your phone)
+        # only builds of the branch phones install from are published; other branches (Dependabot, pull requests)
+        # are built and tested but can never replace the APK people download
+        if: github.ref == 'refs/heads/ccr-d0c0b070-bdpssy' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -55,3 +58,5 @@ jobs:
               --notes "Download ReelShelf.apk on your Android phone and open it to install. Built automatically from branch $GITHUB_REF_NAME."
           fi
           gh release upload apk-latest ReelShelf.apk --clobber
+          gh release edit apk-latest --target "$GITHUB_SHA" \
+            --notes "Download ReelShelf.apk on your Android phone and open it to install. Built from commit $GITHUB_SHA (branch $GITHUB_REF_NAME)."
