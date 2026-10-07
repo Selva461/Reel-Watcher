@@ -73,7 +73,17 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(lookups, "saucenao", fake_sauce)
     monkeypatch.setattr(lookups, "DAILY_LIMITS", {"trace": 5, "sauce": 5})
     monkeypatch.setattr(lookups, "trace_me", lambda: {"quota": 100, "used": 0, "left": 100})
-    return {"lib": lib, "tmp": tmp_path, "calls": calls, "ocr": ocr, "trace": trace, "sauce": sauce, "enriched": enriched}
+    web = {"pages": {}, "queries": []}
+
+    def fake_fetch(url, data=None, timeout=20):  # search engines; a page per engine host, or an exception
+        web["queries"].append((url, (data or {}).get("q")))
+        page = web["pages"].get(lookups.urllib.parse.urlparse(url).hostname, lookups.ServiceError("offline in tests"))
+        if isinstance(page, Exception):
+            raise page
+        return page
+    monkeypatch.setattr(lookups, "fetch_html", fake_fetch)
+    monkeypatch.setattr(lookups, "wikipedia_search", lambda q, limit=6: web.get("wiki", []))
+    return {"web": web, "lib": lib, "tmp": tmp_path, "calls": calls, "ocr": ocr, "trace": trace, "sauce": sauce, "enriched": enriched}
 
 
 def add_image(env, name, seed, collection="Screenshots"):
@@ -90,6 +100,91 @@ def run_one(eng, kind="image"):
     it = eng.lib.claim_next(kind)
     (eng.process_image if kind == "image" else eng.process_reel)(it)
     return eng.lib.item(it["id"])
+
+
+# What the text reader got from a real phone screenshot of the Wikipedia page "Scene (2026 film)"
+WIKI_SCREEN = ("8:58 >- ± △ Vo en.wikipedia.org/wik + 2 三WIKIPEDIA D Scene (2026 film) Talk Article 不 ☆ Scene is an upcoming Indian "
+               "Tamil-language action comedy film2l written and directed by Jithu Madhavan. Produced by Suriya and Jyothika's newly "
+               "established Zhagaram Studios and 2D Entertainment, the film stars Suriya, Naslen and Nazriya Nazim in the lead roles. "
+               "Scene ABRAS SCENE CINOV2026 E CAO")
+DDG_PAGE = """<html><body><div class="results">
+<div class="result results_links results_links_deep web-result"><div class="links_main links_deep result__body">
+<h2 class="result__title"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FScene_(2026_film)&amp;rut=abc">Scene (2026 film) - Wikipedia</a></h2>
+<a class="result__snippet" href="//duckduckgo.com/l/?uddg=x">Scene is an upcoming Indian <b>Tamil</b>-language action comedy film written and directed by Jithu Madhavan.</a>
+</div></div>
+<div class="result results_links results_links_deep web-result"><div class="links_main links_deep result__body">
+<h2 class="result__title"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.imdb.com%2Ftitle%2Ftt33000001%2F&amp;rut=def">Scene (2026) - IMDb</a></h2>
+<a class="result__snippet" href="//duckduckgo.com/l/?uddg=y">Scene: Directed by Jithu Madhavan. With Suriya, Naslen, Nazriya Nazim.</a>
+</div></div>
+<div class="result results_links web-result"><div class="links_main result__body">
+<h2 class="result__title"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSuriya_(actor)">Suriya (actor) - Wikipedia</a></h2>
+</div></div></div></body></html>"""
+BING_PAGE = """<html><body><ol id="b_results">
+<li class="b_algo" data-id=""><div class="b_tpcn"></div><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=1&amp;u=a1aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnL3dpa2kvU2NlbmVfKDIwMjZfZmlsbSk&amp;ntb=1" h="ID=SERP">Scene (2026 film) - Wikipedia</a></h2>
+<div class="b_caption"><p>Scene is an upcoming Indian Tamil-language action comedy film.</p></div></li>
+</ol></body></html>"""
+
+
+class BrokenVision:
+    """The phone's AI model failing the way Ollama does when it cannot load the model (HTTP 500)."""
+    def ask(self, *a, **kw):
+        raise RuntimeError("Ollama: HTTP 500: model requires more system memory (3.9 GiB) than is available (2.1 GiB)")
+
+
+def test_search_result_pages_are_parsed():
+    ddg = lookups.parse_search_results(DDG_PAGE)
+    assert [r["url"] for r in ddg] == ["https://en.wikipedia.org/wiki/Scene_(2026_film)", "https://www.imdb.com/title/tt33000001/",
+                                       "https://en.wikipedia.org/wiki/Suriya_(actor)"]
+    assert ddg[0]["title"] == "Scene (2026 film) - Wikipedia" and "Tamil-language" in ddg[0]["snippet"]
+    bing = lookups.parse_search_results(BING_PAGE)
+    assert bing[0]["url"] == "https://en.wikipedia.org/wiki/Scene_(2026_film)" and bing[0]["title"].startswith("Scene")
+    assert lookups.parse_search_results("<html>captcha</html>") == []
+
+
+def test_screenshot_of_wikipedia_page_found_by_web_search_even_when_ai_fails(env):
+    """The real failing case: a new Tamil film the databases do not know yet, and an AI model that errors."""
+    iid = add_image(env, "wiki.jpg", 5)
+    env["ocr"]["wiki.jpg"] = WIKI_SCREEN
+    env["web"]["pages"]["html.duckduckgo.com"] = DDG_PAGE
+    eng = worker.Engine(env["lib"], vision_factory=BrokenVision)
+    it = run_one(eng)
+    f = finds(env["lib"], iid)
+    assert it["status"] == "done", it
+    assert [(x["title"], x["source"], x["confidence"]) for x in f] == [("Scene", "web", "confirmed")]
+    t = env["lib"].one("SELECT * FROM titles WHERE name='Scene'")
+    assert (t["type"], t["year"], t["language"]) == ("movie", 2026, "Tamil")
+    assert t["extra"]["wikipedia_title"] == "Scene (2026 film)"
+    assert env["web"]["queries"][0][1] == "Scene 2026 film"  # searched the page title, not the screen junk
+    steps = it["meta"]["steps"]
+    assert steps["Read text"]["ok"] and steps["Check names"]["ok"] is False and steps["Web search"]["ok"]
+
+
+def test_search_engine_blocked_falls_back_to_bing_then_wikipedia(env):
+    iid = add_image(env, "w2.jpg", 6)
+    env["ocr"]["w2.jpg"] = WIKI_SCREEN
+    env["web"]["pages"]["html.duckduckgo.com"] = lookups.RateLimited("html.duckduckgo.com: HTTP 202")
+    env["web"]["pages"]["www.bing.com"] = BING_PAGE
+    it = run_one(worker.Engine(env["lib"], vision_factory=None))
+    assert it["status"] == "done" and finds(env["lib"], iid)[0]["title"] == "Scene"
+    iid = add_image(env, "w3.jpg", 7)
+    env["ocr"]["w3.jpg"] = WIKI_SCREEN
+    env["web"]["pages"]["www.bing.com"] = "<html>nothing</html>"
+    env["web"]["wiki"] = [{"title": "Scene (2026 film) - Wikipedia", "url": "https://en.wikipedia.org/wiki/Scene_(2026_film)", "snippet": ""}]
+    it = run_one(worker.Engine(env["lib"], vision_factory=None))
+    assert it["status"] == "done" and finds(env["lib"], iid)[0]["title"] == "Scene"
+
+
+def test_every_step_failing_is_reported_not_crashed(env):
+    iid = add_image(env, "dead.jpg", 8)
+    env["ocr"]["dead.jpg"] = WIKI_SCREEN
+    env["sauce"]["res"] = None
+    it = run_one(worker.Engine(env["lib"], vision_factory=BrokenVision))
+    assert it["status"] == "skipped" and it["error"] == "no name found"
+    steps = it["meta"]["steps"]
+    assert steps["Web search"]["ok"] is False and "offline in tests" in steps["Web search"]["detail"]
+    assert steps["AI look"]["ok"] is False and "more system memory" in steps["AI look"]["detail"]
+    assert "Manga and movie scene search" in steps  # still tried after the AI failed
+    del iid
 
 
 def test_scanner_dedupes_and_rescans(tmp_path):
@@ -261,6 +356,29 @@ def test_reel_titles_from_comments_and_ai(env, monkeypatch):
     assert ("Parasite", "check", "ai") in [(x["title"], x["confidence"], x["source"]) for x in f]
     assert ("Some Guess", "check") in [(x["title"], x["confidence"]) for x in f]
     assert not (env["lib"].dir / "work" / "R1").exists()  # downloaded video removed
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="needs ffmpeg")
+def test_reel_read_without_ai_model(env, monkeypatch):
+    """Phone case: the AI model fails to load. The reel is still read from on-screen text, speech and comments,
+    and a name the databases do not know is found by web search."""
+    fake_reel_env(monkeypatch, env["tmp"], {}, comments=[{"author": "b", "text": "its Scene (2026 film), Suriya is back"}])
+    monkeypatch.setattr(study, "analyze_video", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("Ollama: HTTP 500: out of memory")))
+    monkeypatch.setattr(study, "transcribe_words", lambda v: (_ for _ in ()).throw(RuntimeError("no whisper")))
+    env["ocr"]["b_000.jpg"] = "VINLAND SAGA"
+    monkeypatch.setattr(study, "ocr_image", lambda p: "VINLAND SAGA" if p.name.startswith("b") else "")
+    env["web"]["pages"]["html.duckduckgo.com"] = DDG_PAGE
+    iid, _ = env["lib"].add_item("reel:R9", "reel", "https://www.instagram.com/reel/R9/", ["Movies"])
+    eng = worker.Engine(env["lib"], vision_factory=BrokenVisionFactory)
+    it = run_one(eng, "reel")
+    got = [(x["title"], x["confidence"], x["source"]) for x in finds(env["lib"], iid)]
+    assert it["status"] == "done", it
+    assert ("Vinland Saga", "confirmed", "text") in got and ("Scene", "confirmed", "web") in got
+    assert any("out of memory" in w for w in eng.warnings)
+
+
+def BrokenVisionFactory():
+    return BrokenVision()
 
 
 def test_reel_download_blocked_waits_an_hour(env, monkeypatch):

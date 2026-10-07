@@ -14,7 +14,7 @@ function esc(v) {
 }
 const enc = encodeURIComponent;
 const TYPE_LABEL = { movie: "Movie", series: "Series", anime: "Anime", manga: "Manga", book: "Book", game: "Game", other: "Other" };
-const SOURCE_LABEL = { text: "On-screen text", speech: "Said in the reel", caption: "Caption", comment: "Comment", scene: "Screenshot match", ai: "AI guess", user: "You" };
+const SOURCE_LABEL = { web: "Web search", text: "On-screen text", speech: "Said in the reel", caption: "Caption", comment: "Comment", scene: "Screenshot match", ai: "AI guess", user: "You" };
 const CONF = { confirmed: ["Confirmed", "ok"], matched: ["Matched from screenshot", "ok"], check: ["Check this", "warn"] };
 const TINTS = ["#F2B544", "#7FB7E8", "#E89A7F", "#B6A3E8", "#E8D27F", "#9CCB8E", "#E8A3C4", "#8FD3CF"];
 const ICON = {
@@ -45,7 +45,12 @@ async function api(path, opts = {}) {
     o.body = JSON.stringify(opts.body);
     o.headers["Content-Type"] = "application/json";
   }
-  const r = await fetch(path, o);
+  let r;
+  try {
+    r = await fetch(path, o);
+  } catch (e) {
+    throw new Error("Reel Shelf is not running. On this phone: open Termux (it starts Reel Shelf), then come back.");
+  }
   let data = null;
   try { data = await r.json(); } catch (e) { data = null; }
   if (!r.ok) throw new Error((data && data.error) || `Request failed (${r.status})`);
@@ -281,21 +286,26 @@ async function titleScreen(id) {
   bind("[data-fix]", "click", (e, b) => renameDialog(b.dataset.fix, (it) => { const f = it.finds[0]; location.hash = f && f.title_id ? `#/t/${f.title_id}` : "#/"; }));
 }
 
-function renameDialog(findId, after) {
+function renameDialog(target, after) {
   $dlg.innerHTML = `<form method="dialog" class="stack" id="rf"><h2>Type the right name</h2>
     <label class="field">Name<input class="input" id="rn" required placeholder="e.g. Vinland Saga"></label>
     <label class="field">Type<select class="input" id="rt"><option value="">Not sure</option>${Object.entries(TYPE_LABEL).map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></label>
-    <div class="row"><button class="btn grow" value="cancel" type="button" id="rc">Cancel</button><button class="btn primary grow" type="submit">Save</button></div></form>`;
+    <div class="row"><button class="btn grow" value="cancel" type="button" id="rc">Cancel</button><button class="btn primary grow" type="submit" id="rs">Save</button></div></form>`;
   $dlg.showModal();
   $dlg.querySelector("#rc").onclick = () => $dlg.close();
   $dlg.querySelector("#rf").onsubmit = async (e) => {
     e.preventDefault();
+    const save = $dlg.querySelector("#rs");
+    if (save.disabled) return;
+    save.disabled = true;
+    save.textContent = "Looking it up...";
     try {
-      const it = await api(`/api/finds/${findId}/rename`, { method: "POST", body: { name: $dlg.querySelector("#rn").value, type: $dlg.querySelector("#rt").value } });
+      const url = String(target).startsWith("/") ? target : `/api/finds/${target}/rename`;
+      const it = await api(url, { method: "POST", body: { name: $dlg.querySelector("#rn").value, type: $dlg.querySelector("#rt").value } });
       $dlg.close();
       toast("Name saved");
       after(it);
-    } catch (err) { toast(err.message); }
+    } catch (err) { toast(err.message); save.disabled = false; save.textContent = "Save"; }
   };
   setTimeout(() => $dlg.querySelector("#rn").focus(), 30);
 }
@@ -406,7 +416,8 @@ async function identifyScreen() {
   });
 }
 
-const IMG_STEPS = [["reading text", "Reading text in the image"], ["checking names", "Checking the name (AniList, Wikidata)"], ["AI looking at the picture", "AI looking at the picture"],
+const IMG_STEPS = [["reading text", "Reading text in the image"], ["checking names", "Checking the name (AniList, Wikidata)"],
+  ["searching the web", "Searching the web"], ["AI looking at the picture", "AI looking at the picture"],
   ["searching anime scenes", "Searching anime scenes (trace.moe)"], ["searching manga panels", "Searching manga panels (SauceNAO)"]];
 const REEL_STEPS = [["downloading", "Downloading the reel and comments"], ["watching and listening", "Reading text, speech and caption"], ["names", "Checking names"]];
 
@@ -436,14 +447,22 @@ async function itemScreen(id) {
       ${best && best.alts && best.alts.length && best.confidence === "check" ? `<span class="small">Same name, different work:</span><span class="row wrap" style="gap:6px">${best.alts.map((a) => `<button class="chip" data-switch="${best.id}" data-key="${esc(a.ext_key)}">${esc([a.name, a.year, TYPE_LABEL[a.type]].filter(Boolean).join(" · "))}</button>`).join("")}</span>` : ""}
       ${alts.map((f, n) => `<div class="card row between"><span><strong>${esc(f.name || f.name_raw)}</strong><br><span class="small muted">${esc(TYPE_LABEL[f.type] || "")} · ${esc(CONF[f.confidence][0])}</span></span>
         <button class="btn ${n === 0 ? "primary" : ""}" data-pick="${f.id}">${f.confidence === "check" ? "This one" : "Keep"}</button></div>`).join("")}</div>` : ""}
-    ${!busy && it.kind === "image" ? `<button class="btn block" id="fix" ${alts.length ? "" : 'data-new="1"'}>Type the name myself</button>` : ""}
+    ${!busy && it.meta.steps ? `<details class="card" ${best ? "" : "open"}><summary><strong>What was tried</strong></summary><div class="stack" style="gap:6px;margin-top:8px">
+      ${Object.entries(it.meta.steps).map(([k, v]) => `<div class="row" style="align-items:flex-start;gap:8px"><span aria-hidden="true">${v.ok ? "✓" : v.ok === false ? "✗" : "–"}</span>
+        <span><strong>${esc(k)}</strong><br><span class="small muted">${esc(v.detail || "")}</span></span></div>`).join("")}</div></details>` : ""}
+    ${!busy ? `<button class="btn block" id="fix">Type the name myself</button>` : ""}
+    ${!busy && ["skipped", "failed", "check", "other", "waiting_quota"].includes(it.status) ? `<button class="btn block" id="retry">Try again</button>` : ""}
     ${!busy && best && best.title_id ? `<a class="btn primary block" href="#/t/${best.title_id}">Open in my list</a>` : ""}`;
   if (busy) every(1500, () => { if (location.hash === `#/item/${id}`) itemScreen(id); });
   bind("[data-pick]", "click", async (e, b) => { const r = await api(`/api/finds/${b.dataset.pick}/confirm`, { method: "POST", body: {} }); toast("Saved to your list"); location.hash = `#/t/${r.finds[0].title_id}`; });
   bind("[data-switch]", "click", async (e, b) => { const r = await api(`/api/finds/${b.dataset.switch}/switch`, { method: "POST", body: { ext_key: b.dataset.key } }); toast("Changed"); location.hash = `#/t/${r.finds.find((f) => f.id === Number(b.dataset.switch)).title_id}`; });
   bind("#fix", "click", () => {
-    if (alts.length) renameDialog(alts[0].id, (r) => { location.hash = `#/t/${r.finds[0].title_id}`; });
-    else toast("Pick one of the guesses first, or wait for the search to finish");
+    renameDialog(alts.length ? `/api/finds/${alts[0].id}/rename` : `/api/items/${id}/name`, (r) => { location.hash = `#/t/${r.finds[0].title_id}`; });
+  });
+  bind("#retry", "click", async (e, b) => {
+    b.disabled = true;
+    try { await api(`/api/items/${id}/retry`, { method: "POST", body: {} }); toast("Trying again"); itemScreen(id); }
+    catch (err) { toast(err.message); b.disabled = false; }
   });
 }
 

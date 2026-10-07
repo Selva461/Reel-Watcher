@@ -1072,6 +1072,26 @@ def analyze_video(vision, video: Path, work: Path, collections: list[str], meta:
     return rec, key
 
 
+def analyze_video_basic(video: Path, work: Path) -> tuple[dict, Path | None]:
+    """Reel reading without the AI model (missing, or failing on a phone): text on sampled frames + speech.
+    Same record shape as analyze_video, with an empty AI analysis."""
+    pr = media.probe(str(video))
+    dur = pr["duration"] or 0
+    times = sorted({round(t, 2) for t in [0.5, 1.5, 3.0] + [dur * f for f in (0.25, 0.45, 0.65, 0.85)] if 0 < t < max(0.6, dur - 0.1)})
+    frames = extract_frames_at(video, times, work, "b")
+    frecs = [{"t": t, "visual": {"on_screen_text": ocr_image(p)}} for t, p in frames]
+    tr = {"language": None, "text": "", "words": []}
+    if pr["has_audio"]:
+        try:
+            tr = transcribe_words(video)
+        except Exception as e:  # noqa: BLE001  no speech engine installed: text, caption and comments still count
+            log(f"speech-to-text unavailable ({e})")
+    rec = {"kind": "reel", "facts": {"duration_s": dur}, "analysis": {}, "basic": True, "frames": frecs,
+           "transcript": {"language": tr.get("language"), "text": (tr.get("text") or "")[:4000], "words": (tr.get("words") or [])[:600]}}
+    key = next((p for t, p in frames if t >= 0.9), frames[0][1] if frames else None)
+    return rec, key
+
+
 def analyze_carousel(vision, slides: list[Path], collections: list[str], meta: dict) -> tuple[dict, Path | None]:
     recs = None
     overview = None

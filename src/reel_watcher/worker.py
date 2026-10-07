@@ -43,6 +43,9 @@ def days_left_in_month() -> int:
 RETRY_SOON = 120  # seconds to wait after a service asks us to slow down
 
 
+TITLE_KINDS = ("movie", "series", "anime", "manga", "book", "game")
+
+
 def item_kind(item: dict) -> str:
     kinds = [identify.collection_kind(c) for c in item.get("collections") or []]
     return next((k for k in kinds if k != "generic"), "generic")
@@ -219,6 +222,8 @@ class Engine:
     # ------------------------------------------------------------ screenshots
 
     def process_image(self, item: dict) -> None:
+        """Each step runs on its own and records what happened in meta["steps"], so one failing service never stops
+        the others and the app can show what was tried: read text, check names, web search, AI look, scene search."""
         lib, iid = self.lib, item["id"]
         path = Path(item["source"])
         if not path.exists():
@@ -226,50 +231,110 @@ class Engine:
             return
         meta = item["meta"]
         kind = item_kind(item)
+        steps = meta.setdefault("steps", {})
+
+        def note(step: str, ok, detail: str) -> None:
+            steps[step] = {"ok": ok, "detail": str(detail)[:300]}
+            lib.update_item(iid, meta=meta)
+
         if "ocr" not in meta:
             from .study import ocr_image
             lib.update_item(iid, stage="reading text")
-            meta["ocr"] = ocr_image(path)
+            try:
+                meta["ocr"] = ocr_image(path)
+                n = len(meta["ocr"].split())
+                note("Read text", bool(n), f"{n} words" if n else "no text in the picture")
+            except Exception as e:  # noqa: BLE001
+                meta["ocr"] = ""
+                note("Read text", False, f"text reader failed: {e}")
             meta["thumb"] = self.thumb(path, iid, "img")
             lib.update_item(iid, meta=meta)
         text = meta["ocr"]
+        cands = identify.extract_candidates([("text", text)])
+        top = cands[0] if cands else None
+        if identify.looks_like_other(text) and not identify.page_clues(text):
+            note("Read text", True, "looks like a chat, receipt or payment screen")
+            lib.update_item(iid, status="other", stage="")
+            return
         if "text_checked" not in meta:
-            if identify.looks_like_other(text):
-                lib.update_item(iid, status="other", stage="")
-                return
             lib.update_item(iid, stage="checking names")
-            try:
-                found = identify.resolve_candidates(identify.extract_candidates([("text", text)]), kind,
-                                                    resolver=self._resolver()) if self.online else []
-            except lookups.QuotaExceeded:
-                found = []
+            found = []
+            if not self.online:
+                note("Check names", None, "online lookups are off (Settings)")
+            elif not cands:
+                note("Check names", None, "no title-like text")
+            else:
+                try:
+                    found = identify.resolve_candidates(cands, kind, resolver=self._resolver(), language=top.get("language"))
+                    note("Check names", bool(found), ", ".join(t["name"] for t in found[:3]) if found else
+                         "not in the databases: " + ", ".join(c["name"] for c in cands[:3]))
+                except Exception as e:  # noqa: BLE001
+                    note("Check names", False, f"lookup failed: {e}")
             meta["text_checked"] = True
             lib.update_item(iid, meta=meta)
-            if found:
-                for t in found[:3]:
-                    lib.add_find(iid, "title", title_id=self.save_title(t), name_raw=t["raw"], source="text", evidence=t["evidence"],
-                                 confidence=t["confidence"], score=t.get("score", 1.0), alts=t.get("alternatives") or [])
-                lib.update_item(iid, status="done" if any(t["confidence"] == "confirmed" for t in found) else "check", stage="")
+            for t in found[:3]:
+                lib.add_find(iid, "title", title_id=self.save_title(t), name_raw=t["raw"], source="text", evidence=t["evidence"],
+                             confidence=t["confidence"], score=t.get("score", 1.0), alts=t.get("alternatives") or [])
+            if any(t["confidence"] == "confirmed" for t in found):
+                lib.update_item(iid, status="done", stage="")
                 return
+        if "web" not in meta and self.online:
+            query = identify.search_query(text, cands, kind)
+            if not query:
+                meta["web"] = {}
+                note("Web search", None, "not enough text to search with")
+            else:
+                lib.update_item(iid, stage="searching the web")
+                work, notes = None, []
+                try:
+                    work, notes = lookups.web_identify(query, name_hint=top["name"] if top else "",
+                                                       kind_hint=(top or {}).get("type") or (kind if kind in TITLE_KINDS else ""),
+                                                       year=(top or {}).get("year"))
+                except Exception as e:  # noqa: BLE001
+                    notes = [f"web search failed: {e}"]
+                meta["web"] = {"query": query, "notes": notes[-4:], "work": work}
+                if work:
+                    tid = self.save_web_work(work, (top or {}).get("language"))
+                    lib.add_find(iid, "title", title_id=tid, name_raw=work["name"], source="web",
+                                 evidence=f"Web search: {work['evidence']}"[:200], confidence="confirmed" if work["sure"] else "check",
+                                 score=0.9 if work["sure"] else 0.5)
+                    note("Web search", True, f"{work['evidence']} ({work['site']})")
+                    if work["sure"]:
+                        lib.update_item(iid, status="done", stage="")
+                        return
+                else:
+                    note("Web search", False, "; ".join(notes[-3:]) or "nothing found")
         if "ai" not in meta:  # the guess is shown right away; scene search may replace it later
             lib.update_item(iid, stage="AI looking at the picture")
-            v = self.vision()
-            with self.heavy:
-                is_media, guesses = identify.ai_image_guesses(v, str(path), text)
+            is_media, guesses, v = True, [], None
+            try:
+                v = self.vision()
+                if v is None:
+                    note("AI look", None, "AI model not available on this device" + (f" ({self.warnings[-1]})" if self.warnings else ""))
+                else:
+                    with self.heavy:
+                        is_media, guesses = identify.ai_image_guesses(v, str(path), text)
+                    note("AI look", bool(guesses), ", ".join(g["name"] for g in guesses) if guesses else "no guess")
+            except Exception as e:  # noqa: BLE001  e.g. the model ran out of memory: the other steps still count
+                note("AI look", False, f"AI model failed: {e}")
             meta["ai"] = {"is_media": is_media, "guesses": guesses, "ran": v is not None}
             lib.update_item(iid, meta=meta)
-            if v is not None and not is_media and not identify.extract_candidates([("text", text)]):
+            if v is not None and not is_media and not cands and not self._has_finds(iid):
                 lib.update_item(iid, status="other", stage="")
                 return
-            self.add_ai_guesses(iid, guesses, kind)
+            try:
+                self.add_ai_guesses(iid, guesses, kind)
+            except Exception as e:  # noqa: BLE001
+                note("AI look", False, f"could not save the guesses: {e}")
         guesses = meta["ai"].get("guesses") or []
         if not self.online:
-            lib.update_item(iid, status="check" if guesses else "skipped", stage="", error="" if guesses else "no name found")
+            self._finish_image(iid)
             return
         # scene search. trace.moe (anime, 100 free a month) is kept for pictures that look like anime;
         # SauceNAO covers manga panels and also movie/show frames (its IMDb indexes)
         gtypes = {g.get("type") for g in guesses}
-        live_action = bool(guesses) and gtypes <= {"movie", "series"}
+        web_kind = ((meta.get("web") or {}).get("work") or {}).get("type")
+        live_action = (bool(guesses) and gtypes <= {"movie", "series"}) or web_kind in ("movie", "series")
         if kind in ("book", "game"):
             services = []
         elif live_action or kind in ("movie", "series"):
@@ -303,11 +368,47 @@ class Engine:
                 res = None
                 scene[svc + "_error"] = str(e)[:120]
             scene[svc] = res or {}
-            lib.update_item(iid, meta=meta)
-            if self._accept_scene(iid, svc, res):
+            label = "Anime scene search" if svc == "trace" else "Manga and movie scene search"
+            accepted = False
+            try:
+                accepted = self._accept_scene(iid, svc, res)
+            except Exception as e:  # noqa: BLE001
+                scene[svc + "_error"] = str(e)[:120]
+            if scene.get(svc + "_error"):
+                note(label, False, scene[svc + "_error"])
+            else:
+                note(label, accepted, f"{res['name']} ({round(res.get('score', 0) * 100)}%)" if res and res.get("name") else "no match")
+            if accepted:
                 lib.update_item(iid, status="done", stage="")
                 return
-        lib.update_item(iid, status="check" if guesses else "skipped", stage="", error="" if guesses else "no name found")
+        self._finish_image(iid)
+
+    def _has_finds(self, iid: int) -> bool:
+        return bool(self.lib.one("SELECT id FROM finds WHERE item_id=? LIMIT 1", (iid,)))
+
+    def _finish_image(self, iid: int) -> None:
+        confirmed = self.lib.one("SELECT id FROM finds WHERE item_id=? AND confidence IN ('confirmed','matched') LIMIT 1", (iid,))
+        if confirmed:
+            self.lib.update_item(iid, status="done", stage="", error="")
+        elif self._has_finds(iid):
+            self.lib.update_item(iid, status="check", stage="", error="")
+        else:
+            self.lib.update_item(iid, status="skipped", stage="", error="no name found")
+
+    def save_web_work(self, work: dict, language: str | None = None) -> int:
+        """A work found by web search: use the database entry when one matches, else keep what the web said."""
+        hit = self.resolve(work["name"], work.get("type") or "", **({"year": work["year"]} if work.get("year") else {}),
+                           **({"language": language} if language else {}))
+        if hit and lookups.similarity(hit["name"], work["name"]) >= 0.9 and \
+                (not work.get("year") or not hit.get("year") or abs(hit["year"] - work["year"]) <= 1):
+            return self.save_title(hit)
+        extra = {k: v for k, v in {"url": work.get("url"), "wikipedia_title": work.get("wikipedia_title"),
+                                   "found_on": work.get("site")}.items() if v}
+        tid = self.lib.upsert_title(f"web:{lookups.norm(work['name'])}:{work.get('year') or ''}", work["name"],
+                                    type=work.get("type") if work.get("type") in TITLE_KINDS else "other", year=work.get("year"),
+                                    language=identify.LANG_NAMES.get(language or "", ""), extra=extra)
+        self.ensure_details(tid)
+        return tid
 
     def _resolver(self):
         return lambda name, hint, **kw: self.resolve(name, hint, **kw)
@@ -378,10 +479,16 @@ class Engine:
         try:
             lib.update_item(iid, stage="watching and listening")
             v = self.vision()
-            if v is None:
-                raise RuntimeError("the AI model is not available, so reels cannot be read yet")
-            with self.heavy:
-                rec, key = study.analyze_video(v, video, work, item["collections"], meta)
+            rec = None
+            if v is not None:
+                try:
+                    with self.heavy:
+                        rec, key = study.analyze_video(v, video, work, item["collections"], meta)
+                except Exception as e:  # noqa: BLE001  e.g. the model ran out of memory: read the reel without it
+                    self.warnings.append(f"AI model failed on a reel: {e}"[:300])
+            if rec is None:
+                with self.heavy:
+                    rec, key = study.analyze_video_basic(video, work)
             words = (rec.get("transcript") or {}).get("words") or []
             m = {"caption": meta.get("caption") or "", "author": meta.get("author"), "post_date": meta.get("post_date"),
                  "reel_language": (rec.get("transcript") or {}).get("language"), "duration": (rec.get("facts") or {}).get("duration_s"),
@@ -409,9 +516,27 @@ class Engine:
             found = identify.resolve_candidates(cands, kind, resolver=self._resolver(), language=lang) if self.online else []
         except lookups.QuotaExceeded:
             found = []
+        if self.online:
+            # names the databases do not have (new or regional titles): search the web for the strong clues left over
+            known = {lookups.norm(t["raw"]) for t in found}
+            weak_ok = not any(t["confidence"] == "confirmed" for t in found)
+            todo = [c for c in cands if c["key"] not in known and (c["score"] >= 2.5 or (weak_ok and c["score"] >= 1.5))][:2]
+            for c in todo:
+                try:
+                    work, _ = lookups.web_identify(identify.search_query("", [c], kind), name_hint=c["name"],
+                                                   kind_hint=c.get("type") or (kind if kind in TITLE_KINDS else ""), year=c.get("year"))
+                except Exception:  # noqa: BLE001
+                    work = None
+                if work and work["sure"]:
+                    tid = self.save_web_work(work, c.get("language") or lang)
+                    t = self.lib.one("SELECT * FROM titles WHERE id=?", (tid,))
+                    if t["ext_key"] not in {f["ext_key"] for f in found}:
+                        found.append({"ext_key": t["ext_key"], "name": t["name"], "raw": c["name"], "source": "web",
+                                      "evidence": f"Web search: {work['evidence']}"[:200], "confidence": "confirmed", "score": 0.9,
+                                      "_tid": tid})
         keys = {t["ext_key"] for t in found}
         for t in found:
-            self.lib.add_find(iid, "title", title_id=self.save_title(t), name_raw=t["raw"], source=t["source"], evidence=t["evidence"],
+            self.lib.add_find(iid, "title", title_id=t.get("_tid") or self.save_title(t), name_raw=t["raw"], source=t["source"], evidence=t["evidence"],
                               confidence=t["confidence"], score=t.get("score", 1.0), alts=t.get("alternatives") or [])
         analysis = rec.get("analysis") if isinstance(rec.get("analysis"), dict) else {}
         ai = [t for t in analysis.get("titles") or [] if isinstance(t, dict) and str(t.get("name") or "").strip()]

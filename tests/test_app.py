@@ -350,8 +350,42 @@ def test_ui_check_identify_and_read(page):
     pg.get_by_text("Reading 1 reels in the background").wait_for()
     pg.locator("nav.tabs").get_by_text("Jobs").click()
     pg.get_by_role("heading", name="Running in background").wait_for()
-    assert pg.get_by_text("Read Movies").count() >= 1
+    pg.get_by_text("Read Movies").first.wait_for()
     no_side_scroll(pg)
+
+
+def test_ui_no_match_shows_steps_retry_and_type_name(page):
+    """A screenshot nothing could identify: the app says what was tried, can try again, and lets you type the name."""
+    pg = page
+    pg.goto(pg.running["base"] + "/#/identify")
+    img = pg.running["tmp"] / "blank.png"
+    Image.new("RGB", (90, 160), (200, 30, 30)).save(img)
+    pg.set_input_files("#pic", str(img))
+    pg.wait_for_url("**#/item/*")
+    pg.get_by_role("heading", name="No match yet").wait_for(timeout=20000)
+    pg.get_by_text("What was tried").wait_for()
+    pg.get_by_text("Read text", exact=True).wait_for()
+    pg.get_by_text("no text in the picture").wait_for()
+    pg.get_by_role("button", name="Try again").click()
+    pg.get_by_text("Trying again").wait_for()
+    pg.get_by_role("heading", name="No match yet").wait_for(timeout=20000)
+    pg.get_by_role("button", name="Type the name myself").click()
+    pg.fill("#rn", "Scene")
+    pg.select_option("#rt", "movie")
+    pg.get_by_role("button", name="Save").click()
+    pg.wait_for_url("**#/t/*")
+    pg.get_by_role("heading", name="Scene").wait_for()
+    no_side_scroll(pg)
+
+
+def test_ui_server_down_message(page):
+    pg = page
+    pg.goto(pg.running["base"] + "/#/search")
+    pg.get_by_placeholder("Title, creator, genre").wait_for()
+    pg.running["srv"].shutdown()
+    pg.running["srv"].server_close()
+    pg.evaluate("location.hash = '#/check'")
+    pg.get_by_text("Reel Shelf is not running").wait_for()
 
 
 def test_ui_folder_scan_and_progress(page):

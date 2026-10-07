@@ -12,6 +12,9 @@ Sources and their real free limits (from each service's documentation, October 2
 - SauceNAO (saucenao.com): manga panels, and also movie/show frames (IMDb indexes). Anonymous: 4 searches per
   30 seconds; a free account key (SAUCENAO_API_KEY) allows about 200 a day.
 - TMDB (optional, TMDB_API_KEY, free for personal use): posters and "where to watch" per country.
+- Web search (no key): DuckDuckGo's HTML page, then Bing, then Wikipedia's own search. Result titles from
+  Wikipedia, IMDb, MyAnimeList, AniList, Letterboxd, Rotten Tomatoes, TMDB and MyDramaList name the work, so new
+  or regional titles that the databases do not have yet are still found. Paced to one search every few seconds.
 
 Every network call goes through `http`, so tests fake it. QuotaExceeded = a free limit is used up for now
 (the caller retries the item later); RateLimited = slow down and try again in a moment (handled here).
@@ -49,7 +52,8 @@ DAILY_LIMITS = {
 }
 # requests per window (seconds) per host, kept under each service's published limit
 RATES = {"graphql.anilist.co": (25, 60), "api.jikan.moe": (50, 60), "api.tvmaze.com": (18, 10), "saucenao.com": (4, 31),
-         "www.wikidata.org": (30, 10), "en.wikipedia.org": (30, 10), "api.trace.moe": (1, 3), "api.themoviedb.org": (30, 10)}
+         "www.wikidata.org": (30, 10), "en.wikipedia.org": (30, 10), "api.trace.moe": (1, 3), "api.themoviedb.org": (30, 10),
+         "html.duckduckgo.com": (1, 4), "www.bing.com": (1, 3)}
 
 
 class QuotaExceeded(Exception):
@@ -453,6 +457,207 @@ def resolve_name(name: str, kind_hint: str = "", min_score: float = 0.82, year: 
 
 def lookup_key(c: dict) -> str:
     return f"{norm(c['name'])}:{c.get('year')}:{c['type']}"
+
+
+# ---------------------------------------------------------------- web search (no key)
+
+BROWSER_UA = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+DDG = "https://html.duckduckgo.com/html/"
+BING = "https://www.bing.com/search"
+WIKI_SEARCH = "https://en.wikipedia.org/w/api.php"
+
+
+def fetch_html(url: str, data: dict | None = None, timeout: float = 20) -> str:
+    """A web page as text (search engines). Raises ServiceError on any failure, RateLimited when told to slow down."""
+    host = urllib.parse.urlparse(url).hostname or ""
+    PACER.wait(host)
+    body = urllib.parse.urlencode(data).encode() if data else None
+    req = urllib.request.Request(url, data=body, method="POST" if body else "GET",
+                                 headers={"User-Agent": BROWSER_UA, "Accept": "text/html", "Accept-Language": "en"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        if e.code in (429, 202, 403):
+            raise RateLimited(f"{host}: HTTP {e.code}") from e
+        raise ServiceError(f"{host}: HTTP {e.code}") from e
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        raise ServiceError(f"{host}: {e}") from e
+
+
+def _attr(tag: str, name: str) -> str:
+    m = re.search(rf'\b{name}\s*=\s*"([^"]*)"', tag) or re.search(rf"\b{name}\s*=\s*'([^']*)'", tag)
+    return html.unescape(m.group(1)) if m else ""
+
+
+def _real_url(href: str) -> str:
+    """Undo search-engine redirect links (DuckDuckGo uddg=, Bing u=a1<base64>)."""
+    if href.startswith("//"):
+        href = "https:" + href
+    u = urllib.parse.urlparse(href)
+    q = urllib.parse.parse_qs(u.query)
+    if "uddg" in q:
+        return q["uddg"][0]
+    if (u.hostname or "").endswith("bing.com") and q.get("u", [""])[0].startswith("a1"):
+        import base64
+        raw = q["u"][0][2:]
+        try:
+            return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", errors="replace")
+        except ValueError:
+            return href
+    return href
+
+
+def parse_search_results(page: str) -> list[dict]:
+    """[{title, url, snippet}] from a DuckDuckGo or Bing result page. Tolerant: any result-looking link is used."""
+    out, seen = [], set()
+    blocks = re.split(r'<div[^>]+class="[^"]*\bresult\b|<li[^>]+class="[^"]*\bb_algo\b', page)
+    for b in blocks[1:]:
+        m = re.search(r'(<a\b[^>]*class="[^"]*result__a[^"]*"[^>]*>)(.*?)</a>', b, re.S) \
+            or re.search(r"<h2[^>]*>\s*(<a\b[^>]*>)(.*?)</a>", b, re.S)
+        if not m:
+            continue
+        url = _real_url(_attr(m.group(1), "href"))
+        title = clean_html(m.group(2), 300)
+        if not url.startswith("http") or not title or url in seen:
+            continue
+        seen.add(url)
+        sm = re.search(r'class="[^"]*(?:result__snippet|b_caption)[^"]*"[^>]*>(.*?)</(?:a|div|p)>', b, re.S) or re.search(r"<p[^>]*>(.*?)</p>", b, re.S)
+        out.append({"title": title, "url": url, "snippet": clean_html(sm.group(1), 400) if sm else ""})
+    return out
+
+
+def wikipedia_search(query: str, limit: int = 6) -> list[dict]:
+    _, j = http("GET", WIKI_SEARCH + "?" + urllib.parse.urlencode(
+        {"action": "query", "list": "search", "srsearch": query, "srlimit": limit, "format": "json", "utf8": 1}))
+    rows = ((j or {}).get("query") or {}).get("search") or []
+    return [{"title": r["title"] + " - Wikipedia", "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(r["title"].replace(" ", "_")),
+             "snippet": clean_html(r.get("snippet"), 300)} for r in rows if r.get("title")]
+
+
+def web_search(query: str) -> tuple[list[dict], list[str]]:
+    """Results from the first engine that answers, and a note per engine tried (shown when nothing works)."""
+    notes = []
+    for name, fn in (("DuckDuckGo", lambda: parse_search_results(fetch_html(DDG, {"q": query, "kl": "wt-wt"}))),
+                     ("Bing", lambda: parse_search_results(fetch_html(BING + "?" + urllib.parse.urlencode({"q": query, "setlang": "en"})))),
+                     ("Wikipedia", lambda: wikipedia_search(query))):
+        try:
+            res = fn()
+        except (ServiceError, RateLimited) as e:
+            notes.append(f"{name}: {e}")
+            continue
+        if res:
+            return res, notes + [f"{name}: {len(res)} results"]
+        notes.append(f"{name}: no results")
+    return [], notes
+
+
+TYPE_WORDS = [("series", r"tv series|tv mini.?series|mini.?series|web series|television series|tv show|series|serial|k-?drama|drama"),
+              ("anime", r"anime|ona|ova"), ("manga", r"manga|manhwa|manhua|webtoon|comic"), ("game", r"video game|game"),
+              ("book", r"novel|book"), ("movie", r"film|movie")]
+SITES = [  # (site, url pattern, title suffix, weight)
+    ("Wikipedia", r"^https?://[a-z]+\.(?:m\.)?wikipedia\.org/wiki/([^?#]+)", r"\s+[-–\u2014]\s+Wikipedia$", 1.0),
+    ("IMDb", r"imdb\.com/title/(tt\d+)", r"\s+[-–\u2014|]\s+IMDb.*$", 1.0),
+    ("MyAnimeList", r"myanimelist\.net/(anime|manga)/(\d+)", r"\s+[-–\u2014|]\s+MyAnimeList(?:\.net)?$", 1.0),
+    ("AniList", r"anilist\.co/(anime|manga)/(\d+)", r"\s+[-–\u2014·|]\s+AniList$", 1.0),
+    ("Letterboxd", r"letterboxd\.com/film/([^/]+)", r"\s+[-–\u2014•|]\s+Letterboxd$|\s+directed by .*$", 0.85),
+    ("Rotten Tomatoes", r"rottentomatoes\.com/(m|tv)/([^/?#]+)", r"\s+[-–\u2014|]\s+Rotten Tomatoes$", 0.85),
+    ("TMDB", r"themoviedb\.org/(movie|tv)/(\d+)", r"\s+[-–\u2014|]\s+The Movie Database.*$", 0.85),
+    ("MyDramaList", r"mydramalist\.com/(\d+)", r"\s+[-–\u2014|]\s+MyDramaList$", 0.85),
+]
+NOT_A_WORK = re.compile(r"^(?:list of|category:|template:|portal:|talk:|file:|user:|help:|wikipedia:)|\(disambiguation\)|"
+                        r"\((?:actor|actress|singer|band|song|album|director|composer|politician|cricketer|footballer|character)\)", re.I)
+
+
+def _kind_of(text: str) -> str:
+    low = (text or "").lower()
+    for kind, rx in TYPE_WORDS:
+        if re.search(rf"\b(?:{rx})\b", low):
+            return kind
+    return ""
+
+
+def split_title(t: str) -> tuple[str, int | None, str]:
+    """'Scene (2026 film)' -> ('Scene', 2026, 'movie'); 'Dark (TV Series 2017–2020)' -> ('Dark', 2017, 'series')."""
+    t = re.sub(r"\s+", " ", t or "").strip()
+    m = re.match(r"^(.*?)\s*\(([^()]*)\)\s*$", t)
+    if not m:
+        return t, None, ""
+    inner = m.group(2)
+    y = re.search(r"\b(19[0-9]\d|20[0-4]\d)\b", inner)
+    kind = _kind_of(inner)
+    if not y and not kind:
+        return t, None, ""
+    return m.group(1).strip(), int(y.group(1)) if y else None, kind
+
+
+def result_work(r: dict) -> dict | None:
+    """The work a search result is about, when the result is a title page on a known site."""
+    for site, url_rx, suffix, weight in SITES:
+        m = re.search(url_rx, r.get("url") or "")
+        if not m:
+            continue
+        if site == "Wikipedia":
+            page = urllib.parse.unquote(m.group(1)).replace("_", " ")
+            if NOT_A_WORK.search(page):
+                return None
+            name, year, kind = split_title(page)
+            wiki = page
+        else:
+            name, year, kind = split_title(re.sub(suffix, "", r.get("title") or "", flags=re.I).strip())
+            wiki = None
+            if site in ("MyAnimeList", "AniList"):
+                kind = m.group(1)
+            elif site == "IMDb" and year and not kind:
+                kind = "movie"  # IMDb writes "(TV Series 2017-2020)" for shows and just "(2019)" for films
+            elif site in ("Rotten Tomatoes", "TMDB"):
+                kind = kind or ("series" if m.group(1) == "tv" else "movie")
+        snippet_kind = _kind_of(r.get("snippet") or "")
+        name = re.sub(r"\s+[-–\u2014|:]\s*$", "", name).strip()
+        if not name or len(name) > 90:
+            return None
+        if not year:
+            ys = re.search(r"\b(19[0-9]\d|20[0-4]\d)\b", r.get("snippet") or "")
+            year = int(ys.group(1)) if ys and snippet_kind else None
+        return {"name": name, "year": year, "type": kind or snippet_kind, "site": site, "url": r["url"], "weight": weight,
+                "wikipedia_title": wiki, "evidence": r.get("title") or name}
+    return None
+
+
+def web_identify(query: str, name_hint: str = "", kind_hint: str = "", year: int | None = None) -> tuple[dict | None, list[str]]:
+    """Search the web and pick the work most results agree on. Returns (work or None, notes).
+    work: {name, year, type, site, url, wikipedia_title, evidence, agree, sure}."""
+    results, notes = web_search(query)
+    works = [w for w in (result_work(r) for r in results[:10]) if w]
+    if not works:
+        return None, notes + (["no title pages among the results"] if results else [])
+    groups: dict[str, list[tuple[int, dict]]] = {}
+    for i, w in enumerate(works):
+        groups.setdefault(norm(w["name"]), []).append((i, w))
+
+    def score(items):
+        i0, w0 = items[0]
+        s = w0["weight"] + 0.6 * (len({w["site"] for _, w in items}) - 1) - 0.06 * i0
+        yrs = {w["year"] for _, w in items if w["year"]}
+        kinds = {w["type"] for _, w in items if w["type"]}
+        if name_hint and similarity(name_hint, w0["name"]) >= 0.85:
+            s += 1.0
+        if year and yrs:
+            s += 0.5 if any(abs(y - year) <= 1 for y in yrs) else -0.7
+        if kind_hint and kinds:
+            s += 0.3 if kind_hint in kinds or (kind_hint == "anime" and "series" in kinds) else -0.4
+        if not kinds:
+            s -= 0.3
+        return s
+    best_items = max(groups.values(), key=score)
+    best = dict(best_items[0][1])
+    for _, w in best_items:  # fill gaps from the other results about the same work
+        for k in ("year", "type", "wikipedia_title"):
+            best[k] = best.get(k) or w.get(k)
+    best["agree"] = len({w["site"] for _, w in best_items})
+    hint_ok = bool(name_hint) and similarity(name_hint, best["name"]) >= 0.85 and (not year or not best["year"] or abs(best["year"] - year) <= 1)
+    best["sure"] = hint_ok or best["agree"] >= 2
+    return best, notes + [f"best: {best['evidence']} ({best['site']})"]
 
 
 # ---------------------------------------------------------------- scene search (screenshots)

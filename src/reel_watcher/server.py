@@ -261,24 +261,59 @@ class App:
         self.lib.update_item(f["item_id"], status="done")
         return self.item(f["item_id"])
 
+    def title_for_name(self, name: str, kind: str = "") -> int:
+        """A name the user typed: the database entry when there is one, else what a web search finds, else the name as typed."""
+        kind = kind if kind in worker.TITLE_KINDS else ""
+        if self.settings()["online"]:
+            hit = None
+            try:
+                hit = lookups.resolve_name(name, kind)
+            except Exception:  # noqa: BLE001  offline or a service down: fall through to the web, then the plain name
+                hit = None
+            if hit:
+                return self.lib.upsert_title(hit["ext_key"], hit["name"], type=hit["type"], year=hit.get("year"), language=hit.get("language") or "",
+                                             genres=hit.get("genres") or [], cover=hit.get("cover") or "", extra=hit.get("extra") or {})
+            try:
+                work, _ = lookups.web_identify(identify.search_query("", [{"name": name, "score": 9, "type": kind}], kind),
+                                               name_hint=name, kind_hint=kind)
+            except Exception:  # noqa: BLE001
+                work = None
+            if work and lookups.similarity(work["name"], name) >= 0.85 and self.engine:
+                return self.engine.save_web_work(work)
+        return self.lib.upsert_title("name:" + lookups.norm(name), name, type=kind or "other")
+
     def rename_find(self, fid: int, name: str, kind: str = "") -> dict:
         f = self.lib.find(fid)
         name = (name or "").strip()
-        if not f or not name:
+        if not f:
+            raise ApiError(404, "Not found")
+        if not name:
             raise ApiError(400, "Type a name")
-        hit = None
-        if self.settings()["online"]:
-            try:
-                hit = lookups.resolve_name(name, kind)
-            except (lookups.ServiceError, lookups.QuotaExceeded, OSError):
-                hit = None
-        if hit:
-            tid = self.lib.upsert_title(hit["ext_key"], hit["name"], type=hit["type"], year=hit.get("year"), language=hit.get("language") or "",
-                                        genres=hit.get("genres") or [], cover=hit.get("cover") or "", extra=hit.get("extra") or {})
-        else:
-            tid = self.lib.upsert_title("name:" + lookups.norm(name), name, type=kind or "other")
+        tid = self.title_for_name(name, kind)
         self.lib.update_find(fid, title_id=tid, name_raw=name, source="user", confidence="confirmed")
         return self.confirm_find(fid)
+
+    def name_item(self, iid: int, name: str, kind: str = "") -> dict:
+        """The user types the name for a screenshot or reel that has no guess at all."""
+        if not self.lib.item(iid):
+            raise ApiError(404, "Item not found")
+        name = (name or "").strip()
+        if not name:
+            raise ApiError(400, "Type a name")
+        fid = self.lib.add_find(iid, "title", title_id=self.title_for_name(name, kind), name_raw=name, source="user",
+                                confidence="confirmed", score=1.0)
+        return self.confirm_find(fid)
+
+    def retry_item(self, iid: int) -> dict:
+        """Run identification again (after fixing the internet connection, an update, or enabling lookups).
+        Text already read is kept; the user's own answers are kept."""
+        it = self.lib.item(iid)
+        if not it:
+            raise ApiError(404, "Item not found")
+        meta = {k: v for k, v in it["meta"].items() if k not in ("steps", "text_checked", "web", "ai", "scene")}
+        self.lib.x("DELETE FROM finds WHERE item_id=? AND source!='user'", (iid,))
+        self.lib.update_item(iid, meta=meta, status="waiting", stage="", error="", next_try_at=0, job_id=self.quick_job())
+        return self.item(iid)
 
     def remove_find(self, fid: int) -> dict:
         f = self.lib.find(fid)
@@ -524,6 +559,16 @@ def _confirm(app, m, q, body):
     return app.confirm_find(int(m["id"]))
 
 
+@route("POST", r"/api/items/(?P<id>\d+)/name")
+def _name_item(app, m, q, body):
+    return app.name_item(int(m["id"]), (body or {}).get("name", ""), (body or {}).get("type", ""))
+
+
+@route("POST", r"/api/items/(?P<id>\d+)/retry")
+def _retry_item(app, m, q, body):
+    return app.retry_item(int(m["id"]))
+
+
 @route("POST", r"/api/finds/(?P<id>\d+)/rename")
 def _rename(app, m, q, body):
     return app.rename_find(int(m["id"]), (body or {}).get("name", ""), (body or {}).get("type", ""))
@@ -596,7 +641,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store" if ctype.startswith("application/json") else "max-age=60")
+        self.send_header("Cache-Control", "no-store" if ctype.startswith("application/json") else "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
         for k, v in (extra or {}).items():
             self.send_header(k, v)

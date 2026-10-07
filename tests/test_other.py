@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from reel_watcher import advice_library, cli, ig_export, media, model
 
 
@@ -57,3 +59,17 @@ def test_no_em_dash_in_repo_sources():
     bad = chr(0x2014)
     for p in list(Path("src").rglob("*.py")) + list(Path("tests").rglob("*.py")):
         assert bad not in p.read_text(encoding="utf-8"), p
+
+
+def test_ollama_error_reason_is_readable(monkeypatch):
+    import io
+    import urllib.error
+
+    from reel_watcher import model
+
+    def fail(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 500, "Internal Server Error", {},
+                                     io.BytesIO(b'{"error":"model requires more system memory (3.9 GiB) than is available (2.1 GiB)"}'))
+    monkeypatch.setattr(model.urllib.request, "urlopen", fail)
+    with pytest.raises(RuntimeError, match="HTTP 500: model requires more system memory"):
+        model.ollama_request("/api/chat", {"x": 1})

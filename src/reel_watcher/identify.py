@@ -100,6 +100,90 @@ def _caps_ok(s: str) -> bool:
     return len(letters) >= 4 and sum(c.isupper() for c in letters) / len(letters) > 0.8
 
 
+LANGS = {"tamil": "ta", "hindi": "hi", "telugu": "te", "malayalam": "ml", "kannada": "kn", "bengali": "bn", "marathi": "mr",
+         "punjabi": "pa", "korean": "ko", "japanese": "ja", "chinese": "zh", "mandarin": "zh", "cantonese": "zh", "english": "en",
+         "spanish": "es", "french": "fr", "german": "de", "italian": "it", "turkish": "tr", "thai": "th"}
+LANG_NAMES = {v: k.title() for k, v in LANGS.items() if k not in ("mandarin", "cantonese")}
+KINDS = r"film|movie|tv series|television series|web series|mini-?series|series|anime|anime series|manga|manhwa|novel|video game"
+# "Scene (2026 film)", "Dark (TV series)", "Parasite (2019)": how Wikipedia, IMDb and posters name a work
+PAGE_TITLE = re.compile(rf"(?<![\w(])([A-Z0-9][\w'’:&.!-]*(?:\s+[\w'’:&.!-]+){{0,7}}?)\s*\(\s*((?:19|20)\d\d)?\s*({KINDS})?\s*(?:(?:19|20)\d\d)?[^)]{{0,12}}\)", re.I)
+# "Scene is an upcoming Indian Tamil-language action comedy film": the first line of every Wikipedia article
+LEAD = re.compile(rf"\b([A-Z0-9][\w'’:&.!-]*(?:\s+[\w'’:&.!-]+){{0,7}}?)\s+(?:is|was)\s+(?:an?|the)\s+((?:[\w-]+\s+){{0,6}}?)({KINDS})(?![a-z])")
+SMALL = {"of", "the", "a", "an", "and", "no", "to", "in", "on", "at", "for", "with", "vs", "vs.", "&", "de", "la", "le"}
+
+
+def _title_tail(raw: str) -> str:
+    """Keep the title words at the end of a matched phrase: 'Talk Article Scene' stays long, screen junk before it goes.
+    Walks back over Capitalised words, numbers and small joining words."""
+    words = raw.split()
+    keep: list[str] = []
+    for w in reversed(words):
+        if re.match(r"^[A-Z0-9][\w'’:&.!-]*$", w) and not re.search(r"[^\x00-\x7f]", w) or (keep and w.lower() in SMALL):
+            keep.insert(0, w)
+        else:
+            break
+    lead_words = {"watch", "watching", "read", "reading", "play", "playing", "try", "check", "stream", "streaming", "now", "new", "starring"}
+    while keep and (keep[0].lower() in (SMALL | lead_words) - {"a", "an", "the"} or (len(keep[0]) == 1 and keep[0] not in "AI" and len(keep) > 1)):
+        keep.pop(0)
+    return " ".join(keep)
+
+
+def page_clues(text: str) -> list[dict]:
+    """Strong clues from page-style titles: [{name, year, type, language, evidence}]."""
+    out = []
+    leads = [m for m in LEAD.finditer(text or "")]
+    for m in PAGE_TITLE.finditer(text or ""):
+        year, kind = m.group(2), m.group(3)
+        if not year and not kind:
+            continue
+        name = _title_tail(m.group(1))
+        # the article's first sentence names the work exactly: prefer it when it ends the title line
+        for lm in leads:
+            ln = _title_tail(lm.group(1))
+            if ln and lookups.norm(name).endswith(lookups.norm(ln)):
+                name = ln
+        if not name:
+            continue
+        out.append({"name": name, "year": int(year) if year else None, "type": lookups._kind_of(kind or ""),
+                    "language": None, "evidence": m.group(0)})
+    for m in leads:
+        if not _title_tail(m.group(1)):
+            continue
+        lang = re.search(r"\b(\w+)-language\b", m.group(2) or "", re.I)
+        year = re.search(r"\b((?:19|20)\d\d)\b", m.group(2) or "")
+        out.append({"name": _title_tail(m.group(1)), "year": int(year.group(1)) if year else None, "type": lookups._kind_of(m.group(3)),
+                    "language": LANGS.get(lang.group(1).lower()) if lang else None, "evidence": m.group(0)})
+    # the same work named twice (title line + first sentence): merge year, type and language
+    merged: dict[str, dict] = {}
+    for c in out:
+        k = lookups.norm(c["name"])
+        if k in merged:
+            for f in ("year", "type", "language"):
+                merged[k][f] = merged[k][f] or c[f]
+        else:
+            merged[k] = c
+    return list(merged.values())
+
+
+UI_WORDS = {"wikipedia", "article", "talk", "search", "home", "menu", "share", "save", "edit", "read", "more", "imdb", "google",
+            "chrome", "instagram", "reels", "reel", "follow", "like", "comment", "comments", "send", "reply", "view", "views"}
+
+
+def search_query(text: str, cands: list[dict], kind: str = "") -> str:
+    """What to type into a search engine for this screenshot: the best name with its year and type when the page gave
+    them, else the readable words of the screen (status bar, links and buttons dropped)."""
+    word = {"movie": "film", "series": "TV series", "anime": "anime", "manga": "manga", "book": "novel", "game": "video game"}
+    if cands and cands[0]["score"] >= 2:
+        c = cands[0]
+        return " ".join(str(x) for x in (c["name"], c.get("year") or "", word.get(c.get("type") or kind, "")) if x)
+    words = [w.strip(".,;:!?()[]\"'") for w in (text or "").split()]
+    words = [w for w in words if len(w) >= 2 and re.match(r"^[A-Za-z][A-Za-z'’-]*$", w) and w.lower() not in UI_WORDS
+             and not re.search(r"\.(?:com|org|net|in)\b", w)]
+    if len(words) < 2:
+        return " ".join(str(x) for x in (cands[0]["name"], word.get(kind, ""))).strip() if cands else ""
+    return " ".join(words[:14] + ([word[kind]] if kind in word else []))
+
+
 def extract_candidates(sources: list[tuple[str, str]]) -> list[dict]:
     """sources: [(where, text)] with where in text|speech|caption|comment|creator_comment.
     Returns candidates sorted by score: {name, key, score, sources:[...], evidence}."""
@@ -128,6 +212,14 @@ def extract_candidates(sources: list[tuple[str, str]]) -> list[dict]:
     for where, text in sources:
         text = text or ""
         strong_hit = False
+        for pc in page_clues(text):
+            add(pc["name"], where, 4.0, pc["evidence"])
+            c = found.get(lookups.norm(clean_name(pc["name"]) or ""))
+            if c:
+                strong_hit = True
+                c["year"] = c["year"] or pc["year"]
+                c["type"] = c.get("type") or pc["type"]
+                c["language"] = c.get("language") or pc["language"]
         for rx, w, label in PATTERNS:
             for m in rx.finditer(text):
                 g = m.group(1)

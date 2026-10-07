@@ -109,8 +109,15 @@ def ollama_request(path: str, body: dict | None = None, timeout: float = 900):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(ollama_host() + path, data=data, method="POST" if data else "GET",
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8") or "null")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8") or "null")
+    except urllib.error.HTTPError as e:  # Ollama explains failures in the body, e.g. not enough memory for the model
+        try:
+            reason = (json.loads(e.read().decode("utf-8", errors="replace") or "{}") or {}).get("error") or ""
+        except ValueError:
+            reason = ""
+        raise RuntimeError(f"Ollama: HTTP {e.code}" + (f": {reason}" if reason else "")) from e
 
 
 def ensure_ollama_model(tag: str, log=print) -> None:

@@ -40,7 +40,7 @@ def enrich(title: dict, region: str = "IN") -> dict:
                 # cross-check: both databases should agree on the title
                 if j.get("mal_title") and max(lookups.similarity(j["mal_title"], n) for n in [name, d.get("native_title") or name]) < 0.6:
                     out["cross_check"] = f"MyAnimeList calls it '{j['mal_title']}'"
-    elif ext.startswith("wikidata:"):
+    elif ext.startswith(("wikidata:", "web:")):
         wp_title = extra.get("wikipedia_title")
         if wp_title:
             w = safe(lookups.wikipedia_summary, wp_title)
