@@ -2,6 +2,7 @@
 No network and no AI model: the engine runs with online lookups off."""
 import json
 import os
+import re
 import shutil
 import threading
 import urllib.request
@@ -475,3 +476,72 @@ def test_api_version_and_self_update(tmp_path, monkeypatch):
     (tmp_path / "up.git").rename(tmp_path / "gone.git")  # no connection to the server
     with pytest.raises(server.ApiError, match="Update failed"):
         app.update()
+
+
+def test_api_never_crashes_on_bad_input(running):
+    """Every endpoint, fed missing, wrong and absurd input, answers with a 4xx and a readable message; never a 500."""
+    b = running["base"]
+    bodies = [None, {}, {"name": ""}, {"name": "x" * 5000, "type": "nonsense"}, {"url": 12}, {"style": "?", "format": "exe"},
+              {"folders": "not a list"}, {"folders": ["/definitely/not/here"]}, {"ext_key": "nope:1"}, {"on": "maybe"}, [1, 2]]
+    paths = {"id": ["999999", "0"], "name": ["NoSuchCollection", "%2e%2e"], "action": ["pause"]}
+    crashes = []
+    for method, rx, _ in server.ROUTES:
+        if rx.pattern in ("^/api/update$",):
+            continue  # real git: covered in its own test
+        p = rx.pattern.strip("^$").replace("\\d+", "999999").replace("all|", "")
+        p = re.sub(r"\(\?P<id>[^)]*\)", "999999", p)
+        p = re.sub(r"\(\?P<name>[^)]*\)", "NoSuchCollection", p)
+        p = re.sub(r"\(\?P<action>[^)]*\)", "pause", p)
+        for body in (bodies if method != "GET" else [None]):
+            for q in ("", "?q=%00&type=zzz&collection=&path=/etc/../..&limit=-5"):
+                raw = json.dumps(body).encode() if body is not None else b"{not json"
+                s, r = call(b, p + q, method, raw=raw)
+                if s >= 500 or (s >= 400 and not (isinstance(r, dict) and r.get("error"))):
+                    crashes.append((method, p + q, body, s, r))
+    assert not crashes, crashes[:5]
+
+
+JUNK = re.compile(r"\bundefined\b|\bNaN\b|\[object Object\]|Traceback|TypeError|AttributeError|KeyError|null\b")
+
+
+def test_ui_every_screen_and_button_survives(page):
+    """Visit every screen (also for things that do not exist) and press every button: no script error, no junk text,
+    and the page always shows something useful."""
+    pg, lib = page, page.running["lib"]
+    tid = lib.one("SELECT id FROM titles ORDER BY id LIMIT 1")["id"]
+    items = [r["id"] for r in lib.q("SELECT id FROM items ORDER BY id")]
+    quote = lib.one("SELECT id FROM finds WHERE kind='quote' LIMIT 1")["id"]
+    routes = ["#/", "#/import", "#/c/Anime", "#/c/Motivation", "#/c/Screenshots", "#/c/NoSuchCollection", f"#/t/{tid}", "#/t/999999",
+              f"#/q/{quote}", "#/q/999999", "#/identify", "#/folder", "#/search", "#/filters", "#/progress", "#/check", "#/settings",
+              "#/item/999999", "#/nonsense"] + [f"#/item/{i}" for i in items]
+    problems = []
+    for r in routes:
+        pg.goto(pg.running["base"] + "/" + r)
+        pg.wait_for_timeout(250)
+        body = pg.inner_text("main") if pg.locator("main").count() else pg.inner_text("body")
+        if not body.strip():
+            problems.append((r, "empty screen"))
+        if JUNK.search(body):
+            problems.append((r, JUNK.search(body).group(0)))
+        n = pg.locator("main button:visible").count()
+        for k in range(min(n, 12)):
+            pg.goto(pg.running["base"] + "/" + r)
+            pg.wait_for_timeout(150)
+            btns = pg.locator("main button:visible")
+            if k >= btns.count():
+                break
+            label = (btns.nth(k).inner_text() or btns.nth(k).get_attribute("aria-label") or "").strip()
+            if re.search(r"Update now|Remove|Delete", label):
+                continue
+            try:
+                btns.nth(k).click(timeout=2000)
+            except Exception:  # noqa: BLE001  covered or disabled: not a failure by itself
+                continue
+            pg.wait_for_timeout(300)
+            if pg.locator("dialog[open]").count():
+                pg.keyboard.press("Escape")
+            text = pg.inner_text("body")
+            if JUNK.search(text):
+                problems.append((r, label, JUNK.search(text).group(0)))
+    assert not pg.errors, pg.errors[:5]
+    assert not problems, problems[:10]

@@ -323,7 +323,7 @@ class App:
 
     def rename_find(self, fid: int, name: str, kind: str = "") -> dict:
         f = self.lib.find(fid)
-        name = (name or "").strip()
+        name, kind = str(name or "").strip()[:200], str(kind or "")
         if not f:
             raise ApiError(404, "Not found")
         if not name:
@@ -336,7 +336,7 @@ class App:
         """The user types the name for a screenshot or reel that has no guess at all."""
         if not self.lib.item(iid):
             raise ApiError(404, "Item not found")
-        name = (name or "").strip()
+        name, kind = str(name or "").strip()[:200], str(kind or "")
         if not name:
             raise ApiError(400, "Type a name")
         fid = self.lib.add_find(iid, "title", title_id=self.title_for_name(name, kind), name_raw=name, source="user",
@@ -419,7 +419,8 @@ class App:
 
     def identify_reel(self, url: str, collection: str = "") -> dict:
         from . import media
-        code = media.id_from_url(url or "")
+        url, collection = str(url or "").strip(), str(collection or "").strip()
+        code = media.id_from_url(url)
         if not code:
             raise ApiError(400, "Paste an Instagram reel or post link")
         iid, created = self.lib.add_item(f"reel:{code[3:]}", "reel", url.split("?")[0], [collection or ig_export.UNSORTED],
@@ -731,7 +732,10 @@ class Handler(BaseHTTPRequestHandler):
         except ApiError as e:
             return self._json(e.status, {"error": str(e)}, extra)
         except Exception as e:  # noqa: BLE001
-            return self._json(500, {"error": f"{type(e).__name__}: {e}"}, extra)
+            import traceback
+            traceback.print_exc()  # full details go to the log (Termux: ~/reel-shelf.log)
+            return self._json(500, {"error": f"Reel Shelf hit a problem ({type(e).__name__}: {str(e)[:120]}). "
+                                             "Try again; if it repeats, update the app in Settings."}, extra)
 
     def _file(self, root: Path, rel: str, extra):
         rel = urllib.parse.unquote(rel)
@@ -784,6 +788,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(raw or b"{}")
             except ValueError as e:
                 raise ApiError(400, "Body must be JSON") from e
+            if not isinstance(body, dict):
+                raise ApiError(400, "Body must be a JSON object")
         for meth, rx, fn in ROUTES:
             m = rx.match(path)
             if m and meth == method:
