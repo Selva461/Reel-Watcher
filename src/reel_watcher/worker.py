@@ -50,6 +50,20 @@ MAX_INSTAGRAM_WAITS = 6  # a reel Instagram refused this many times (about 6 hou
 TITLE_KINDS = ("movie", "series", "anime", "manga", "book", "game")
 
 
+def readable_download_error(err: str) -> str:
+    """yt-dlp's messages, in plain words, with the original kept at the end for the debug report."""
+    low = err.lower()
+    if "private" in low or "login" in low or "log in" in low:
+        msg = "This post is private or needs a login, so it cannot be read without logging in."
+    elif re.search(r"not available|isn.t available|unavailable|\b404\b|does not exist|doesn.t exist|removed|deleted", low):
+        msg = "This post is no longer available on Instagram."
+    elif "no_media" in low or "no video" in low:
+        msg = "This post has no video and its pictures could not be downloaded."
+    else:
+        msg = "The post could not be downloaded."
+    return f"{msg} Tap Try again later. ({err[:160]})"
+
+
 def scene_detail(svc: str, res: dict) -> str:
     """'Episode 3 · at 8:41' (anime) or 'Chapter 210' (manga) from a picture-search result."""
     if svc == "trace":
@@ -578,7 +592,15 @@ class Engine:
         lib.update_item(iid, stage="downloading")
         unit = study.prepare_ytdlp({"url": item["source"], "code": code, "collections": item["collections"], "kind": "reel"},
                                    work_parent, comments=kind != "quote")
+        steps: dict = {}
+
+        def note(step: str, ok, detail: str) -> None:  # shown in the debug report, like for screenshots
+            steps[step] = {"ok": ok, "detail": str(detail)[:300]}
+            lib.merge_meta(iid, steps=steps)
+            log_event("step", item=iid, step=step, ok=ok, detail=str(detail)[:200])
+
         if unit.get("error"):
+            note("Download", False, unit["error"])
             if BLOCK_RE.search(unit["error"]):  # Instagram is limiting anonymous downloads: try again in an hour
                 waits = int(item["meta"].get("ig_waits") or 0) + 1
                 if waits > MAX_INSTAGRAM_WAITS:
@@ -588,9 +610,18 @@ class Engine:
                 lib.merge_meta(iid, ig_waits=waits)
                 lib.update_item(iid, status="waiting_quota", next_try_at=time.time() + 3600, error=unit["error"][:300], stage="")
             else:
-                lib.update_item(iid, status="skipped" if "no_video" in unit["error"] else "failed", error=unit["error"][:300], stage="")
+                lib.update_item(iid, status="failed", stage="", error=readable_download_error(unit["error"]))
             return
-        work, video, meta = unit["work"], unit["media"][0], unit["meta"]
+        work, meta = unit["work"], unit["meta"]
+        if not unit.get("media"):  # a picture post or carousel: read the pictures like screenshots
+            note("Download", True, f"{len(unit.get('images') or [])} pictures (no video)")
+            try:
+                self._picture_post(iid, unit, meta, kind, note)
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+            return
+        note("Download", True, "video")
+        video = unit["media"][0]
         try:
             lib.update_item(iid, stage="watching and listening")
             v = self.vision() if self.ai else None  # without AI: text on frames + speech + caption + comments
@@ -612,13 +643,51 @@ class Engine:
                 m["thumb"] = self.thumb(Path(key), iid, "reel")
             lib.merge_meta(iid, **m)
             lib.clear_finds(iid)
+            note("Read the reel", True, f"{len((m['transcript'] or '').split())} words said; "
+                 f"{sum(len(((f.get('visual') or {}).get('on_screen_text') or '').split()) for f in rec.get('frames') or [])} words on screen")
             if kind == "quote":
                 status = self._reel_quote(iid, video, rec, words)
             else:
                 status = self._reel_titles(iid, rec, meta, unit.get("comments") or [], kind)
-            lib.update_item(iid, status=status, stage="", error="" if status != "skipped" else "no name found")
+                note("Check names", status != "skipped" or None, {"done": "verified", "check": "possible match", "skipped": "nothing found"}[status])
+            lib.update_item(iid, status=status, stage="", error="" if status != "skipped" else "Not found. Type the name, or try again later.")
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    def _picture_post(self, iid: int, unit: dict, meta: dict, kind: str, note) -> None:
+        """Instagram post made of pictures (one or a carousel): the text on each picture, the caption and the
+        comments are read and checked with the same rule as reels."""
+        from . import study
+        lib = self.lib
+        lib.update_item(iid, stage="reading the pictures")
+        texts = []
+        for p in unit.get("images") or []:
+            try:
+                texts.append(study.ocr_image(p))
+            except Exception as e:  # noqa: BLE001  one unreadable picture does not stop the others
+                log_error("picture text", e, item=iid)
+                texts.append("")
+        words = sum(len(t.split()) for t in texts)
+        note("Read the pictures", bool(words) or None, f"{len(texts)} pictures, {words} words")
+        m = {"caption": meta.get("caption") or "", "author": meta.get("author"), "post_date": meta.get("post_date"),
+             "post_kind": "pictures", "pictures": len(texts), "picture_text": [t[:300] for t in texts]}
+        if unit.get("images"):
+            m["thumb"] = self.thumb(Path(unit["images"][0]), iid, "reel")
+        lib.merge_meta(iid, **m)
+        lib.clear_finds(iid)
+        if kind == "quote":  # quote pictures: the longest line of text is the quote
+            lines = [ln.strip() for t in texts for ln in t.splitlines() if len(ln.split()) >= 4]
+            if not lines:
+                lib.update_item(iid, status="skipped", stage="", error="No quote text found on the pictures.")
+                return
+            lib.add_find(iid, "quote", quote=max(lines, key=len)[:300], source="text", confidence="confirmed")
+            lib.update_item(iid, status="done", stage="", error="")
+            return
+        rec = {"transcript": {"language": None, "text": "", "words": []}, "analysis": {},
+               "frames": [{"visual": {"on_screen_text": t}} for t in texts if t]}
+        status = self._reel_titles(iid, rec, meta, unit.get("comments") or [], kind)
+        note("Check names", status != "skipped" or None, {"done": "verified", "check": "possible match", "skipped": "nothing found"}[status])
+        lib.update_item(iid, status=status, stage="", error="" if status != "skipped" else "Not found. Type the name, or try again later.")
 
     def _reel_titles(self, iid, rec, meta, comments, kind) -> str:
         screen = [f.get("visual", {}).get("on_screen_text") or "" for f in rec.get("frames") or []]

@@ -182,7 +182,7 @@ class App:
     def check_status(self) -> dict:
         return getattr(self, "_check", None) or {"running": False, "current": "", "rows": []}
 
-    PIPELINE = 2  # bump when identification changes enough that old answers should be checked again
+    PIPELINE = 3  # bump when identification changes enough that old answers should be checked again (3: picture posts)
 
     def recheck_after_upgrade(self) -> int:
         """Once per identification upgrade: screenshots that failed, were not found or only guessed, and reels that

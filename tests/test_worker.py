@@ -556,3 +556,94 @@ def test_instagram_refusals_end_after_a_few_hours(env, monkeypatch):
         env["lib"].update_item(iid, next_try_at=0)
     it = run_one(eng, "reel")
     assert it["status"] == "failed" and f"refused this reel {worker.MAX_INSTAGRAM_WAITS} times" in it["error"]
+
+
+FRIENDS_SLIDE = "10.Friends\nSeason 1 (avg 8.1)\nE2\nE4\nE10\n8.9\n7.9\n8.1\nE21\nE22\n7.6\n8.8\nSeason 2 (avg 8.3)\n13.4K"
+
+
+def picture_post_env(monkeypatch, env, texts, caption="Amazing series that everyone loves", comments=()):
+    def prep(item, work_parent, comments_flag=False):
+        work = work_parent / item["code"]
+        work.mkdir(parents=True, exist_ok=True)
+        imgs = [make_img(work / f"img_{i + 1:02d}.jpg", 40 + i) for i in range(len(texts))]
+        return {"item": item, "meta": {"caption": caption, "author": "enjoythenostalgia"}, "work": work, "media": [],
+                "images": imgs, "comments": list(comments)}
+    monkeypatch.setattr(study, "prepare_ytdlp", lambda item, wp, comments=False: prep(item, wp, comments))
+    by_name = {f"img_{i + 1:02d}.jpg": t for i, t in enumerate(texts)}
+    monkeypatch.setattr(study, "ocr_image", lambda p: by_name.get(p.name, ""))
+
+
+def test_picture_carousel_post_is_read_like_screenshots(env, monkeypatch):
+    """Instagram posts made of pictures (the 'Top 10 series' carousel): no video, the text on each picture counts."""
+    HITS["friends"] = {"ext_key": "wikidata:Q79784", "name": "Friends", "names": ["Friends"], "type": "series", "year": 1994,
+                       "language": "English", "genres": ["sitcom"], "cover": "", "extra": {}, "score": 1.0}
+    try:
+        picture_post_env(monkeypatch, env, [FRIENDS_SLIDE, "", "9. VINLAND SAGA\nSeason 1"])
+        iid, _ = env["lib"].add_item("reel:CAROUSEL", "reel", "https://www.instagram.com/p/CAROUSEL/", [ig_export_unsorted()])
+        it = run_one(worker.Engine(env["lib"]), "reel")
+        got = {(x["title"], x["confidence"]) for x in finds(env["lib"], iid)}
+        assert it["status"] == "done" and ("Friends", "confirmed") in got and ("Vinland Saga", "confirmed") in got
+        steps = it["meta"]["steps"]
+        assert steps["Download"]["detail"] == "3 pictures (no video)" and steps["Read the pictures"]["ok"]
+        assert it["meta"]["pictures"] == 3 and it["meta"]["thumb"] == f"reel_{iid}.jpg"
+        assert not (env["lib"].dir / "work" / "CAROUSEL").exists()
+    finally:
+        HITS.pop("friends", None)
+
+
+def test_quote_picture_post_and_readable_download_errors(env, monkeypatch):
+    picture_post_env(monkeypatch, env, ["@creator\nDiscipline is choosing what you want most over what you want now\n2.1K likes"])
+    iid, _ = env["lib"].add_item("reel:QPIC", "reel", "https://www.instagram.com/p/QPIC/", ["Motivation"])
+    it = run_one(worker.Engine(env["lib"]), "reel")
+    q = [x for x in finds(env["lib"], iid) if x["kind"] == "quote"]
+    assert it["status"] == "done" and q[0]["quote"] == "Discipline is choosing what you want most over what you want now"
+    monkeypatch.setattr(study, "prepare_ytdlp", lambda item, wp, comments=False: {"error": "ytdlp: ERROR: [Instagram] X: This content isn't available"})
+    iid, _ = env["lib"].add_item("reel:GONE", "reel", "https://www.instagram.com/reel/GONE/", ["Movies"])
+    it = run_one(worker.Engine(env["lib"]), "reel")
+    assert it["status"] == "failed" and it["error"].startswith("This post is no longer available on Instagram.")
+    assert it["meta"]["steps"]["Download"]["ok"] is False
+
+
+def ig_export_unsorted():
+    from reel_watcher import ig_export
+    return ig_export.UNSORTED
+
+
+def test_image_post_download_fallback_and_safe_picture_fetch(tmp_path, monkeypatch):
+    import io
+
+    from yt_dlp.utils import DownloadError
+    calls = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=True):
+            calls.append(bool(self.opts.get("ignore_no_formats_error")))
+            if not self.opts.get("ignore_no_formats_error"):
+                raise DownloadError("ERROR: [Instagram] DdJtGtXzj1w: No video formats found!; please report this issue")
+            return {"id": "X", "description": "cap", "uploader": "u", "entries": [
+                {"thumbnails": [{"url": "https://scontent.cdninstagram.com/small.jpg", "width": 150, "height": 150},
+                                {"url": "https://scontent.cdninstagram.com/big.jpg", "width": 1080, "height": 1350}]},
+                {"thumbnail": "https://evil.example/steal.jpg"},
+                {"thumbnails": [{"url": "https://scontent.cdninstagram.com/notimage.jpg"}]}]}
+    import yt_dlp
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    fetched = []
+
+    def fake_open(req, timeout=30):
+        fetched.append(req.full_url)
+        body = b"<html>not a picture</html>" if "notimage" in req.full_url else b"\xff\xd8\xff\xe0" + b"0" * 2000
+        return io.BytesIO(body)
+    monkeypatch.setattr(study.urllib.request if hasattr(study, "urllib") else __import__("urllib.request").request, "urlopen", fake_open)
+    unit = study.prepare_ytdlp({"url": "https://www.instagram.com/p/X/", "code": "X"}, tmp_path)
+    assert calls == [False, True]                          # normal try, then the picture-post pass
+    assert fetched == ["https://scontent.cdninstagram.com/big.jpg", "https://scontent.cdninstagram.com/notimage.jpg"]
+    assert [p.name for p in unit["images"]] == ["img_01.jpg"] and unit["media"] == [] and unit["item"]["kind"] == "pictures"

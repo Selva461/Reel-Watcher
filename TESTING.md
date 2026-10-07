@@ -87,6 +87,8 @@ May fail without breaking the app: MyAnimeList, TVmaze, one of the search engine
 | R5 | Reel names a new or regional film the databases do not have | **Verified** through web search (the evidence lists the web pages). |
 | R6 | AI guesses off (default), read a reel | Read from on-screen text, speech, caption and comments; the AI model is never started. |
 | R7 | Many reels in a row | Some may show "Instagram is limiting downloads for now; it continues automatically"; they continue by themselves about an hour later. None shows a raw error. |
+| R9 | A post made of pictures (one picture or a carousel, for example a "Top 10 series" list with episode ratings) | Not "failed": Download "N pictures (no video)", the text of each picture is read; titles written on the pictures ("10. Friends" above "Season 1") end **Verified**. |
+| R10 | A quote picture in a Motivation collection | The quote text from the picture is saved as a quote. |
 | R8 | A "Motivation" collection | Quotes with a GIF that has captions in time with the voice. Save and Share work. |
 
 ## 5. Library

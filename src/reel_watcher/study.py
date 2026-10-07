@@ -110,6 +110,51 @@ YTDLP_MAX_BLOCKED = 3  # consecutive blocked downloads before the run stops
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+IMAGE_HOSTS = ("cdninstagram.com", "fbcdn.net", "instagram.com")  # pictures are only fetched from Instagram's servers
+MAX_POST_IMAGES = 20
+
+
+def post_image_urls(info: dict) -> list[str]:
+    """Full-size picture of each slide of an image post or carousel (videos are downloaded by yt-dlp itself)."""
+    urls = []
+    for e in (info.get("entries") or [info]):
+        if not isinstance(e, dict) or e.get("requested_downloads") or e.get("formats"):
+            continue
+        thumbs = [t for t in (e.get("thumbnails") or []) if isinstance(t, dict) and t.get("url")]
+        if not thumbs and e.get("thumbnail"):
+            thumbs = [{"url": e["thumbnail"]}]
+        if thumbs:
+            best = max(thumbs, key=lambda t: ((t.get("width") or 0) * (t.get("height") or 0), t.get("preference") or 0))
+            urls.append(best["url"])
+    return list(dict.fromkeys(urls))[:MAX_POST_IMAGES]
+
+
+def download_post_images(urls: list[str], work: Path) -> list[Path]:
+    import urllib.parse
+    import urllib.request
+    out = []
+    for i, u in enumerate(urls):
+        host = (urllib.parse.urlparse(u).hostname or "").lower()
+        if urllib.parse.urlparse(u).scheme != "https" or not any(host == h or host.endswith("." + h) for h in IMAGE_HOSTS):
+            continue
+        req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read(15 * 2**20 + 1)
+        except OSError as e:
+            log(f"picture {i + 1} not downloaded: {e}")
+            continue
+        ext = ".jpg" if data[:3] == b"\xff\xd8\xff" else ".png" if data[:4] == b"\x89PNG" else \
+            ".webp" if data[:4] == b"RIFF" and data[8:12] == b"WEBP" else ""
+        if not ext or len(data) > 15 * 2**20:
+            continue  # not a picture, or too big: never written
+        p = work / f"img_{i + 1:02d}{ext}"
+        p.write_bytes(data)
+        out.append(p)
+    return out
+
+
 def ytdlp_download(url: str, work: Path, comments: bool = False) -> dict:
     """Download one post with yt-dlp (no login, no cookies). Returns the yt-dlp info dict.
     comments=True also fetches the first page of comments Instagram shows without login (info["comments"])."""
@@ -118,7 +163,15 @@ def ytdlp_download(url: str, work: Path, comments: bool = False) -> dict:
             "quiet": True, "no_warnings": True, "noprogress": True, "retries": 3, "socket_timeout": 60,
             # only Instagram, safe file names, and no huge downloads, whatever the page claims
             "allowed_extractors": ["instagram.*"], "restrictfilenames": True, "max_filesize": 300 * 2**20}
-    with YoutubeDL(opts) as ydl:
+    from yt_dlp.utils import DownloadError
+    try:
+        with YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=True) or {}
+    except DownloadError as e:
+        if "no video formats" not in str(e).lower():
+            raise
+    # a picture post or a carousel: read it again without failing on the pictures (videos in it still download)
+    with YoutubeDL({**opts, "ignore_no_formats_error": True}) as ydl:
         return ydl.extract_info(url, download=True) or {}
 
 
@@ -157,12 +210,14 @@ def prepare_ytdlp(item: dict, work_parent: Path, comments: bool = False) -> dict
         msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e))
         return {"item": item, "error": f"ytdlp: {msg}"[:300]}
     vids = sorted(p for p in work.iterdir() if p.suffix.lower() in VIDEO_EXTS)
-    if not vids:
+    images = [] if vids else download_post_images(post_image_urls(info), work)
+    if not vids and not images:
         shutil.rmtree(work, ignore_errors=True)
-        return {"item": item, "error": "ytdlp_no_video: image-only posts cannot be downloaded for free; skipped"}
+        return {"item": item, "error": "ytdlp_no_media: this post has no video and its pictures could not be downloaded"}
     cm = [{"author": c.get("author"), "text": c.get("text"), "likes": c.get("like_count")} for c in (info.get("comments") or [])
           if isinstance(c, dict) and c.get("text")]
-    return {"item": {**item, "kind": "reel"}, "meta": ytdlp_meta(info), "work": work, "media": vids[:1], "comments": cm[:60]}
+    return {"item": {**item, "kind": "reel" if vids else "pictures"}, "meta": ytdlp_meta(info), "work": work, "media": vids[:1],
+            "images": images, "comments": cm[:60]}
 
 
 def ytdlp_producer(todo, q, stop, work_parent, sleep_s):
@@ -469,7 +524,7 @@ def ocr_image(path: Path) -> str:
     # result rows are [box(4 points), text, score]; sort by the top edge, then left edge
     rows = sorted(result or [], key=lambda r: (min(pt[1] for pt in r[0]), min(pt[0] for pt in r[0])))
     lines = [str(r[1]) for r in rows if len(r) > 2 and float(r[2]) >= 0.5]
-    return clean_ocr(" ".join(lines))
+    return clean_ocr("\n".join(lines))
 
 
 def ocr_tesseract(path: Path) -> str:
@@ -477,7 +532,7 @@ def ocr_tesseract(path: Path) -> str:
     p = subprocess.run(["tesseract", str(path), "stdout", "-l", os.environ.get("REEL_WATCHER_TESSERACT_LANG", "eng"), "--psm", "11"],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     lines = [ln.strip() for ln in (p.stdout or "").splitlines() if len(ln.strip()) > 1]
-    return clean_ocr(" ".join(lines))
+    return clean_ocr("\n".join(lines))
 
 
 def clean_ocr(txt: str) -> str:
@@ -486,7 +541,8 @@ def clean_ocr(txt: str) -> str:
     import unicodedata
     txt = unicodedata.normalize("NFKC", txt or "").replace("\u2019", "'").replace("\u2018", "'").replace("\u201c", '"').replace("\u201d", '"')
     txt = _SECRET_RE.sub("[redacted]", txt)
-    return re.sub(r"\s+", " ", txt).strip()[:1500]
+    lines = [re.sub(r"[^\S\n]+", " ", ln).strip() for ln in txt.splitlines()]  # line breaks are kept: lists need them
+    return "\n".join(ln for ln in lines if ln)[:1500]
 
 
 def dhash_bits(path: Path, size: int = 8) -> int:

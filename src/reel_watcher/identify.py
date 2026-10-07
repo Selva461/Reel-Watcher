@@ -90,6 +90,8 @@ def clean_name(raw: str, strict: bool = False) -> str | None:
         return None
     if re.search(r"\d{1,2}:\d{2}", s):
         return None
+    if all(re.fullmatch(r"[A-Za-z]{0,2}\d+(?:[.,]\d+)?[KkMm%]?|[ESes]\d{1,3}[Ee]?\d{0,3}", w) for w in words):
+        return None  # episode codes, ratings and counts ("E21", "S2E5", "8.1", "13.4K") are not titles
     if words[0].lower() in {"i", "we", "he", "she", "they", "you", "it", "this", "that", "my", "your", "our", "if", "when", "and", "but", "so"}:
         return None
     return s
@@ -184,10 +186,25 @@ def search_query(text: str, cands: list[dict], kind: str = "") -> str:
     return " ".join(words[:14] + ([word[kind]] if kind in word else []))
 
 
+CUES = [("series", re.compile(r"\bseason\s*\d|\bS\d{1,2}\s?E\d{1,3}\b|\bepisodes?\b|\bE\d{1,2}\s+\d\.\d", re.I)),
+        ("manga", re.compile(r"\bchapter\s*\d|\bvol(?:ume)?\.?\s*\d", re.I)),
+        ("movie", re.compile(r"\bdirected by\b|\bbox office\b|\bruntime\b|\bin cinemas\b", re.I))]
+
+
+def context_kind(text: str) -> str:
+    """What the text around a name says it is: 'Season 1', 'S2E5', episode ratings -> series; 'Chapter 12' -> manga."""
+    for kind, rx in CUES:
+        if rx.search(text or ""):
+            return kind
+    return ""
+
+
 def extract_candidates(sources: list[tuple[str, str]]) -> list[dict]:
     """sources: [(where, text)] with where in text|speech|caption|comment|creator_comment.
     Returns candidates sorted by score: {name, key, score, sources:[...], evidence}."""
     found: dict[str, dict] = {}
+
+    touched: list[tuple[str, float]] = []
 
     def add(name, where, weight, evidence):
         yr = re.search(r"\b(19[2-9]\d|20[0-4]\d)\b", name or "")
@@ -200,6 +217,7 @@ def extract_candidates(sources: list[tuple[str, str]]) -> list[dict]:
         c = found.setdefault(k, {"name": n, "key": k, "score": 0.0, "sources": [], "evidence": evidence.strip()[:200], "_seen": set(), "year": None})
         if yr and not c["year"]:
             c["year"] = int(yr.group(1))
+        touched.append((k, weight))
         bonus = 1.0 if where == "creator_comment" else 0.0
         if (where, evidence) not in c["_seen"]:
             c["_seen"].add((where, evidence))
@@ -212,6 +230,7 @@ def extract_candidates(sources: list[tuple[str, str]]) -> list[dict]:
     for where, text in sources:
         text = text or ""
         strong_hit = False
+        touched.clear()
         for pc in page_clues(text):
             add(pc["name"], where, 4.0, pc["evidence"])
             c = found.get(lookups.norm(clean_name(pc["name"]) or ""))
@@ -237,6 +256,15 @@ def extract_candidates(sources: list[tuple[str, str]]) -> list[dict]:
                 add(text, where, 1.2, text)
         if where == "text" and not strong_hit and 1 <= len(text.split()) <= 6:
             add(text, where, 1.0, text)
+        cue = context_kind(text)
+        if cue:  # "10. Friends" above "Season 1 (avg 8.1)": a listed name in a series context is a strong clue
+            for k, w in touched:
+                c = found.get(k)
+                if c and w >= 2:
+                    c["type"] = c.get("type") or cue
+                    if not c.get("_cue"):
+                        c["_cue"] = True
+                        c["score"] += 0.5
         for tag in re.findall(r"#([A-Za-z][A-Za-z0-9_]{3,40})", text):
             if tag.lower() not in GENERIC_TAGS:
                 spaced = re.sub(r"(?<=[a-z])(?=[A-Z])|_", " ", tag)
@@ -244,6 +272,7 @@ def extract_candidates(sources: list[tuple[str, str]]) -> list[dict]:
     out = sorted(found.values(), key=lambda c: -c["score"])
     for c in out:
         c.pop("_seen", None)
+        c.pop("_cue", None)
     return out
 
 
@@ -269,9 +298,10 @@ def resolve_candidates(cands: list[dict], kind: str = "", resolver=lookups.resol
                        min_score: float = 1.0, language: str | None = None) -> list[dict]:
     """Check the top candidates in the free databases. Returns titles (deduped by database id), each with
     confidence 'confirmed', or 'check' when another work with the same name fits almost as well."""
-    hint = kind if kind in ("anime", "manga", "movie", "series", "book", "game") else ""
+    coll_hint = kind if kind in ("anime", "manga", "movie", "series", "book", "game") else ""
     out: dict[str, dict] = {}
     for c in [c for c in cands if c["score"] >= min_score][:max_lookups]:
+        hint = c.get("type") or coll_hint  # what the text itself says beats the collection's name
         kw = {}
         if c.get("year"):
             kw["year"] = c["year"]
