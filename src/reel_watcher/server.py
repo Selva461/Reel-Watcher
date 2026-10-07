@@ -70,7 +70,8 @@ class App:
         return r.stdout.strip()
 
     def version(self) -> dict:
-        out = {"version": "unknown", "date": "", "can_update": bool(self.repo and self.restart), "warnings": []}
+        out = {"version": "unknown", "date": "", "can_update": bool(self.repo and self.restart), "warnings": [],
+               "update_available": bool(getattr(self, "_behind", 0)), "auto_update": bool(self.settings().get("auto_update", True))}
         from . import security
         out["warnings"] = security.outdated() + (list(dict.fromkeys(self.engine.warnings))[-5:] if self.engine else [])
         if self.repo:
@@ -181,6 +182,67 @@ class App:
     def check_status(self) -> dict:
         return getattr(self, "_check", None) or {"running": False, "current": "", "rows": []}
 
+    PIPELINE = 2  # bump when identification changes enough that old answers should be checked again
+
+    def recheck_after_upgrade(self) -> int:
+        """Once per identification upgrade: screenshots that failed, were not found or only guessed, and reels that
+        failed, are identified again with the new rules. Answers the user confirmed are kept."""
+        from .debuglog import log_event
+        mark = self.lib.dir / "pipeline_version"
+        try:
+            done = int(mark.read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            done = 0
+        if done >= self.PIPELINE:
+            return 0
+        rows = self.lib.q("SELECT id FROM items WHERE (kind='image' AND status IN ('failed','skipped','check')) "
+                          "OR (kind='reel' AND status='failed')")
+        n = 0
+        for r in rows:
+            if self.lib.one("SELECT id FROM finds WHERE item_id=? AND source='user' LIMIT 1", (r["id"],)):
+                continue
+            self.retry_item(r["id"])
+            n += 1
+        mark.write_text(str(self.PIPELINE), encoding="utf-8")
+        log_event("recheck_after_upgrade", items=n)
+        return n
+
+    def check_for_update(self) -> int:
+        """How many new commits are waiting on GitHub (0 when up to date or offline)."""
+        if not self.repo:
+            return 0
+        try:
+            self._git("fetch", "--quiet", timeout=90)
+            self._behind = int(self._git("rev-list", "--count", "HEAD..@{u}") or 0)
+        except (ApiError, OSError, ValueError):
+            return getattr(self, "_behind", 0)
+        return self._behind
+
+    def auto_update_loop(self, first_wait: float = 60, every: float = 3 * 3600, stop=None) -> None:
+        """Keep a long-running app current: check, wait until nothing is being processed, update and restart."""
+        from .debuglog import log_event
+        stop = stop or threading.Event()
+        wait = first_wait
+        while not stop.wait(wait):
+            wait = every
+            if not (self.repo and self.restart and self.settings().get("auto_update", True)):
+                continue
+            behind = self.check_for_update()
+            log_event("update_check", behind=behind)
+            if not behind:
+                continue
+            for _ in range(60):  # up to 30 minutes for the current work to finish
+                busy = self.lib.one("SELECT COUNT(*) n FROM items WHERE status='working'")["n"]
+                if not busy:
+                    break
+                if stop.wait(30):
+                    return
+            try:
+                r = self.update()
+                log_event("auto_update", **{k: v for k, v in r.items() if k != "updated"}, updated=r.get("updated"))
+            except ApiError as e:
+                log_event("auto_update", error=str(e))
+
     def update(self) -> dict:
         """Download the latest code (git pull) and restart into it. Library and settings are kept."""
         if not self.repo or not self.restart:
@@ -193,13 +255,14 @@ class App:
         after = self._git("rev-parse", "--short", "HEAD")
         if after == before:
             return {"updated": False, "version": after}
+        self._behind = 0
         self.restart()
         return {"updated": True, "from": before, "version": after}
 
     # ------------------------------------------------------------ settings
 
     def settings(self) -> dict:
-        s = {"online": True, "quote_style": "bold", "region": "IN", "ai": False}
+        s = {"online": True, "quote_style": "bold", "region": "IN", "ai": False, "auto_update": True}
         try:
             s.update(json.loads(self.settings_path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
@@ -208,7 +271,7 @@ class App:
 
     def save_settings(self, body: dict) -> dict:
         s = self.settings()
-        s.update({k: v for k, v in body.items() if k in ("online", "quote_style", "region", "ai")})
+        s.update({k: v for k, v in body.items() if k in ("online", "quote_style", "region", "ai", "auto_update")})
         s["online"], s["ai"] = bool(s.get("online")), bool(s.get("ai"))
         s["region"] = re.sub(r"[^A-Z]", "", str(s.get("region") or "IN").upper())[:2] or "IN"
         self.settings_path.write_text(json.dumps(s), encoding="utf-8")
@@ -1057,6 +1120,7 @@ def main(argv: list[str] | None = None) -> int:
     if not a.no_engine:
         engine = worker.Engine(lib, vision_factory=None if a.no_ai else _model.Vision)
     app = App(lib, engine)
+    app.recheck_after_upgrade()
     if engine:
         engine.online = bool(app.settings()["online"])
         engine.region = app.settings()["region"]
@@ -1070,6 +1134,7 @@ def main(argv: list[str] | None = None) -> int:
             os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])  # half-done items are re-queued on start
         threading.Thread(target=later, daemon=True).start()
     app.restart = restart
+    threading.Thread(target=app.auto_update_loop, daemon=True, name="auto-update").start()
     token = secrets.token_urlsafe(12) if a.lan else None
     host = "0.0.0.0" if a.lan else "127.0.0.1"
     srv = make_server(app, host, a.port, token)

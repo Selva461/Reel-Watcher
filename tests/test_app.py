@@ -539,8 +539,10 @@ def test_api_version_and_self_update(tmp_path, monkeypatch):
     (tmp_path / "dev" / "f.txt").write_text("2", encoding="utf-8")
     git("-C", str(tmp_path / "dev"), "commit", "-qam", "two")
     git("-C", str(tmp_path / "dev"), "push", "-q", "origin", "HEAD")
+    assert app.check_for_update() == 1 and app.version()["update_available"] is True
     r = app.update()
     assert r["updated"] and r["from"] == v["version"] and r["version"] != v["version"] and restarts == [1]
+    assert app.check_for_update() == 0 and app.version()["update_available"] is False
     (tmp_path / "up.git").rename(tmp_path / "gone.git")  # no connection to the server
     with pytest.raises(server.ApiError, match="Update failed"):
         app.update()
@@ -703,3 +705,40 @@ def test_ui_not_found_offers_lens_and_debug_report(page):
     pg.goto(pg.running["base"] + "/#/settings")
     pg.get_by_role("switch", name="AI guesses").wait_for()
     assert pg.get_by_role("switch", name="AI guesses").get_attribute("aria-checked") == "false"
+
+
+def test_auto_update_waits_for_idle_then_updates(tmp_path, monkeypatch):
+    app = server.App(demo.build(tmp_path / "lib"))
+    app.repo, restarts, calls = tmp_path, [], []
+    app.restart = lambda: restarts.append(1)
+    monkeypatch.setattr(app, "check_for_update", lambda: calls.append("check") or 2)
+    monkeypatch.setattr(app, "update", lambda: calls.append("update") or {"updated": True, "version": "new"})
+    iid = app.lib.one("SELECT id FROM items LIMIT 1")["id"]
+    app.lib.update_item(iid, status="working")
+    stop = threading.Event()
+    t = threading.Thread(target=app.auto_update_loop, kwargs={"first_wait": 0.01, "every": 3600, "stop": stop}, daemon=True)
+    import reel_watcher.server as srvmod
+    real_wait = threading.Event.wait
+    monkeypatch.setattr(threading.Event, "wait", lambda self, timeout=None: real_wait(self, min(timeout or 0, 0.05)))
+    t.start()
+    time.sleep(0.3)
+    assert calls == ["check"]  # an item is being read: no update yet
+    app.lib.update_item(iid, status="done")
+    time.sleep(0.3)
+    stop.set()
+    assert calls[:2] == ["check", "update"]
+    app.save_settings({"auto_update": False})
+    assert app.version()["auto_update"] is False
+    del srvmod
+
+
+def test_old_answers_are_checked_again_once_after_an_upgrade(tmp_path):
+    lib = demo.build(tmp_path / "lib")
+    app = server.App(lib)
+    unsure = lib.one("SELECT id FROM items WHERE key='img:demo-unsure'")["id"]
+    good = lib.one("SELECT id FROM items WHERE key='img:demo-shot'")["id"]
+    mine, _ = lib.add_item("img:mine", "image", str(tmp_path / "x.jpg"), ["Screenshots"], status="check")
+    lib.add_find(mine, "title", name_raw="Mine", source="user", confidence="confirmed")
+    assert app.recheck_after_upgrade() == 1
+    assert lib.item(unsure)["status"] == "waiting" and lib.item(good)["status"] == "done" and lib.item(mine)["status"] == "check"
+    assert app.recheck_after_upgrade() == 0  # only once

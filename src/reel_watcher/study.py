@@ -469,8 +469,7 @@ def ocr_image(path: Path) -> str:
     # result rows are [box(4 points), text, score]; sort by the top edge, then left edge
     rows = sorted(result or [], key=lambda r: (min(pt[1] for pt in r[0]), min(pt[0] for pt in r[0])))
     lines = [str(r[1]) for r in rows if len(r) > 2 and float(r[2]) >= 0.5]
-    txt = _SECRET_RE.sub("[redacted]", " ".join(lines))
-    return re.sub(r"\s+", " ", txt).strip()[:500]
+    return clean_ocr(" ".join(lines))
 
 
 def ocr_tesseract(path: Path) -> str:
@@ -478,8 +477,16 @@ def ocr_tesseract(path: Path) -> str:
     p = subprocess.run(["tesseract", str(path), "stdout", "-l", os.environ.get("REEL_WATCHER_TESSERACT_LANG", "eng"), "--psm", "11"],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     lines = [ln.strip() for ln in (p.stdout or "").splitlines() if len(ln.strip()) > 1]
-    txt = _SECRET_RE.sub("[redacted]", " ".join(lines))
-    return re.sub(r"\s+", " ", txt).strip()[:500]
+    return clean_ocr(" ".join(lines))
+
+
+def clean_ocr(txt: str) -> str:
+    """Same text whichever reader produced it: ligatures and look-alike characters normalised ('\ufb01lm' -> 'film',
+    full-width letters, curly quotes), secrets redacted, spaces collapsed, at most 1500 characters."""
+    import unicodedata
+    txt = unicodedata.normalize("NFKC", txt or "").replace("\u2019", "'").replace("\u2018", "'").replace("\u201c", '"').replace("\u201d", '"')
+    txt = _SECRET_RE.sub("[redacted]", txt)
+    return re.sub(r"\s+", " ", txt).strip()[:1500]
 
 
 def dhash_bits(path: Path, size: int = 8) -> int:

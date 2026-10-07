@@ -132,7 +132,15 @@ async function homeScreen() {
     ${d.recent.length ? `<div class="stack"><h2>Recently identified</h2>${d.recent.map((r) => `
       <a class="list-item" href="#/t/${r.id}">${thumb(r.thumb, "thumb sm")}<span class="grow stack" style="gap:3px"><span class="title">${esc(r.name)}</span>
       <span class="small muted">${esc(meta(r))}${r.detail ? " · " + esc(r.detail) : ""}</span></span><span class="tag">${r.item_kind === "image" ? "Screenshot" : esc(SOURCE_LABEL[r.source] || "Reel")}</span></a>`).join("")}</div>` : ""}
-    <a class="small muted" href="#/settings">Settings</a>`;
+    <a class="small muted" href="#/settings">Settings</a><span class="small muted" id="homever"></span>`;
+  try {  // the version is always visible, and a ready update is offered here
+    const v = await api("/api/version");
+    const hv = document.getElementById("homever");
+    if (hv) hv.textContent = `Version ${v.version}${v.date ? " · " + v.date : ""}`;
+    if (v.update_available && v.can_update) {
+      $app.insertAdjacentHTML("afterbegin", `<a class="card accent" href="#/settings"><span class="grow"><strong>A newer version is ready</strong><br><span>Tap, then Update now (or wait: it installs itself when idle)</span></span></a>`);
+    }
+  } catch (err) { /* version is a nice-to-have on this screen */ }
 }
 
 async function importScreen() {
@@ -649,7 +657,9 @@ async function settingsScreen() {
     <div class="card"><div class="opt"><span class="grow"><span>Online lookups</span><br><span class="small muted">AniList, Wikidata, trace.moe, SauceNAO. All free; needed to confirm names.</span></span>
       <button class="switch" role="switch" aria-label="Online lookups" aria-checked="${!!s.online}" id="online"><span></span></button></div>
       <div class="opt"><span class="grow"><span>AI guesses</span><br><span class="small muted">Off: names come from the text on screen, the speech, captions and comments, checked in databases and on the web, plus free picture matching. On: also asks the local AI model (needs about 3 GB and is slow on phones). AI guesses are never treated as proof.</span></span>
-      <button class="switch" role="switch" aria-label="AI guesses" aria-checked="${!!s.ai}" id="ai"><span></span></button></div></div>
+      <button class="switch" role="switch" aria-label="AI guesses" aria-checked="${!!s.ai}" id="ai"><span></span></button></div>
+      <div class="opt"><span class="grow"><span>Automatic updates</span><br><span class="small muted">Checks for fixes every few hours and installs them when nothing is being read.</span></span>
+      <button class="switch" role="switch" aria-label="Automatic updates" aria-checked="${s.auto_update !== false}" id="autoup"><span></span></button></div></div>
     <div class="card stack"><strong>Use it on your phone</strong>
       <span class="small soft">Phone only: install it on the phone (see README, "Phone without a PC") and open http://localhost:8765.<br>
       With your PC: run <code>reel-watcher app --lan</code> on the PC and scan the QR code it shows. Then use your browser's "Add to Home screen".</span></div>
@@ -667,6 +677,7 @@ async function settingsScreen() {
   bind("#appdbg", "click", () => copyDebug("/api/debug"));
   bind("#chk", "click", async () => { showCheck(await api("/api/selfcheck", { method: "POST", body: {} })); });
   bind("#region", "change", async (e, el) => { await api("/api/settings", { method: "POST", body: { region: el.value } }); toast("Country saved"); });
+  bind("#autoup", "click", async (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; await api("/api/settings", { method: "POST", body: { auto_update: on } }); b.setAttribute("aria-checked", on); toast(on ? "Automatic updates on" : "Automatic updates off"); });
   bind("#ai", "click", async (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; await api("/api/settings", { method: "POST", body: { ai: on } }); b.setAttribute("aria-checked", on); toast(on ? "AI guesses on" : "AI guesses off"); });
   bind("#online", "click", async (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; await api("/api/settings", { method: "POST", body: { online: on } }); b.setAttribute("aria-checked", on); toast(on ? "Online lookups on" : "Online lookups off"); });
 }
