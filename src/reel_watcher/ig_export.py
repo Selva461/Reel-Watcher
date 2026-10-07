@@ -80,63 +80,122 @@ def _strings(node) -> list[str]:
     return out
 
 
+def _is_link(s) -> bool:
+    return isinstance(s, str) and s.startswith("http") and media.id_from_url(s) is not None
+
+
 def _entry_name(entry: dict) -> str | None:
-    """Collection name of a header entry, in either known layout:
-    string_map_data {"Name": {"value": ...}} or label_values [{"label": "Name", "value": ...}]."""
+    """Collection name of a header entry, in the known layouts:
+    string_map_data {"Name": {"value": ...}} or label_values [{"label": "Name", "value": ...}].
+    A field that carries a link is a saved item (its "Name" is the creator), not a collection."""
     smd = entry.get("string_map_data")
     if isinstance(smd, dict):
-        for k in ("Name", "Collection name", "Collection Name"):
-            v = smd.get(k)
-            if isinstance(v, dict) and isinstance(v.get("value"), str) and not v.get("href"):
+        for k, v in smd.items():
+            if "name" in k.lower() and isinstance(v, dict) and isinstance(v.get("value"), str) and not v.get("href"):
                 return v["value"].strip() or None
     for lv in entry.get("label_values") or []:
-        if isinstance(lv, dict) and str(lv.get("label", "")).lower() in ("name", "collection name") and isinstance(lv.get("value"), str) \
-                and not lv.get("href"):
+        if isinstance(lv, dict) and "name" in str(lv.get("label", "")).lower() and isinstance(lv.get("value"), str) \
+                and not lv.get("href") and not _is_link(lv["value"]):
             return lv["value"].strip() or None
+    for k in ("name", "collection_name"):
+        if isinstance(entry.get(k), str) and entry[k].strip() and not _is_link(entry[k]):
+            return entry[k].strip()
     return None
+
+
+def _links(node) -> list[str]:
+    return [s.split("?")[0] for s in _strings(node) if _is_link(s)]
 
 
 def _entry_url(entry) -> str | None:
-    for s in _strings(entry):
-        if s.startswith("http") and media.id_from_url(s):
-            return s.split("?")[0]
-    return None
+    found = _links(entry)
+    return found[0] if found else None
+
+
+def _own_and_nested_links(entry: dict) -> tuple[list[str], list[str]]:
+    """Links on the entry itself (a saved item) vs links inside its child lists (a collection holding its items)."""
+    own, nested = [], []
+    for k, v in entry.items():
+        if isinstance(v, list) and k != "label_values":
+            nested += _links(v)
+        elif k == "label_values" and isinstance(v, list):
+            for lv in v:  # newer layout: [{"label": "Name", ...}, {"label": "Items", "vec": [...]}]
+                if isinstance(lv, dict) and any(isinstance(x, list) for x in lv.values()):
+                    nested += _links(lv)
+                else:
+                    own += _links(lv)
+        else:
+            own += _links(v)
+    return own, nested
+
+
+def _parse_entries(entries) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    current = None
+
+    def add(name, urls):
+        lst = out.setdefault(name, [])
+        for u in urls:
+            if u not in lst:
+                lst.append(u)
+    for e in entries or []:
+        if not isinstance(e, dict):
+            continue
+        name = _entry_name(e)
+        own, nested = _own_and_nested_links(e)
+        if name and nested and not own:
+            current = name  # one entry holds a whole collection
+            add(name, nested)
+        elif name and not own:
+            current = name  # header; its items follow as separate entries
+            add(name, [])
+        elif own and current is not None:
+            add(current, own[:1])
+    return out
+
+
+def _lists_of_dicts(node, depth=0):
+    if depth > 6:
+        return
+    if isinstance(node, list):
+        if node and sum(isinstance(x, dict) for x in node) >= len(node) / 2:
+            yield node
+        for x in node:
+            yield from _lists_of_dicts(x, depth + 1)
+    elif isinstance(node, dict):
+        for v in node.values():
+            yield from _lists_of_dicts(v, depth + 1)
 
 
 def parse_collections(data) -> dict[str, list[str]]:
     """saved_collections.json -> {collection name: [urls in order]}.
-    The file is one flat list where a header entry (a name, no link) starts each collection and the following
-    entries carrying an instagram link belong to it. Unknown wrappers are walked to find that list."""
-    entries = None
-    if isinstance(data, dict):
-        for k in ("saved_saved_collections", "saved_collections"):
-            if isinstance(data.get(k), list):
-                entries = data[k]
-        if entries is None:
-            entries = next((v for v in data.values() if isinstance(v, list)), [])
-    elif isinstance(data, list):
-        entries = data
-    out: dict[str, list[str]] = {}
-    current = None
-    for e in entries or []:
-        if not isinstance(e, dict):
-            continue
-        url = _entry_url(e)
-        name = _entry_name(e)
-        if url is None and name:
-            current = name
-            out.setdefault(current, [])
-        elif url and current is not None:
-            if url not in out[current]:
-                out[current].append(url)
-        # nested layout: a header entry may carry its items in a child list
-        for v in e.values():
-            if isinstance(v, list) and name and url is None and v and all(isinstance(x, dict) for x in v):
-                for child in v:
-                    cu = _entry_url(child)
-                    if cu and cu not in out[name]:
-                        out[name].append(cu)
-    return out
+    Handles a flat list where a header entry (a name, no link) starts each collection and the following entries
+    carry its links, and a layout where each entry holds its collection's links in a child list. Instagram changes
+    the wrappers, so every list in the file is tried and the one that yields the most links wins."""
+    best: dict[str, list[str]] = {}
+    preferred = data.get("saved_saved_collections") if isinstance(data, dict) else None
+    candidates = ([preferred] if isinstance(preferred, list) else []) + list(_lists_of_dicts(data))
+    for entries in candidates:
+        got = _parse_entries(entries)
+        score = (sum(len(v) for v in got.values()), len(got))
+        if score > (sum(len(v) for v in best.values()), len(best)):
+            best = got
+    return best
+
+
+def outline(node, depth: int = 0) -> str:
+    """Field names of a JSON file without any of its values, to report an unknown layout safely."""
+    if depth > 4:
+        return "..."
+    if isinstance(node, dict):
+        keys = list(node)[:6]
+        inner = ", ".join(f"{k}: {outline(node[k], depth + 1)}" for k in keys)
+        return "{" + inner + (", ..." if len(node) > 6 else "") + "}"
+    if isinstance(node, list):
+        return f"[{len(node)} x {outline(node[0], depth + 1)}]" if node else "[]"
+    if isinstance(node, str):
+        return "link" if node.startswith("http") else "text"
+    return type(node).__name__
 
 
 EXPORT_FILES = ("saved_collections.json", "saved_posts.json", "saved_collections.html", "saved_posts.html")
@@ -160,9 +219,8 @@ def export_file_name(name: str, text: str) -> str | None:
     return None
 
 
-def read_export(path: Path) -> dict[str, list[str]]:
-    """Instagram export (the .zip, the unzipped folder, or the JSON files) -> {collection: [urls]}.
-    Saved posts that are in no collection go to UNSORTED. Every URL appears once per collection."""
+def _gather(path: Path) -> dict[str, str]:
+    """The export files found in a .zip, an unzipped folder, or a single file: {canonical name: text}."""
     import zipfile
     path = Path(path).expanduser()
     files: dict[str, str] = {}
@@ -179,6 +237,24 @@ def read_export(path: Path) -> dict[str, list[str]]:
     elif path.is_file():
         text = path.read_text(encoding="utf-8", errors="replace")
         files[export_file_name(path.name, text) or path.name.lower()] = text
+    return {k: v.lstrip("\ufeff") for k, v in files.items()}
+
+
+def describe(path: Path) -> str:
+    """Field-name outline of each export file, for an error message when nothing could be read."""
+    parts = []
+    for name, text in _gather(path).items():
+        try:
+            parts.append(f"{name}: {outline(json.loads(text))}")
+        except ValueError:
+            parts.append(f"{name}: not JSON")
+    return "; ".join(parts)
+
+
+def read_export(path: Path) -> dict[str, list[str]]:
+    """Instagram export (the .zip, the unzipped folder, or the JSON files) -> {collection: [urls]}.
+    Saved posts that are in no collection go to UNSORTED. Every URL appears once per collection."""
+    files = _gather(path)
     out: dict[str, list[str]] = {}
     if "saved_collections.json" in files:
         out = parse_collections(json.loads(files["saved_collections.json"]))

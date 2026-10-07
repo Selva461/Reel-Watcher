@@ -102,7 +102,9 @@ class App:
             raise ApiError(400, "Could not read that file as an Instagram export. Choose the ZIP from "
                                 "'Download your information' (JSON format).") from e
         if not counts:
-            raise ApiError(400, "No saved posts found. Choose the ZIP from Instagram's 'Download your information' (JSON format).")
+            shape = ig_export.describe(path)
+            raise ApiError(400, "No saved posts found. Choose the ZIP from Instagram's 'Download your information' (JSON format)."
+                           + (f" The file looks like this (field names only, send a screenshot to get it supported): {shape[:600]}" if shape else ""))
         return {"collections": counts}
 
     # ------------------------------------------------------------ search

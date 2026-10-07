@@ -46,6 +46,27 @@ def test_parse_collections_label_values_layout():
     assert ig_export.parse_collections(data) == {"Manga": ["https://www.instagram.com/reel/G1/"]}
 
 
+def test_parse_collections_nested_layouts():
+    """Newer exports keep each collection's items inside its entry instead of after a header."""
+    vec = {"saved_saved_collections": [
+        {"label_values": [{"label": "Name", "value": "Anime"},
+                          {"label": "Items", "vec": [{"dict": [{"label": "Owner", "value": "creator_a"},
+                                                               {"label": "URL", "href": "https://www.instagram.com/reel/V1/"}]},
+                                                     {"dict": [{"label": "URL", "value": "https://www.instagram.com/p/V2/?igsh=1"}]}]}]},
+        {"label_values": [{"label": "Collection name", "value": "Movies"},
+                          {"label": "Items", "vec": [{"dict": [{"label": "URL", "href": "https://www.instagram.com/creator_b/reel/V3/"}]}]}]},
+    ]}
+    assert ig_export.parse_collections(vec) == {
+        "Anime": ["https://www.instagram.com/reel/V1/", "https://www.instagram.com/p/V2/"],
+        "Movies": ["https://www.instagram.com/creator_b/reel/V3/"]}
+    wrapped = {"collections": {"items": [
+        {"string_map_data": {"Name": {"href": "", "value": "Manga", "timestamp": 0}}},
+        {"string_map_data": {"Name": {"href": "https://www.instagram.com/reel/W1/", "value": "creator", "timestamp": 0}}}]}}
+    assert ig_export.parse_collections(wrapped) == {"Manga": ["https://www.instagram.com/reel/W1/"]}
+    outline = ig_export.outline(vec)
+    assert "label_values" in outline and "creator_a" not in outline and "V1" not in outline
+
+
 def test_read_export_zip_and_unsorted(tmp_path):
     z = tmp_path / "instagram-export.zip"
     with zipfile.ZipFile(z, "w") as f:
@@ -124,3 +145,10 @@ def test_titles_finds_and_threads(tmp_path):
     [th.start() for th in ths]
     [th.join() for th in ths]
     assert len(claimed) == 40 == len(set(claimed))  # no item is processed twice
+
+
+def test_describe_unknown_layout(tmp_path):
+    f = tmp_path / "saved_collections.json"
+    f.write_text("﻿" + json.dumps({"something_new": [{"x": {"y": "https://www.instagram.com/stories/a/1/"}}]}), encoding="utf-8")
+    assert ig_export.read_export(f) == {}
+    assert ig_export.describe(f) == "saved_collections.json: {something_new: [1 x {x: {y: link}}]}"
