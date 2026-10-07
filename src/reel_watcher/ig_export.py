@@ -139,6 +139,27 @@ def parse_collections(data) -> dict[str, list[str]]:
     return out
 
 
+EXPORT_FILES = ("saved_collections.json", "saved_posts.json", "saved_collections.html", "saved_posts.html")
+
+
+def export_file_name(name: str, text: str) -> str | None:
+    """Which export file this is (one of EXPORT_FILES), from its name or, if renamed, from its content."""
+    low = (name or "").lower()
+    known = next((f for f in EXPORT_FILES if low.endswith(f)), None)
+    if known:
+        return known
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    keys = set(data) if isinstance(data, dict) else set()
+    if keys & {"saved_saved_collections", "saved_collections"}:
+        return "saved_collections.json"
+    if keys & {"saved_saved_media", "saved_posts"}:
+        return "saved_posts.json"
+    return None
+
+
 def read_export(path: Path) -> dict[str, list[str]]:
     """Instagram export (the .zip, the unzipped folder, or the JSON files) -> {collection: [urls]}.
     Saved posts that are in no collection go to UNSORTED. Every URL appears once per collection."""
@@ -149,14 +170,15 @@ def read_export(path: Path) -> dict[str, list[str]]:
         with zipfile.ZipFile(path) as z:
             for n in z.namelist():
                 base = n.rsplit("/", 1)[-1].lower()
-                if base in ("saved_collections.json", "saved_posts.json", "saved_collections.html", "saved_posts.html"):
+                if base in EXPORT_FILES:
                     files[base] = z.read(n).decode("utf-8", errors="replace")
     elif path.is_dir():
         for p in path.rglob("*"):
-            if p.name.lower() in ("saved_collections.json", "saved_posts.json", "saved_collections.html", "saved_posts.html"):
+            if p.name.lower() in EXPORT_FILES:
                 files[p.name.lower()] = p.read_text(encoding="utf-8", errors="replace")
     elif path.is_file():
-        files[path.name.lower()] = path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
+        files[export_file_name(path.name, text) or path.name.lower()] = text
     out: dict[str, list[str]] = {}
     if "saved_collections.json" in files:
         out = parse_collections(json.loads(files["saved_collections.json"]))
@@ -190,6 +212,12 @@ def import_into(lib, path: Path) -> dict[str, int]:
             # imported reels stay idle until the user starts reading their collection
             lib.add_item(f"reel:{code[3:]}", "reel", u, [name], status="idle")
         counts[name] = len(urls)
+    # a reel imported earlier as Unsorted (saved_posts.json alone) moves out once its collection is known
+    named = [f"reel:{media.id_from_url(u)[3:]}" for n, urls in cols.items() if n != UNSORTED for u in urls]
+    for i in range(0, len(named), 500):
+        part = named[i:i + 500]
+        lib.x(f"DELETE FROM item_collections WHERE collection=? AND item_id IN (SELECT id FROM items WHERE key IN ({','.join('?' * len(part))}))",
+              (UNSORTED, *part))
     return counts
 
 

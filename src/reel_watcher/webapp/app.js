@@ -135,26 +135,36 @@ async function importScreen() {
     <ol class="stack soft" style="padding-left:20px;margin:0;line-height:1.5">
       <li>In Instagram: Settings, Accounts Center, Your information and permissions, Download your information.</li>
       <li>Choose <strong>Some of your information</strong>, tick <strong>Saved</strong>, format <strong>JSON</strong>, then export.</li>
-      <li>When the email arrives, download the ZIP and choose it below.</li>
+      <li>When it is ready, choose the ZIP below. If Instagram saved it to Google Drive as separate files, choose
+        <strong>saved_collections.json</strong> and <strong>saved_posts.json</strong> (both together, or one after the other).</li>
     </ol>
-    <label class="btn primary block" for="zip">${ICON.upload}<span>Choose the ZIP file</span></label>
-    <input id="zip" class="sr" type="file" accept=".zip,.json,application/zip,application/json">
+    <label class="btn primary block" for="zip">${ICON.upload}<span>Choose the export files</span></label>
+    <input id="zip" class="sr" type="file" multiple accept=".zip,.json,application/zip,application/json">
     <div id="result"></div>`;
   bind("#zip", "change", async (e, el) => {
-    const f = el.files[0];
-    if (!f) return;
-    document.getElementById("result").innerHTML = `<div class="empty">Reading ${esc(f.name)}...</div>`;
-    try {
-      const r = await api("/api/import", { method: "POST", body: f, filename: f.name });
-      const rows = Object.entries(r.collections);
-      document.getElementById("result").innerHTML = `<div class="stack"><h2>Found ${rows.length} collections</h2>
-        ${rows.map(([n, c]) => `<div class="card row between"><span><strong>${esc(n)}</strong><br><span class="small muted">${c} saved</span></span>
-          <button class="btn primary" data-read="${esc(n)}" ${c ? "" : "disabled"}>Read</button></div>`).join("")}
-        <p class="small muted">Reading downloads each reel for free and runs in the background. Start one collection at a time, or all.</p></div>`;
-      bind("[data-read]", "click", async (ev, b) => { await readCollection(b.dataset.read); b.textContent = "Started"; b.disabled = true; });
-    } catch (err) {
-      document.getElementById("result").innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+    const files = [...el.files];
+    if (!files.length) return;
+    const out = document.getElementById("result");
+    let r = null;
+    const skipped = [];
+    for (const f of files) {
+      out.innerHTML = `<div class="empty">Reading ${esc(f.name)}...</div>`;
+      try {
+        r = await api("/api/import", { method: "POST", body: f, filename: f.name });
+      } catch (err) {
+        skipped.push(`${f.name}: ${err.message}`);
+      }
     }
+    const note = skipped.length ? `<div class="card small muted">Skipped: ${skipped.map(esc).join("<br>")}</div>` : "";
+    if (!r) { out.innerHTML = `<div class="empty">${skipped.map(esc).join("<br>")}</div>`; return; }
+    const rows = Object.entries(r.collections);
+    out.innerHTML = `<div class="stack"><h2>Found ${rows.length} collections</h2>
+      ${rows.map(([n, c]) => `<div class="card row between"><span><strong>${esc(n)}</strong><br><span class="small muted">${c} saved</span></span>
+        <button class="btn primary" data-read="${esc(n)}" ${c ? "" : "disabled"}>Read</button></div>`).join("")}
+      ${note}
+      <p class="small muted">Reading downloads each reel for free and runs in the background. Start one collection at a time, or all.</p></div>`;
+    bind("[data-read]", "click", async (ev, b) => { await readCollection(b.dataset.read); b.textContent = "Started"; b.disabled = true; });
+    el.value = "";
   });
 }
 

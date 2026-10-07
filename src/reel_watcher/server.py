@@ -661,9 +661,18 @@ class Handler(BaseHTTPRequestHandler):
             up = self.app.lib.dir / "uploads"
             up.mkdir(exist_ok=True)
             name = Path(urllib.parse.unquote(self.headers.get("X-Filename") or "export.zip")).name
-            dest = up / ("export_" + re.sub(r"[^A-Za-z0-9._-]", "_", name))
-            dest.write_bytes(raw)
-            return self._json(200, self.app.import_export(dest), extra)
+            if raw[:2] == b"PK" or name.lower().endswith(".zip"):
+                dest = up / ("export_" + re.sub(r"[^A-Za-z0-9._-]", "_", name))
+                dest.write_bytes(raw)
+                return self._json(200, self.app.import_export(dest), extra)
+            # loose export files (e.g. saved to Google Drive): keep them together so both files are read as one export
+            kind = ig_export.export_file_name(name, raw.decode("utf-8", errors="replace"))
+            if kind is None:
+                raise ApiError(400, f"{name} is not one of the files Reel Shelf needs. Choose saved_collections.json and saved_posts.json.")
+            loose = up / "instagram"
+            loose.mkdir(exist_ok=True)
+            (loose / kind).write_bytes(raw)
+            return self._json(200, self.app.import_export(loose), extra)
         if method == "POST" and path == "/api/identify/image":
             raw = self._body()
             name = urllib.parse.unquote(self.headers.get("X-Filename") or "image.jpg")

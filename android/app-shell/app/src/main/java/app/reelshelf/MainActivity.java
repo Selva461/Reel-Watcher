@@ -276,7 +276,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == FILE_REQUEST && fileCallback != null) {
-            fileCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+            Uri[] picked = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+            ClipData clip = data == null ? null : data.getClipData();
+            if (resultCode == RESULT_OK && clip != null && clip.getItemCount() > 0) {  // several files chosen at once
+                picked = new Uri[clip.getItemCount()];
+                for (int i = 0; i < clip.getItemCount(); i++) picked[i] = clip.getItemAt(i).getUri();
+            }
+            fileCallback.onReceiveValue(picked);
             fileCallback = null;
             return;
         }

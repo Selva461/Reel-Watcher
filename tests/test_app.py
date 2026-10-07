@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from reel_watcher import demo, server, study, worker
+from reel_watcher import demo, ig_export, server, study, worker
 
 CHROME = next((p for p in ("/opt/pw-browsers/chromium-1194/chrome-linux/chrome",) if os.path.exists(p)), None) or \
     shutil.which("chromium") or shutil.which("google-chrome") or shutil.which("chromium-browser")
@@ -114,6 +114,23 @@ def test_api_import_read_and_jobs(running):
     assert next(j for j in jobs["jobs"] if j["id"] == r["job"])["state"] == "paused"
     assert call(b, "/api/jobs/all/resume", "POST", {})[1]["jobs"][0]["state"] == "running"
     assert call(b, "/api/identify/reel", "POST", {"url": "https://example.com/x"})[0] == 400
+
+
+def test_api_import_loose_json_files(running):
+    """Exports saved to Google Drive arrive as separate JSON files, picked one at a time and sometimes renamed."""
+    b, lib = running["base"], running["lib"]
+    up = lambda name, data: call(b, "/api/import", "POST", raw=json.dumps(data).encode(),
+                                 headers={"X-Filename": name, "Content-Type": "application/octet-stream"})
+    reel = lambda c: {"string_map_data": {"Name": {"href": f"https://www.instagram.com/reel/{c}/", "value": "x"}}}
+    s, r = up("saved_posts.json", {"saved_saved_media": [reel("DRV1"), reel("LOOSE9")]})
+    assert s == 200 and r["collections"] == {ig_export.UNSORTED: 2}
+    s, r = up("saved_collections (1).json", {"saved_saved_collections": [{"string_map_data": {"Name": {"value": "Drive"}}}, reel("DRV1")]})
+    assert s == 200 and r["collections"] == {"Drive": 1, ig_export.UNSORTED: 1}
+    in_coll = lambda c: [x["collection"] for x in lib.q(
+        "SELECT collection FROM item_collections WHERE item_id=(SELECT id FROM items WHERE key=?)", (f"reel:{c}",))]
+    assert in_coll("DRV1") == ["Drive"] and in_coll("LOOSE9") == [ig_export.UNSORTED]
+    s, r = up("saved_music.json", {"saved_saved_music": []})
+    assert s == 400 and "saved_collections.json" in r["error"]
 
 
 def test_api_folders_and_identify_image(running):
@@ -376,6 +393,17 @@ def test_ui_import_and_settings(page):
     pg.get_by_role("heading", name="Found 1 collections").wait_for()
     pg.get_by_role("button", name="Read").click()
     pg.get_by_role("button", name="Started").wait_for()
+    # loose files from Google Drive, chosen together; saved_music.json is not needed and is skipped
+    t = pg.running["tmp"]
+    (t / "saved_posts.json").write_text(json.dumps({"saved_saved_media": [
+        {"string_map_data": {"Name": {"href": "https://www.instagram.com/reel/GD1/", "value": "x"}}}]}), encoding="utf-8")
+    (t / "saved_collections.json").write_text(json.dumps({"saved_saved_collections": [
+        {"string_map_data": {"Name": {"value": "From Drive"}}},
+        {"string_map_data": {"Name": {"href": "https://www.instagram.com/reel/GD1/", "value": "x"}}}]}), encoding="utf-8")
+    (t / "saved_music.json").write_text("{}", encoding="utf-8")
+    pg.set_input_files("#zip", [str(t / "saved_posts.json"), str(t / "saved_music.json"), str(t / "saved_collections.json")])
+    pg.get_by_text("From Drive").wait_for()
+    pg.get_by_text("Skipped: saved_music.json").wait_for()
     pg.goto(pg.running["base"] + "/#/settings")
     sw = pg.get_by_role("switch", name="Online lookups")
     assert sw.get_attribute("aria-checked") == "false"

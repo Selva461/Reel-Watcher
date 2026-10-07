@@ -25,7 +25,7 @@ no account, no API key, no credit card.
 
 `reel-watcher app` is a phone-friendly app on top of the reel reader. Everything in it is free.
 
-- **Collections, read one by one.** Import Instagram's data ZIP; every collection (Movies, Series, Anime, Manga,
+- **Collections, read one by one.** Import Instagram's data ZIP (or, if it went to Google Drive, its saved_collections.json and saved_posts.json); every collection (Movies, Series, Anime, Manga,
   Motivation, ...) shows up separately. Tap **Read this collection** to process it in the background.
 - **Names, not just notes.** For title collections it lists every movie, series, anime, manga, book or game a reel
   mentions: from on-screen text, speech, the caption and the **comments** (creator's comments and repeated answers
