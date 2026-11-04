@@ -45,6 +45,8 @@ final class LocalBridge {
     private final ExecutorService work = Executors.newSingleThreadExecutor();
     private final ExecutorService net = Executors.newSingleThreadExecutor();
     private volatile boolean downloading;
+    private final ExecutorService verifyWork = Executors.newSingleThreadExecutor();
+    private final java.util.concurrent.atomic.AtomicBoolean verifyStop = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     LocalBridge(MainActivity act, SharedPreferences prefs) {
         this.act = act;
@@ -55,6 +57,7 @@ final class LocalBridge {
     /** Called when the app leaves the screen: stop downloads and answers, free the model's memory. */
     void pause() {
         model.stopAll();
+        verifyStop.set(true);  // the online check (Process) only runs while the app is on screen
     }
 
     /** Adds shared text to the queue the page reads when it opens (used by ShareActivity, which has no page). */
@@ -462,5 +465,69 @@ final class LocalBridge {
     public void signOutInstagram() {
         if (!ok()) return;
         act.runOnUiThread(InstagramActivity::signOut);
+    }
+
+    // ------------------------------------------------------------------ the watchlist's online check
+
+    /**
+     * Process: checks the watchlist titles that were never checked against the free databases (TMDB with your own
+     * key, Wikidata, AniList, Jikan, MangaDex). Progress as "verify"; the answer is a summary. The results wait in
+     * verify-results.json until the page takes them (takeVerified). Stops when you leave the app.
+     */
+    @JavascriptInterface
+    public void verifyNow(int id) {
+        if (!ok()) return;
+        if (VerifyJob.running()) {
+            done(id, false, "The check is already running");
+            return;
+        }
+        verifyStop.set(false);
+        verifyWork.execute(() -> {
+            try {
+                TitleVerifier v = new TitleVerifier(TitleVerifier.NET, TitleVerifier.REAL_CLOCK, NightlyCheck.tmdbKey(act), verifyStop);
+                JSONObject sum = new VerifyJob(act.getFilesDir(), v, verifyStop).run(0, 0, (d, t, title) -> progress("verify", d, t));
+                done(id, true, sum.toString());
+            } catch (Throwable e) {
+                done(id, false, "The online check failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public void stopVerify() {
+        if (!ok()) return;
+        verifyStop.set(true);
+    }
+
+    /** Answers not yet applied to the watchlist, {id: result}; each is handed out once. */
+    @JavascriptInterface
+    public String takeVerified() {
+        if (!ok()) return "{}";
+        return VerifyJob.take(act.getFilesDir());
+    }
+
+    /** The nightly check (Wi-Fi + charging + phone not in use). Off unless you switch it on. */
+    @JavascriptInterface
+    public void setNightly(boolean on) {
+        if (!ok()) return;
+        prefs.edit().putBoolean("nightly_check", on).apply();
+        NightlyCheck.schedule(act, on);
+    }
+
+    /** {"on", "scheduled", "last": {checked, verified, review, notFound, left, at}} */
+    @JavascriptInterface
+    public String nightlyInfo() {
+        if (!ok()) return "{}";
+        JSONObject o = new JSONObject();
+        try {
+            o.put("on", prefs.getBoolean("nightly_check", false));
+            o.put("scheduled", NightlyCheck.scheduled(act));
+            o.put("running", VerifyJob.running());
+            String last = prefs.getString("nightly_last", "");
+            if (!last.isEmpty()) o.put("last", new JSONObject(last));
+        } catch (JSONException ignored) {
+            // not reachable
+        }
+        return o.toString();
     }
 }

@@ -70,7 +70,7 @@ function loadDb() {
   if (t) {
     try {
       const d = JSON.parse(t);
-      db = { reels: d.reels || [], inbox: d.inbox || [] };
+      db = { ...d, reels: d.reels || [], inbox: d.inbox || [] };  // keeps the watchlist (media) too
       for (const r of db.reels) if (r.status === "working") r.status = r.notes ? "done" : "new";  // the app was closed mid-way
     } catch (e) { toast("Your library file could not be read"); } }
 }
@@ -82,7 +82,7 @@ const MODELS = [
     url: "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
     size: 1.6e9, note: "Free, about 1.6 GB, good for English notes. Needs a phone with 6 GB of RAM or more." },
 ];
-const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "" };
+const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", tmdbKey: "" };
 let settings = { ...DEFAULTS };
 function loadSettings() { try { settings = { ...DEFAULTS, ...JSON.parse(sync("getSettings") || "{}") }; } catch (e) { settings = { ...DEFAULTS }; } }
 function saveSettings() { sync("setSettings", JSON.stringify(settings)); }
@@ -315,7 +315,8 @@ window.onAppPause = () => {  // the app left the screen: nothing keeps running
 };
 window.onAppResume = () => {
   const fromIg = takeInstagramExport();
-  if (takeShared() || fromIg) render();
+  const checked = Verify.onOpen();  // titles checked online overnight
+  if (takeShared() || fromIg || checked) render();
   else if (location.hash === "#/settings") render();
 };
 
@@ -344,6 +345,7 @@ function homeScreen() {
     ${running ? `<a class="card accent" href="#/run"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="grow"><strong>Working: ${run.i + 1} of ${run.codes.length}</strong><br><span>Keep the app open</span></span></a>`
       : todo.length ? `<button class="card accent" id="start"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="stack grow" style="gap:2px">
         <strong style="font-size:17px">Start: ${plural(todo.length, "reel")}</strong><span>${ready ? "Reads each caption and writes the notes on this phone" : "Reads each caption. Download the AI model in Settings to write notes too"}</span></span></button>` : ""}
+    ${(() => { const v = Verify.counts(db); return v.waiting || v.review ? `<a class="card" href="#/check"><span class="grow stack" style="gap:2px"><strong>Check ${plural(v.waiting + v.review, "watchlist title")} online</strong><span class="small muted">${v.waiting ? `${v.waiting} new` : ""}${v.waiting && v.review ? " · " : ""}${v.review ? `${v.review} for you to pick` : ""}</span></span>${ICON.chev}</a>` : ""; })()}
     ${forMeta().length > 1 && !running ? `<button class="card" id="batch"><span class="grow stack" style="gap:2px"><strong>Ask Meta AI about ${Math.min(BATCH, forMeta().length)} reels at once</strong><span class="small muted">One message instead of ${Math.min(BATCH, forMeta().length)}. Share its answer back and each part is filed.</span></span>${ICON.chev}</button>` : ""}
     ${top.length ? `<div class="chips"><button class="chip" data-tag="" aria-pressed="${!filter.tag}">All</button>${top.map((t) => `<button class="chip" data-tag="${esc(t)}" aria-pressed="${filter.tag === t}">#${esc(t)}</button>`).join("")}</div>` : ""}
     <div class="stack" id="list">${listHtml()}</div>`;
@@ -672,6 +674,7 @@ function settingsScreen() {
       <label class="field">Your prompt ({link} is replaced by the reel link)<textarea class="input tall" id="prompt">${esc(settings.prompt)}</textarea></label>
       <div class="grid2"><button class="btn" id="savep">Save prompt</button><button class="btn" id="resetp">Reset</button></div>
     </div>
+    ${Verify.settingsHtml()}
     <div class="stack"><h2>Export (${plural(db.reels.length, "reel")})</h2>
       <div class="grid2"><button class="btn" id="exjson">Save JSON</button><button class="btn" id="exmd">Save Markdown</button></div>
       <div class="grid2"><button class="btn" id="exshare">Share notes</button><button class="btn" id="excopy">Copy all</button></div>
@@ -683,6 +686,7 @@ function settingsScreen() {
     <p class="hint">Reel Shelf does nothing in the background. Sharing a reel only saves it; leaving the app stops the AI and any download.</p>
     <button class="btn block link" id="old">Use the old Reel Shelf on a PC or Termux</button>
     <button class="btn block danger" id="wipe">Delete all reels and notes</button>`;
+  Verify.bindSettings(settingsScreen);
   bind("[data-set]", "click", (e, b) => { settings[b.dataset.set] = JSON.parse(b.dataset.val); saveSettings(); settingsScreen(); });
   bind("#dl", "click", () => {
     onProgress.download = (d, t) => {
@@ -723,6 +727,7 @@ const ROUTES = [
   [/^#?\/?$/, homeScreen, "home"], [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "home"], [/^#\/inbox$/, inboxScreen, "home"],
   [/^#\/ask(\?.*)?$/, askScreen, "ask"],
   [/^#\/add$/, addScreen, "add"], [/^#\/run$/, runScreen, "run"], [/^#\/settings$/, settingsScreen, "settings"],
+  [/^#\/check$/, () => Verify.screen(), "home"],
 ];
 
 function render() {
@@ -741,4 +746,5 @@ window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); }
 loadSettings();
 loadDb();
 takeShared();
+Verify.onOpen();
 render();

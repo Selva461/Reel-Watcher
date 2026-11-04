@@ -54,6 +54,14 @@ FAKE_RN = r"""
     openInstagram: () => { st.opened.push("instagram-export"); keep(); },
     takeInstagramExport: () => { const s = st.igExport ? JSON.stringify(st.igExport) : ""; st.igExport = null; keep(); return s; },
     signOutInstagram: () => { st.opened.push("ig-signout"); keep(); },
+    // the watchlist's online check: st.verifyAnswers is what the phone "finds"; st.verifyPending waits to be taken
+    verifyNow: (id) => { st.calls.push(["verifyNow"]); keep(); later(() => rnProgress("verify", 1, 2)); later(() => {
+      st.verifyPending = Object.assign(st.verifyPending || {}, st.verifyAnswers || {}); keep();
+      rnDone(id, true, JSON.stringify({ checked: Object.keys(st.verifyAnswers || {}).length, offline: false, stopped: false })); }); },
+    stopVerify: () => { st.calls.push(["stopVerify"]); keep(); },
+    takeVerified: () => { const s = JSON.stringify(st.verifyPending || {}); st.verifyPending = {}; keep(); return s; },
+    setNightly: (on) => { st.nightly = on; keep(); },
+    nightlyInfo: () => JSON.stringify({ on: !!st.nightly, scheduled: !!st.nightly }),
     saveFile: (id, name, mime, text) => { st.saved.push({ name, mime, text }); keep(); later(() => rnDone(id, true, "Downloads/ReelShelf/" + name)); },
   };
 })();

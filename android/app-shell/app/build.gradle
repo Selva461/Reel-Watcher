@@ -43,4 +43,7 @@ android {
 dependencies {
     // The AI model that runs on the phone (Google LiteRT-LM, free, Apache 2.0). Called from Java.
     implementation 'com.google.ai.edge.litertlm:litertlm-android:0.19.0'
+    // tests of the online check run on the build computer (org.json is only a stub there without this)
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20250517'
 }
