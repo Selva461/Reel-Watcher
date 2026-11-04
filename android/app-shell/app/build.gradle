@@ -43,4 +43,7 @@ android {
 dependencies {
     // The AI model that runs on the phone (Google LiteRT-LM, free, Apache 2.0). Called from Java.
     implementation 'com.google.ai.edge.litertlm:litertlm-android:0.19.0'
+    // Reads the text in screenshots on the phone (Google ML Kit text recognition v2, Latin script). The model is
+    // bundled inside the APK: free, works offline, nothing is uploaded, no Google Play services needed.
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
 }
