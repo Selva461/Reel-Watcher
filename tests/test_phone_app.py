@@ -56,6 +56,10 @@ FAKE_RN = r"""
     signOutInstagram: () => { st.opened.push("ig-signout"); keep(); },
     saveFile: (id, name, mime, text) => { st.saved.push({ name, mime, text }); keep(); later(() => rnDone(id, true, "Downloads/ReelShelf/" + name)); },
   };
+  if (st.ytApps) window.RN.postYoutube = (id, url, body, client) => {  // the newer app: asks as one of YouTube's apps
+    st.calls.push(["postYoutube", url, JSON.parse(body), client]); keep(); later(() => {
+      const a = st.ytApps[/get_transcript/.test(url) ? "transcript" : client];
+      a ? rnDone(id, true, JSON.stringify(a)) : rnDone(id, false, "YouTube answered 403"); }); };
 })();
 """
 
@@ -426,3 +430,92 @@ def test_saved_reels_come_back_from_the_in_app_instagram_page(phone):
     r = db_of(phone)["reels"][0]
     assert r["code"] == "IGX001" and r["added_by"] == "export" and r["collections"] == ["Tech"]
     assert not any(c[0] in ("fetchPage", "generate") for c in phone.rn()["calls"])  # importing does no other work
+
+
+# ---------------------------------------------------------------- YouTube: when YouTube blocks one way, the next one is tried
+
+def yt_player(track_url, lang="en", kind="asr", translatable=True):
+    return {"playabilityStatus": {"status": "OK"},
+            "videoDetails": {"title": "Keep keys safe", "author": "Dev Tips", "shortDescription": "Secrets belong on the server."},
+            "captions": {"playerCaptionsTracklistRenderer": {"captionTracks": [
+                {"baseUrl": track_url, "languageCode": lang, "kind": kind, "isTranslatable": translatable}]}}}
+
+
+SAID = "Never put the key in the app. Use a server proxy. Scan with gitleaks before you ship."
+XML_SAID = f'<transcript><text start="0" dur="3">{SAID}</text></transcript>'
+
+
+def run_short(phone, state):
+    state = {"shared": ["https://youtube.com/shorts/dQw4w9WgXcQ?si=abc"], "pages": {}, **state}
+    state["pages"].setdefault("youtube.com/watch", WATCH)
+    phone.open_with(state)
+    phone.get_by_role("button", name="Start: 1 reel").click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    return db_of(phone)["reels"][0], phone.rn()["calls"]
+
+
+def test_youtube_tries_the_next_app_when_captions_come_back_empty(phone):
+    r, calls = run_short(phone, {
+        "ytApps": {"ios": yt_player("https://www.youtube.com/api/timedtext?v=1&c=IOS&exp=xpe&fmt=srv3"),
+                   "android": yt_player("https://www.youtube.com/api/timedtext?v=1&c=ANDROID")},
+        "pages": {"c=IOS": "", "c=ANDROID": XML_SAID}})
+    apps = [c[3] for c in calls if c[0] == "postYoutube"]
+    assert apps == ["ios", "android"]
+    ios = next(c for c in calls if c[0] == "postYoutube")[2]
+    assert ios["context"]["client"]["clientName"] == "IOS" and ios["videoId"] == "dQw4w9WgXcQ"
+    assert not any(c[0] == "fetchPage" and "fmt=" in c[1] for c in calls)
+    assert r["transcript"] == SAID and r["transcript_via"] == "android" and r["title"] == "Keep keys safe"
+    assert r["notes_by"] == "auto" and r["notes"]["points"]  # no AI model: notes made from the words, without AI
+
+
+def test_youtube_other_language_is_translated_to_english_or_kept(phone):
+    tamil = yt_player("https://www.youtube.com/api/timedtext?v=1&lang=ta", lang="ta")
+    r, calls = run_short(phone, {"ytApps": {"ios": tamil}, "pages": {"tlang=en": XML_SAID}})
+    assert any("lang=ta&tlang=en" in c[1] for c in calls if c[0] == "fetchPage") and r["transcript_lang"] == "en"
+    # the translation is refused: the original words are used
+    r, calls = run_short(phone, {"ytApps": {"ios": tamil}, "pages": {"tlang=en": "", "lang=ta": XML_SAID}})
+    assert r["transcript"] == SAID and r["transcript_lang"] == "ta"
+    # the setting "the video's own language": no translation asked
+    r, calls = run_short(phone, {"ytApps": {"ios": tamil}, "pages": {"lang=ta": XML_SAID}, "settings": json.dumps({"ytLang": "orig"})})
+    assert not any("tlang" in c[1] for c in calls if c[0] == "fetchPage") and r["transcript_lang"] == "ta"
+
+
+def test_youtube_falls_back_to_the_watch_page_then_the_transcript_panel(phone):
+    page_player = yt_player("https://www.youtube.com/api/timedtext?v=1&from=page")
+    watch = ('<script>ytcfg.set({"INNERTUBE_API_KEY": "AIzaTestKey_123", "INNERTUBE_CONTEXT_CLIENT_VERSION": "2.20261101.00.00", '
+             '"VISITOR_DATA": "Cgt2aXNpdG9y"});var ytInitialPlayerResponse = ' + json.dumps(page_player) + ';</script>'
+             '<script>var ytInitialData = {"engagementPanels": [{"getTranscriptEndpoint": {"params": "CgtkUXc0dzlXZ1hjUQ%3D%3D"}}]};</script>')
+    bot = {"playabilityStatus": {"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm you are not a bot"}}
+    r, calls = run_short(phone, {"ytApps": {"ios": bot, "android": bot}, "pages": {"youtube.com/watch": watch, "from=page": XML_SAID}})
+    assert r["transcript_via"] == "page" and r["title"] == "Keep keys safe"
+    panel = {"actions": [{"updateEngagementPanelAction": {"content": {"transcriptRenderer": {"body": {"segments": [
+        {"transcriptSegmentRenderer": {"startMs": "0", "endMs": "1500", "snippet": {"runs": [{"text": "never put the key in the app"}]}}},
+        {"transcriptSegmentRenderer": {"startMs": "2500", "endMs": "4000", "snippet": {"runs": [{"text": "use a server proxy"}]}}}]}}}}}]}
+    r, calls = run_short(phone, {"ytApps": {"ios": bot, "android": bot, "transcript": panel},
+                                 "pages": {"youtube.com/watch": watch, "from=page": ""}})
+    req = next(c for c in calls if c[0] == "postYoutube" and "get_transcript" in c[1])
+    assert req[3] == "web" and req[2]["params"] == "CgtkUXc0dzlXZ1hjUQ==" and req[2]["context"]["client"]["visitorData"] == "Cgt2aXNpdG9y"
+    assert r["transcript"] == "never put the key in the app\nuse a server proxy" and r["transcript_via"] == "transcript panel"
+
+
+def test_youtube_nothing_works_explains_and_offers_a_retry(phone):
+    r, calls = run_short(phone, {"ytApps": {}})
+    assert "did not give the spoken words" in r["error"] and r["yt_tried"]
+    phone.goto(phone.url.split("#")[0] + "#/r/yt-dQw4w9WgXcQ")
+    phone.get_by_role("button", name="Read from YouTube again").click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    assert sum(1 for c in phone.rn()["calls"] if c[0] == "postYoutube" and c[3] == "ios") == 2
+
+
+def test_caption_formats_and_unpunctuated_auto_captions(phone):
+    phone.open_with()
+    j3 = {"events": [{"tStartMs": 0, "dDurationMs": 1000, "segs": [{"utf8": "so the first tip"}, {"utf8": " is backups"}]},
+                     {"tStartMs": 1000, "dDurationMs": 900, "segs": [{"utf8": "every single day"}]},
+                     {"tStartMs": 3000, "dDurationMs": 1000, "segs": [{"utf8": "the second tip is two factor login"}]}]}
+    assert phone.evaluate("t => Notes.ytCaptions(t)", json.dumps(j3)) == "so the first tip is backups every single day\nthe second tip is two factor login"
+    srv3 = '<timedtext format="3"><body><p t="0" d="2000">Hello &amp;amp; welcome.</p><p t="2000" d="1000">Bye now.</p></body></timedtext>'
+    assert phone.evaluate("t => Notes.ytCaptions(t)", srv3) == "Hello & welcome. Bye now."
+    assert phone.evaluate("t => Notes.ytCaptions(t)", "") == ""
+    long = " ".join(f"Sentence number {i} talks about backups and passwords." for i in range(400))
+    short = phone.evaluate("t => Notes.condense(t, 2000)", long)
+    assert len(short) <= 2000 and short.startswith("Sentence number")
