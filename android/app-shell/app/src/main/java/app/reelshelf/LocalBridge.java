@@ -245,6 +245,61 @@ final class LocalBridge {
         request(id, url, null);
     }
 
+    /** Instagram's picture servers (a reel's cover picture), https only. */
+    static boolean coverHost(String url) {
+        try {
+            URL u = new URL(url);
+            String h = u.getHost();
+            return "https".equals(u.getProtocol()) && h != null && (h.endsWith(".cdninstagram.com") || h.endsWith(".fbcdn.net"));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Reads the text written on a reel's cover picture, on the phone (the same reader as screenshots). The picture is
+     * fetched from Instagram's picture server with no account, kept in memory only (at most 5 MB) and then dropped.
+     */
+    @JavascriptInterface
+    public void readCoverText(int id, String url) {
+        if (!ok()) return;
+        if (!coverHost(url)) {
+            done(id, false, "Only Instagram pictures can be read");
+            return;
+        }
+        net.execute(() -> {
+            HttpURLConnection c = null;
+            try {
+                c = (HttpURLConnection) new URL(url).openConnection();
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(20000);
+                c.setInstanceFollowRedirects(false);
+                c.setRequestProperty("User-Agent", WEB_UA);
+                int code = c.getResponseCode();
+                if (code != 200) {
+                    done(id, false, "Instagram answered " + code);
+                    return;
+                }
+                byte[] data;
+                try (InputStream in = c.getInputStream()) {
+                    ByteArrayOutputStream b = new ByteArrayOutputStream();
+                    byte[] buf = new byte[16384];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        if (b.size() + n > 5_000_000) throw new Exception("picture too big");
+                        b.write(buf, 0, n);
+                    }
+                    data = b.toByteArray();
+                }
+                done(id, true, shots.readBytes(data));
+            } catch (Exception e) {
+                done(id, false, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            } finally {
+                if (c != null) c.disconnect();
+            }
+        });
+    }
+
     /** The YouTube player request (title, description and the list of caption files of a video). */
     @JavascriptInterface
     public void postJson(int id, String url, String body) {

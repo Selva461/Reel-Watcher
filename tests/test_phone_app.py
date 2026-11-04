@@ -52,6 +52,7 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
     postJson: (id, url, body) => { st.calls.push(["postJson", url, JSON.parse(body)]); keep(); later(() => {
       st.player ? rnDone(id, true, JSON.stringify(st.player)) : rnDone(id, false, "YouTube answered 403"); }); },
     openInstagram: () => { st.opened.push("instagram-export"); keep(); },
+    readCoverText: (id, url) => { st.calls.push(["cover", url]); keep(); later(() => rnDone(id, true, st.coverText || "")); },
     workUpdate: (title, text, d, t) => { st.work = (st.work || []).concat([["update", title]]); keep(); },
     workEnd: () => { st.work = (st.work || []).concat([["end"]]); keep(); },
     isNight: () => !!st.night,
@@ -550,6 +551,20 @@ def test_instagram_export_opens_in_chrome_and_the_reminder_goes_once_a_zip_is_ch
     r = db_of(phone)["reels"][0]
     assert r["code"] == "IGX001" and r["added_by"] == "export"
     assert not any(c[0] in ("fetchPage", "generate") for c in phone.rn()["calls"])  # importing does no other work
+
+
+def test_text_on_the_cover_picture_and_its_description_count_for_notes(phone):
+    embed = ('<html><body><div class="Embed"><img class="EmbeddedMediaImage" src="https://scontent-a.cdninstagram.com/v/cover.jpg" '
+             'alt="Photo by creator_b on May 1, 2024. May be an image of text that says \'Stop hardcoding passwords\'."> '
+             '<div class="Caption"><a class="CaptionUsername" href="#">creator_b</a>Part 2 #tech</div></div></body></html>')
+    phone.open_with({"shared": ["https://www.instagram.com/reel/COV001/"], "pages": {"COV001/embed": embed},
+                     "coverText": "Keep secrets on the server, rotate any leaked key and scan code before shipping"})
+    phone.get_by_role("button", name="Start: 1 reel").click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    r = db_of(phone)["reels"][0]
+    assert ["cover", "https://scontent-a.cdninstagram.com/v/cover.jpg"] in phone.rn()["calls"]
+    assert r["onscreen"].startswith("Stop hardcoding passwords\nKeep secrets on the server")
+    assert r["status"] == "done" and r["notes_by"] == "auto"  # enough text for quick notes now, not just "Part 2"
 
 
 def test_instagram_slow_down_waits_then_stops_and_keeps_the_rest(phone):

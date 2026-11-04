@@ -299,6 +299,7 @@ async function readCaption(r) {
     const got = Notes.readPage(html);
     if (got.caption) r.caption = got.caption.slice(0, 8000);
     if (got.author) r.author = got.author;
+    await readOnScreen(r, got);
   } catch (e) {
     r.error = e.message;
     if (/slow down|stopped/.test(e.message)) throw e;
@@ -311,7 +312,21 @@ async function readCaption(r) {
     } catch (e) { if (/slow down|stopped/.test(e.message)) throw e; /* offline or refused: keep going */ }
   }
   r.caption_read = Date.now();
-  r.keywords = Notes.keywords(r.caption || "", 10);
+  r.keywords = Notes.keywords([r.caption, r.onscreen].filter(Boolean).join("\n"), 10);
+}
+
+/** The text written on the reel's cover picture (read on the phone) and Instagram's own description of the picture. */
+async function readOnScreen(r, got) {
+  const found = [];
+  if (got.alt) found.push(got.alt);
+  if (got.cover && RN && RN.readCoverText) {
+    try {
+      const t = String(await phone("readCoverText", got.cover) || "").trim();
+      if (t && !found.some((x) => x.includes(t))) found.push(t);
+    } catch (e) { /* no picture or no text: the caption still counts */ }
+  }
+  const text = found.join("\n").trim();
+  if (text && !(r.caption || "").includes(text)) r.onscreen = text.slice(0, 4000);
 }
 
 /** Notes without any AI (the best sentences, keywords as tags), so every reel can be found in the library. */
@@ -643,6 +658,7 @@ function reelScreen(code) {
     </div>
     ${r.asked_at && !(n && r.notes_by === "meta") ? `<p class="hint">When Meta AI answers, tap Share on its answer and choose Reel Shelf. It will be filed here.</p>` : ""}
     ${r.caption ? `<details class="card"><summary><strong>${Notes.isYoutube(r) ? "Description" : "Caption"}</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.caption)}</p></details>` : ""}
+    ${r.onscreen ? `<details class="card"><summary><strong>Text shown in the reel (cover picture)</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.onscreen)}</p></details>` : ""}
     ${r.transcript ? `<details class="card"><summary><strong>What is said (from YouTube's captions)</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.transcript)}</p></details>` : ""}
     ${reelTitlesHtml(r)}
     ${relatedHtml(r)}
@@ -853,7 +869,7 @@ function inboxScreen() {
   bind("#drop", "click", done);
 }
 
-const RUN_STEPS = [["caption", "Reading the caption (and, for YouTube, the spoken words)"], ["ai", "Writing the notes with the on-phone AI"]];
+const RUN_STEPS = [["caption", "Reading the caption and the text on the cover (for YouTube, the spoken words)"], ["ai", "Writing the notes with the on-phone AI"]];
 
 function runScreen() {
   if (!run || (night && run.finished)) {
