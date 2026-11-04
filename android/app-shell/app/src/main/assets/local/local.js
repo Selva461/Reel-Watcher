@@ -81,6 +81,9 @@ const MODELS = [
   { id: "qwen", name: "Qwen2.5 1.5B", file: "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
     url: "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
     size: 1.6e9, note: "Free, about 1.6 GB, good for English notes. Needs a phone with 6 GB of RAM or more." },
+  { id: "gemma4", name: "Gemma 4 E2B (better notes)", file: "gemma-4-E2B-it.litertlm",
+    url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
+    size: 2.58e9, note: "Free, about 2.6 GB. Google's on-phone model, tuned for summarizing and rewriting; follows the notes format better. Slower to download, uses more battery per reel." },
 ];
 const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "" };
 let settings = { ...DEFAULTS };
@@ -691,7 +694,7 @@ function settingsScreen() {
         ${info.ready || info.partial ? `<button class="btn block danger" id="delm">Delete the model</button>` : ""}
         <p class="hint">The download only runs while Reel Shelf is open. If you leave, it pauses and continues from where it stopped.</p>
       </div>
-      ${others.length ? `<label class="field">Model to use<select class="input" id="pickm">${[...MODELS.map((x) => [x.file, x.name]), ...others.map((f) => [f, f])].map(([f, l]) => `<option value="${esc(f)}" ${settings.modelFile === f ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>` : ""}
+      ${others.length || MODELS.length > 1 ? `<label class="field">Model to use<select class="input" id="pickm">${[...MODELS.map((x) => [x.file, x.name]), ...others.map((f) => [f, f])].map(([f, l]) => `<option value="${esc(f)}" ${settings.modelFile === f ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>` : ""}
       <button class="btn block" id="own">Use my own model file (.litertlm)</button>
       <div class="stack"><span class="label">Processor</span>${seg("gpu", [[true, "GPU (faster)"], [false, "CPU"]])}</div>
       <div class="stack"><span class="label">Answer length</span>${seg("maxTokens", [[400, "Short"], [800, "Normal"], [1500, "Long"]])}</div>
