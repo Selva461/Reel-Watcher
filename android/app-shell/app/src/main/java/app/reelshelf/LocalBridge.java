@@ -187,11 +187,6 @@ final class LocalBridge {
         act.runOnUiThread(() -> act.openExternal(Uri.parse(url)));
     }
 
-    @JavascriptInterface
-    public void openServerMode() {
-        if (!ok()) return;
-        act.runOnUiThread(act::openServerMode);
-    }
 
     /** Saves a text file to Downloads/ReelShelf. Calls back with the place it was saved. */
     @JavascriptInterface
@@ -248,6 +243,61 @@ final class LocalBridge {
             return;
         }
         request(id, url, null);
+    }
+
+    /** Instagram's picture servers (a reel's cover picture), https only. */
+    static boolean coverHost(String url) {
+        try {
+            URL u = new URL(url);
+            String h = u.getHost();
+            return "https".equals(u.getProtocol()) && h != null && (h.endsWith(".cdninstagram.com") || h.endsWith(".fbcdn.net"));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Reads the text written on a reel's cover picture, on the phone (the same reader as screenshots). The picture is
+     * fetched from Instagram's picture server with no account, kept in memory only (at most 5 MB) and then dropped.
+     */
+    @JavascriptInterface
+    public void readCoverText(int id, String url) {
+        if (!ok()) return;
+        if (!coverHost(url)) {
+            done(id, false, "Only Instagram pictures can be read");
+            return;
+        }
+        net.execute(() -> {
+            HttpURLConnection c = null;
+            try {
+                c = (HttpURLConnection) new URL(url).openConnection();
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(20000);
+                c.setInstanceFollowRedirects(false);
+                c.setRequestProperty("User-Agent", WEB_UA);
+                int code = c.getResponseCode();
+                if (code != 200) {
+                    done(id, false, "Instagram answered " + code);
+                    return;
+                }
+                byte[] data;
+                try (InputStream in = c.getInputStream()) {
+                    ByteArrayOutputStream b = new ByteArrayOutputStream();
+                    byte[] buf = new byte[16384];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        if (b.size() + n > 5_000_000) throw new Exception("picture too big");
+                        b.write(buf, 0, n);
+                    }
+                    data = b.toByteArray();
+                }
+                done(id, true, shots.readBytes(data));
+            } catch (Exception e) {
+                done(id, false, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            } finally {
+                if (c != null) c.disconnect();
+            }
+        });
     }
 
     /** The YouTube player request (title, description and the list of caption files of a video). */
@@ -487,39 +537,29 @@ final class LocalBridge {
         model.allow();
     }
 
-    /** Opens Instagram's own "Download your information" page inside Reel Shelf (you sign in and tap yourself). */
+    /** Where Instagram's own "Download your information" page is. Opened in Chrome, never inside Reel Shelf. */
+    static final String IG_EXPORT_PAGE = "https://accountscenter.instagram.com/info_and_permissions/dyi/";
+    static final String IG_WAITING_KEY = "ig_export_opened_at";
+
+    /** Opens Instagram's export page in the browser (you sign in there; Reel Shelf never sees it) and starts the reminder. */
     @JavascriptInterface
     public void openInstagram() {
         if (!ok()) return;
-        act.runOnUiThread(() -> act.startActivity(new android.content.Intent(act.ctx(), InstagramActivity.class)));
+        prefs.edit().putLong(IG_WAITING_KEY, System.currentTimeMillis()).apply();
+        act.runOnUiThread(() -> act.openExternal(android.net.Uri.parse(IG_EXPORT_PAGE)));
     }
 
-    /** The saved-posts files brought back by the last in-app export download, as [{name, text}] JSON, or "". */
-    @JavascriptInterface
-    public String takeInstagramExport() {
-        if (!ok()) return "";
-        String r = InstagramActivity.takeResult(act.ctx());
-        return r == null ? "" : r;
-    }
-
-    /** Signs Reel Shelf's own web pages out of Instagram (clears the app's web cookies). */
-    @JavascriptInterface
-    public void signOutInstagram() {
-        if (!ok()) return;
-        act.runOnUiThread(InstagramActivity::signOut);
-    }
-
-    /** When the Instagram export page was last opened without a file coming back (ms), or 0. Shown as a reminder. */
+    /** When the Instagram export page was opened and no export was chosen since (ms), or 0. Shown as a reminder. */
     @JavascriptInterface
     public long instagramWaitingSince() {
         if (!ok()) return 0;
-        return prefs.getLong(InstagramActivity.WAITING_KEY, 0);
+        return prefs.getLong(IG_WAITING_KEY, 0);
     }
 
     @JavascriptInterface
     public void dismissInstagramWaiting() {
         if (!ok()) return;
-        prefs.edit().remove(InstagramActivity.WAITING_KEY).apply();
+        prefs.edit().remove(IG_WAITING_KEY).apply();
     }
 
     // ------------------------------------------------------------------ screenshots (text read on the phone)

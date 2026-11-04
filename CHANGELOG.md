@@ -5,6 +5,16 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.2.0
+- Play Protect: the app no longer has an Instagram sign-in page inside it, no Termux permission, no old server mode and
+  no unencrypted (http) traffic. "Get my saved reels" opens Instagram's export page in Chrome; choose the ZIP in Add.
+- Instagram is read gently: one reel every 4 to 7 seconds, logged out. If Instagram asks to slow down, the run waits
+  2, 10, then 30 minutes, then stops and keeps the rest for the next run.
+- More than the caption: the text on a reel's cover picture is read on the phone, plus Instagram's own description of
+  the picture. Both count for notes and search.
+- "Read my screenshots" buttons on Start, Add and the running screen.
+- The AI model download keeps going after you leave the app (notification with Stop).
+
 ## 1.1.0
 - Nightly run, on by default: every night at 00:00 (change the time in Settings), if the battery is above 40%
   (or charging), Reel Shelf files what you shared and imported during the day, writes notes for reels still waiting,

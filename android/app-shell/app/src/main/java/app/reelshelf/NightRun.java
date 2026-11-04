@@ -167,7 +167,6 @@ public class NightRun extends BroadcastReceiver {
         @Override public void toast(String msg) { }
         @Override public void startActivity(Intent i) { }
         @Override public void openExternal(Uri u) { }
-        @Override public void openServerMode() { }
         @Override public void pickModelFile(Consumer<Uri> cb) { cb.accept(null); }
         @Override public void pickFolder(Consumer<Uri> cb) { cb.accept(null); }
         @Override public void sendToLens(Uri uri) { }

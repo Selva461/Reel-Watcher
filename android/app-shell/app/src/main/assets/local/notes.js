@@ -159,6 +159,7 @@ const Notes = (() => {
     if (reel.author) parts.push(`Creator: ${yt ? "" : "@"}${reel.author}`);
     if (reel.caption) parts.push(`${yt ? "Description" : "Caption"}:\n${reel.caption.slice(0, 3000)}`);
     if (reel.transcript) parts.push(`What is said (transcript):\n${condense(reel.transcript, 7000)}`);
+    if (reel.onscreen) parts.push(`Text shown in the reel (cover picture):\n${reel.onscreen.slice(0, 2000)}`);
     if (reel.extra) parts.push(`What the reel says (typed by me):\n${reel.extra.slice(0, 6000)}`);
     parts.push(`Write notes in exactly this format:\n\n${FORMAT}`);
     if (extra && extra.trim()) parts.push(`Also: ${extra.trim()}`);
@@ -167,7 +168,7 @@ const Notes = (() => {
 
   /** How much there is to write notes from (the phone's AI cannot watch the video). */
   function material(reel) {
-    return ((reel.title || "") + " " + (reel.caption || "") + " " + (reel.transcript || "") + " " + (reel.extra || "")).replace(/#\S+/g, "").trim().length;
+    return ((reel.title || "") + " " + (reel.caption || "") + " " + (reel.transcript || "") + " " + (reel.onscreen || "") + " " + (reel.extra || "")).replace(/#\S+/g, "").trim().length;
   }
 
   // ---------------------------------------------------------------- YouTube: title, description, transcript (no key, no login)
@@ -416,7 +417,7 @@ const Notes = (() => {
   function fieldsOf(r) {
     const n = r.notes || {};
     return [[n.topic, 3], [(n.tags || []).join(" "), 3], [(n.tools || []).join(" "), 2], [r.title, 2], [(n.points || []).join(" "), 1.5],
-      [n.meaning, 1], [(n.use || []).join(" "), 1], [n.takeaway, 1.5], [r.caption, 0.6], [r.transcript, 0.4], [r.extra, 0.6],
+      [n.meaning, 1], [(n.use || []).join(" "), 1], [n.takeaway, 1.5], [r.caption, 0.6], [r.transcript, 0.4], [r.onscreen, 0.5], [r.extra, 0.6],
       [(r.collections || []).join(" "), 1], [(r.keywords || []).join(" "), 1.5], [r.author, 0.5]];
   }
   // Each reel's words are kept until its text changes, and the whole index until any reel changes,
@@ -482,7 +483,7 @@ const Notes = (() => {
       const want = new Set([...expand.values()].flatMap((m) => [...m.keys()]));
       const n = d.r.notes || {};
       const cands = [...(n.points || []), n.takeaway, n.meaning, ...(n.use || [])].filter(Boolean);
-      if (!cands.length) cands.push(...sentences([d.r.transcript, d.r.caption, d.r.extra].filter(Boolean).join("\n")));
+      if (!cands.length) cands.push(...sentences([d.r.transcript, d.r.caption, d.r.onscreen, d.r.extra].filter(Boolean).join("\n")));
       const lines = cands.map((l) => ({ l, k: new Set(words(l).filter((w) => want.has(w))).size }))
         .filter((x) => x.k).sort((a, b) => b.k - a.k).slice(0, 3).map((x) => x.l);
       out.push({ reel: d.r, score: s, lines });
@@ -561,7 +562,7 @@ const Notes = (() => {
 
   /** Notes made without any AI: the most informative sentences, in order, from the caption, transcript and your text. */
   function autoNotes(r, reels = []) {
-    const text = [r.title, r.extra, r.transcript, r.caption].filter(Boolean).join("\n");
+    const text = [r.title, r.extra, r.transcript, r.caption, r.onscreen].filter(Boolean).join("\n");
     const sents = [...new Set(sentences(text))];
     if (!sents.length) return null;
     const freq = new Map();
@@ -598,6 +599,15 @@ const Notes = (() => {
     const doc = new DOMParser().parseFromString(String(html || ""), "text/html");  // inert: nothing in it runs
     const out = {};
     doc.querySelectorAll("script, style, noscript, template").forEach((x) => x.remove());
+    const img = doc.querySelector("img.EmbeddedMediaImage, .EmbeddedMedia img");
+    if (img) {
+      const src = img.getAttribute("src") || "";
+      if (/^https:\/\/[^/]+\.(cdninstagram\.com|fbcdn\.net)\//.test(src)) out.cover = src;
+      const alt = clean(img.getAttribute("alt") || "");
+      // Instagram's own picture description: "Photo by X on May 1, 2024. May be an image of text that says '...'"
+      const said = alt.match(/may be (?:an? )?(?:image|graphic|video|meme)[^.]*?(?:that says|with the text)\s*['"“‘]([\s\S]+?)['"”’]\s*\.?\s*$/i);
+      if (said) out.alt = said[1].trim();
+    }
     const cap = doc.querySelector(".Caption");
     if (cap) {
       const user = cap.querySelector(".CaptionUsername");

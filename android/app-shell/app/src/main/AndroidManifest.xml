@@ -9,12 +9,9 @@
     <!-- the nightly run starts at the hour you chose (midnight unless changed) -->
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />
-    <!-- only so the optional nightly online check (off by default) stays scheduled after the phone restarts -->
+    <!-- so the nightly run stays scheduled after the phone restarts -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <!-- lets the app start Reel Shelf inside Termux (Termux asks you to allow it) -->
-    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
     <queries>
-        <package android:name="com.termux" />
         <!-- Google Lens lives in the Google app -->
         <package android:name="com.google.android.googlequicksearchbox" />
     </queries>
@@ -23,7 +20,7 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:theme="@style/AppTheme"
-        android:usesCleartextTraffic="true"
+        android:usesCleartextTraffic="false"
         android:allowBackup="false"
         android:largeHeap="true">
         <!-- the on-phone AI model can use the GPU when the phone has these (optional) -->
@@ -40,12 +37,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <!-- Instagram's own "Download your information" page inside the app, to bring the saved-reels export back -->
-        <activity
-            android:name=".InstagramActivity"
-            android:exported="false"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:windowSoftInputMode="adjustResize" />
         <!-- "Share" from Instagram (a reel) or from Meta AI (its answer): saves it and closes at once -->
         <activity
             android:name=".ShareActivity"

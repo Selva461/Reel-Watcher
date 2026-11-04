@@ -247,6 +247,34 @@ final class ScreenshotReader {
         return r;
     }
 
+    /** The text in a picture given as bytes (a reel's cover picture), lines joined with newlines; "" when none. */
+    String readBytes(byte[] data) throws Exception {
+        BitmapFactory.Options b = new BitmapFactory.Options();
+        b.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(data, 0, data.length, b);
+        if (b.outWidth <= 0 || b.outHeight <= 0) throw new Exception("not a picture");
+        int sample = 1;
+        while (Math.max(b.outWidth, b.outHeight) / (sample * 2) >= MAX_SIDE) sample *= 2;
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inSampleSize = sample;
+        o.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        Bitmap bm = BitmapFactory.decodeByteArray(data, 0, data.length, o);
+        if (bm == null) throw new Exception("could not open the picture");
+        try {
+            Text text = Tasks.await(recognizer().process(InputImage.fromBitmap(bm, 0)), 30, TimeUnit.SECONDS);
+            StringBuilder out = new StringBuilder();
+            for (Text.TextBlock block : text.getTextBlocks()) {
+                for (Text.Line line : block.getLines()) {
+                    String t = line.getText();
+                    if (t != null && !t.trim().isEmpty()) out.append(t.trim()).append('\n');
+                }
+            }
+            return out.toString().trim();
+        } finally {
+            bm.recycle();
+        }
+    }
+
     /** A small preview (data: URL), so you can see which screenshot a name came from. */
     String thumb(String key, int side) {
         if (!allowed(key)) return "";
