@@ -8,5 +8,14 @@
 details > summary { cursor: pointer; list-style-position: inside; }
 textarea.input.tall { min-height: 160px; }
 .hint { font-size: 13px; color: var(--muted); line-height: 1.45; margin: 0; }
+/* Watchlist */
+.poster-ph { display: flex; align-items: center; justify-content: center; font-family: "Space Grotesk", sans-serif; font-weight: 700; font-size: 20px;
+             color: var(--ph); background: var(--surface2); border: 1px solid var(--line); }
+.thumb.big.poster-ph { font-size: 44px; }
+.small-field { font-size: 13px; gap: 4px; }
+.small-field select.input { min-height: 44px; font-size: 14px; padding: 0 10px; }
+nav.tabs a { min-width: 52px; }
+.seg button { font-size: 14px; }
+.thumb.big.poster { aspect-ratio: 2/3; width: 120px; }
 mark { background: rgba(242, 181, 68, 0.28); color: inherit; border-radius: 3px; padding: 0 1px; }
 a.chip { display: inline-flex; align-items: center; text-decoration: none; }
