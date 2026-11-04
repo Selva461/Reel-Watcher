@@ -31,8 +31,6 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
 /**
  * Instagram's own "Download your information" page, opened inside Reel Shelf so the saved-reels export comes straight
@@ -45,8 +43,8 @@ import java.util.zip.ZipInputStream;
 public class InstagramActivity extends Activity {
     static final String START = "https://accountscenter.instagram.com/info_and_permissions/dyi/";
     static final String RESULT_FILE = "ig-saved.json";
+    static final String WAITING_KEY = "ig_export_opened_at";
     private static final long MAX_ZIP = 4L * 1024 * 1024 * 1024;
-    private static final int MAX_ENTRY = 40 * 1024 * 1024;
 
     private WebView web;
     private TextView bar;
@@ -81,6 +79,19 @@ public class InstagramActivity extends Activity {
         bar.setText("Sign in, then: Some of your information > tick Saved > Download to device > format JSON > Create files. "
                 + "Meta emails you when it is ready (minutes to hours). Then open this screen again and tap Download.");
         top.addView(bar, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        // If Meta will not sign you in here, do the same steps in Chrome and choose the downloaded ZIP in Add
+        Button chrome = new Button(this);
+        chrome.setText("Chrome");
+        chrome.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(START)));
+                Toast.makeText(this, "Do the same steps in Chrome. Then in Reel Shelf, Add, choose the downloaded ZIP.",
+                        Toast.LENGTH_LONG).show();
+            } catch (Exception e) {
+                Toast.makeText(this, "No browser found", Toast.LENGTH_SHORT).show();
+            }
+        });
+        top.addView(chrome);
         Button done = new Button(this);
         done.setText("Back");
         done.setOnClickListener(v -> finish());
@@ -114,6 +125,8 @@ public class InstagramActivity extends Activity {
         });
         web.setDownloadListener((url, userAgent, disposition, mime, length) -> startDownload(url, userAgent));
         web.loadUrl(START);
+        // remembered so Reel Shelf can remind you, while it is open, to come back for the file once Meta has it ready
+        getSharedPreferences("reelshelf", MODE_PRIVATE).edit().putLong(WAITING_KEY, System.currentTimeMillis()).apply();
     }
 
     private void say(String text) {
@@ -184,32 +197,41 @@ public class InstagramActivity extends Activity {
         if (c == null) throw new Exception("too many redirects");
         long len = c.getContentLengthLong();
         if (len > MAX_ZIP) throw new Exception("export too big; pick only Saved");
+        // The ZIP goes to the app's own cache (no other app can read it), is read through its table of contents
+        // (works for big exports, ZIP64 and every way Meta packs the files), and is deleted straight after.
+        File zipFile = new File(getCacheDir(), "ig-export.zip");
+        if (len > 0 && getCacheDir().getUsableSpace() < len + 50L * 1024 * 1024) {
+            c.disconnect();
+            throw new Exception("not enough free space on the phone");
+        }
         JSONArray parts = new JSONArray();
-        long seen = 0;
-        try (InputStream in = c.getInputStream(); ZipInputStream zip = new ZipInputStream(in)) {
-            ZipEntry e;
-            byte[] buf = new byte[65536];
-            while ((e = zip.getNextEntry()) != null) {
-                if (stop) throw new Exception("stopped");
-                String name = e.getName();
-                String base = name.substring(name.lastIndexOf('/') + 1).toLowerCase(java.util.Locale.ROOT);
-                boolean keep = !e.isDirectory() && base.startsWith("saved") && (base.endsWith(".json") || base.endsWith(".html"));
-                ByteArrayOutputStream text = keep ? new ByteArrayOutputStream() : null;
+        try {
+            long seen = 0;
+            try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(zipFile)) {
+                byte[] buf = new byte[65536];
                 int n;
-                while ((n = zip.read(buf)) > 0) {
+                int lastPct = -1;
+                while ((n = in.read(buf)) > 0) {
                     if (stop) throw new Exception("stopped");
                     seen += n;
                     if (seen > MAX_ZIP) throw new Exception("export too big; pick only Saved");
-                    if (text != null) {
-                        if (text.size() + n > MAX_ENTRY) throw new Exception(base + " is too big");
-                        text.write(buf, 0, n);
+                    out.write(buf, 0, n);
+                    int pct = len > 0 ? (int) Math.min(100, seen * 100 / len) : -1;
+                    if (pct != lastPct) {
+                        lastPct = pct;
+                        say(pct >= 0 ? "Downloading your export... " + pct + "%" : "Downloading your export... " + (seen >> 20) + " MB");
                     }
                 }
-                if (text != null) parts.put(new JSONObject().put("name", base).put("text", text.toString("UTF-8")));
-                if (len > 0) say("Downloading your export... " + Math.min(100, seen * 100 / Math.max(1, len)) + "%");
+            } finally {
+                c.disconnect();
+            }
+            say("Reading your saved reels...");
+            for (ExportReader.Part part : ExportReader.readSaved(zipFile)) {
+                parts.put(new JSONObject().put("name", part.name).put("text", part.text));
             }
         } finally {
-            c.disconnect();
+            //noinspection ResultOfMethodCallIgnored
+            zipFile.delete();
         }
         if (parts.length() == 0) throw new Exception("no saved posts in this file; tick Saved when you request it");
         return parts.toString();
@@ -246,6 +268,7 @@ public class InstagramActivity extends Activity {
             byte[] buf = new byte[65536];
             int n;
             while ((n = in.read(buf)) > 0) b.write(buf, 0, n);
+            a.getSharedPreferences("reelshelf", MODE_PRIVATE).edit().remove(WAITING_KEY).apply();  // got it: no reminder
             return b.toString("UTF-8");
         } catch (Exception e) {
             return null;

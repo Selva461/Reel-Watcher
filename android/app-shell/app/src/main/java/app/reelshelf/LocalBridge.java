@@ -509,6 +509,19 @@ final class LocalBridge {
         act.runOnUiThread(InstagramActivity::signOut);
     }
 
+    /** When the Instagram export page was last opened without a file coming back (ms), or 0. Shown as a reminder. */
+    @JavascriptInterface
+    public long instagramWaitingSince() {
+        if (!ok()) return 0;
+        return prefs.getLong(InstagramActivity.WAITING_KEY, 0);
+    }
+
+    @JavascriptInterface
+    public void dismissInstagramWaiting() {
+        if (!ok()) return;
+        prefs.edit().remove(InstagramActivity.WAITING_KEY).apply();
+    }
+
     // ------------------------------------------------------------------ screenshots (text read on the phone)
 
     /** The folders you picked for screenshots: [{uri, name}]. */

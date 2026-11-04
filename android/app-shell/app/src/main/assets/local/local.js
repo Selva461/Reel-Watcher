@@ -184,6 +184,22 @@ function takeInstagramExport() {
   return true;
 }
 
+/** You opened Instagram's export page but no file came back yet: a reminder to fetch it once Meta has it ready. */
+function igWaitingCard() {
+  const since = Number(sync("instagramWaitingSince") || 0);
+  if (!since) return "";
+  const mins = Math.max(0, Math.round((Date.now() - since) / 60000));
+  const ago = mins < 60 ? plural(mins, "minute") : mins < 2880 ? plural(Math.round(mins / 60), "hour") : plural(Math.round(mins / 1440), "day");
+  const late = mins > 4 * 1440;  // Meta keeps a finished export for 4 days
+  return `<div class="card stack" id="igwait"><strong>Your Instagram export</strong>
+    <span class="hint">You asked Instagram for it ${esc(ago)} ago. ${late ? "Meta deletes a finished export after 4 days, so you may need to ask again." : "It is usually ready within minutes to a few hours, and Meta emails you."} Tap Check, then Download on the finished file.</span>
+    <div class="grid2"><button class="btn" id="igdismiss">Hide</button><button class="btn primary" id="igcheck">Check now</button></div></div>`;
+}
+function bindIgWaiting() {
+  bind("#igcheck", "click", () => sync("openInstagram"));
+  bind("#igdismiss", "click", () => { sync("dismissInstagramWaiting"); const c = document.getElementById("igwait"); if (c) c.remove(); });
+}
+
 // ------------------------------------------------------------------ Start: work only while the app is open
 
 let run = null;  // {codes, i, step, stop, done, failed, current}
@@ -386,6 +402,7 @@ function homeScreen() {
     <div class="brand">Reel Shelf</div>
     <h1>Your reel notes</h1>
     <label class="search">${ICON.search}<input id="q" type="search" placeholder="Search topics, points, tools, tags" value="${esc(filter.q)}" aria-label="Search"></label>
+    ${igWaitingCard()}
     ${db.inbox.length ? `<a class="card accent" href="#/inbox"><span class="grow"><strong>${plural(db.inbox.length, "Meta AI answer")} to file</strong><br><span>Pick the reel each one belongs to</span></span></a>` : ""}
     ${running ? `<a class="card accent" href="#/run"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="grow"><strong>Working: ${run.i + 1} of ${run.codes.length}</strong><br><span>Keep the app open</span></span></a>`
       : todo.length ? `<button class="card accent" id="start"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="stack grow" style="gap:2px">
@@ -397,6 +414,7 @@ function homeScreen() {
   bind("[data-tag]", "click", (e, b) => { filter.tag = b.dataset.tag; homeScreen(); });
   bind("#start", "click", () => startRun());
   bind("#batch", "click", askMetaBatch);
+  bindIgWaiting();
 }
 
 
@@ -405,7 +423,7 @@ function listHtml() {
   let shown = db.reels.filter((r) => !filter.tag || ((r.notes || {}).tags || []).includes(filter.tag));
   if (q) {  // ranked like a search engine: best match first, typos and similar words allowed
     const plain = q.toLowerCase();
-    const hits = Notes.search(shown, q, 200);
+    const hits = Lib.find(shown, q, 200);
     const seen = new Set(hits.map((h) => h.reel));
     // a name or link typed exactly also counts
     const exact = shown.filter((r) => !seen.has(r) && [r.author, r.url, r.code].join(" ").toLowerCase().includes(plain));
@@ -504,7 +522,35 @@ function reelScreen(code) {
 
 function relatedHtml(r) {
   const rel = Notes.related(db.reels, r, 4);
-  return rel.length ? `<div class="stack"><h2>Related reels</h2>${rel.map((x) => reelRow(x.reel)).join("")}</div>` : "";
+  const t = Lib.topics(db.reels).find((x) => x.reels.includes(r));
+  const topicLink = t ? `<a class="chip" href="#/topic/${enc(t.key)}">Topic: ${esc(t.label)} (${t.reels.length})</a>` : "";
+  return rel.length || t ? `<div class="stack"><h2>Related reels</h2>${topicLink ? `<div class="chips">${topicLink}</div>` : ""}${rel.map((x) => reelRow(x.reel)).join("")}</div>` : "";
+}
+
+// ------------------------------------------------------------------ topics: reels grouped by what they are about (no AI)
+
+function titleOf(r) { const n = r.notes || {}; return n.topic || r.title || (r.caption || "").split("\n")[0].slice(0, 90) || r.code; }
+
+function libraryOverview() {
+  const groups = Lib.topics(db.reels).slice(0, 12);
+  const tl = Lib.tools(db.reels).filter((t) => t.count > 1).slice(0, 16);
+  return `${groups.length ? `<div class="stack"><h2>Topics you learned</h2>${groups.map((g) => `<a class="list-item" href="#/topic/${enc(g.key)}"><span class="grow stack" style="gap:4px">
+      <span class="title">${esc(g.label)}</span><span class="small muted clamp">${esc(g.reels.slice(0, 3).map(titleOf).join(" · "))}</span></span>
+      <span class="tag">${g.reels.length}</span></a>`).join("")}</div>` : ""}
+    ${tl.length ? `<div class="stack"><h2>Tools you saw most</h2><div class="chips wrap">${tl.map((t) => `<a class="chip" href="#/ask?q=${enc('"' + t.name + '"')}">${esc(t.name)} ${t.count}</a>`).join("")}</div></div>` : ""}`;
+}
+
+function topicScreen(key) {
+  const g = Lib.topic(db.reels, key);
+  if (!g) { $app.innerHTML = `${header("Topic", "#/ask")}<div class="empty">This topic changed as your library grew. <a href="#/ask">See all topics</a>.</div>`; return; }
+  const takeaways = g.reels.filter((r) => (r.notes || {}).takeaway);
+  const tl = Lib.tools(g.reels).slice(0, 12);
+  $app.innerHTML = `${header(g.label, "#/ask")}
+    <p class="hint">${plural(g.reels.length, "reel")} about the same thing, grouped by the words they share. No AI.</p>
+    <div class="chips wrap">${g.words.map((w) => `<a class="chip" href="#/ask?q=${enc(w)}">${esc(w)}</a>`).join("")}</div>
+    ${takeaways.length ? `<div class="card stack" style="gap:8px"><span class="label">What you learned</span><ul style="margin:0;padding-left:18px;line-height:1.5">${takeaways.map((r) => `<li><a href="#/r/${enc(r.code)}">${esc(r.notes.takeaway)}</a></li>`).join("")}</ul></div>` : ""}
+    ${tl.length ? `<div class="card stack" style="gap:8px"><span class="label">Tools</span><p style="margin:0">${esc(tl.map((t) => t.name + (t.count > 1 ? ` (${t.count})` : "")).join(", "))}</p></div>` : ""}
+    <div class="stack">${g.reels.map(reelRow).join("")}</div>`;
 }
 
 // ------------------------------------------------------------------ Ask: your library answers
@@ -516,12 +562,14 @@ function askScreen() {
   if (fromUrl !== undefined) { const q = decodeURIComponent(fromUrl); if (q !== lastAsk.q) lastAsk = { q, answer: null, results: [] }; }
   const ready = !!modelInfo().ready;
   const q = lastAsk.q;
-  const results = q ? Notes.search(db.reels, q, 8) : [];
+  const results = q ? Lib.find(db.reels, q, 8) : [];
+  const fix = q && results.length < 3 ? Lib.didYouMean(db.reels, q) : null;
   lastAsk.results = results;
-  const mark = (s) => esc(s);
+  const mark = (s) => Lib.highlight(s, q);
   $app.innerHTML = `${header("Ask your library", "")}
     <form class="stack" id="askf"><label class="search">${ICON.search}<input id="aq" type="search" enterkeyhint="search" placeholder="e.g. how do I keep API keys safe?" value="${esc(q)}" aria-label="Question"></label></form>
-    ${!q ? `<p class="hint">Search everything you saved, like a search engine for what you learned. It works without any AI: it ranks your notes by the words you type, allows typos and similar words (phone, mobile, android), and shows the lines that answer it.</p>` : ""}
+    ${!q ? `<p class="hint">Search everything you saved, like a search engine for what you learned. It works without any AI: it ranks your notes by the words you type, allows typos and similar words (phone, mobile, android), and shows the lines that answer it. Use "exact words", -word to leave a word out, and #tag to keep one tag.</p>${libraryOverview()}` : ""}
+    ${fix ? `<p class="small">Did you mean <a href="#/ask?q=${enc(fix)}" id="fix">${esc(fix)}</a>?</p>` : ""}
     ${q && !results.length ? `<div class="empty">Nothing in your library about that yet.</div>` : ""}
     ${lastAsk.answer ? `<div class="card stack"><span class="label">Answer from your notes${lastAsk.answer.by ? ` (${esc(lastAsk.answer.by)})` : ""}</span><p class="pre">${esc(lastAsk.answer.text).replace(/\[(\d{1,2})\]/g, (m, i) => results[i - 1] ? `<a href="#/r/${enc(results[i - 1].reel.code)}">[${i}]</a>` : m)}</p></div>` : ""}
     ${results.length ? `<div class="grid2">${ready ? `<button class="btn primary" id="aiAns">Answer with phone AI</button>` : ""}<button class="btn" id="copyAsk">Ask any AI with these notes</button></div>` : ""}
@@ -578,12 +626,13 @@ function pasteDialog(r) {
 
 function addScreen() {
   $app.innerHTML = `${header("Add reels", "")}
+    ${igWaitingCard()}
     <div class="card stack"><strong>Paste links or answers</strong>
       <p class="hint">Reel links (one or many, any text around them is fine), or Meta AI answers in the notes format. Several answers at once are split up.</p>
       <textarea class="input tall" id="paste" placeholder="https://www.instagram.com/reel/..."></textarea>
       <button class="btn primary block" id="add">Save to shelf</button></div>
     <div class="card stack"><strong>All your saved reels, straight from Instagram</strong>
-      <p class="hint">Opens Instagram's own "Download your information" page inside Reel Shelf. You sign in and tap the buttons yourself, like in a browser, so it is safe for your account. Tick <strong>Saved</strong>, format <strong>JSON</strong>. When Meta says the file is ready (it emails you), open this again and tap Download: your reels and collections come straight in.</p>
+      <p class="hint">Opens Instagram's own "Download your information" page inside Reel Shelf. You sign in and tap the buttons yourself, like in a browser, so it is safe for your account. Tick <strong>Saved</strong>, format <strong>JSON</strong>. When Meta says the file is ready (it emails you), open this again and tap Download: your reels and collections come straight in. If Instagram will not sign you in there, tap <strong>Chrome</strong> at the top and choose the downloaded file below.</p>
       <button class="btn primary block" id="ig">Get my saved reels from Instagram</button>
       ${RN && RN.openInstagram ? "" : `<p class="hint">Only in the Android app.</p>`}</div>
     <div class="card stack"><strong>Or choose an export you already downloaded</strong>
@@ -612,6 +661,7 @@ function addScreen() {
     location.hash = "#/";
   });
   bind("#ig", "click", () => sync("openInstagram"));
+  bindIgWaiting();
   bind("#zip", "change", async (e, el) => {
     const out = document.getElementById("result");
     const files = [...el.files];
@@ -780,7 +830,7 @@ function settingsScreen() {
 
 const ROUTES = [
   [/^#?\/?$/, homeScreen, "home"], [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "home"], [/^#\/inbox$/, inboxScreen, "home"],
-  [/^#\/ask(\?.*)?$/, askScreen, "ask"],
+  [/^#\/ask(\?.*)?$/, askScreen, "ask"], [/^#\/topic\/(.+)$/, (m) => topicScreen(decodeURIComponent(m[1])), "ask"],
   [/^#\/watch$/, watchScreen, "watch"], [/^#\/m\/(.+)$/, (m) => titleScreen(decodeURIComponent(m[1])), "watch"],
   [/^#\/add$/, addScreen, "add"], [/^#\/run$/, runScreen, "run"],
   [/^#\/shots$/, () => Shots.screen(), "run"], [/^#\/shots\/review$/, () => Shots.review(), "run"], [/^#\/settings$/, settingsScreen, "settings"],

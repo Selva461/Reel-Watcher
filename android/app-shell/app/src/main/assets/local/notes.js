@@ -419,17 +419,30 @@ const Notes = (() => {
       [n.meaning, 1], [(n.use || []).join(" "), 1], [n.takeaway, 1.5], [r.caption, 0.6], [r.transcript, 0.4], [r.extra, 0.6],
       [(r.collections || []).join(" "), 1], [(r.keywords || []).join(" "), 1.5], [r.author, 0.5]];
   }
+  // Each reel's words are kept until its text changes, and the whole index until any reel changes,
+  // so typing in a search box or opening a reel does not re-read the library every time.
+  const docCache = new WeakMap();
+  let lastIx = null;
+  function docOf(r) {
+    const f = fieldsOf(r);
+    const sig = f.map((x) => x[0] || "").join("\u0001");
+    const hit = docCache.get(r);
+    if (hit && hit.sig === sig) return hit.d;
+    const tf = new Map();
+    let len = 0;
+    for (const [text, w] of f) for (const t of words(text)) { tf.set(t, (tf.get(t) || 0) + w); len += w; }
+    const d = { r, tf, len };
+    docCache.set(r, { sig, d });
+    return d;
+  }
   function index(reels) {
-    const docs = reels.map((r) => {
-      const tf = new Map();
-      let len = 0;
-      for (const [text, w] of fieldsOf(r)) for (const t of words(text)) { tf.set(t, (tf.get(t) || 0) + w); len += w; }
-      return { r, tf, len };
-    });
+    const docs = reels.map(docOf);
+    if (lastIx && lastIx.docs.length === docs.length && lastIx.docs.every((d, i) => d === docs[i])) return lastIx;
     const df = new Map();
     for (const d of docs) for (const t of d.tf.keys()) df.set(t, (df.get(t) || 0) + 1);
     const avg = docs.reduce((a, d) => a + d.len, 0) / Math.max(1, docs.length) || 1;
-    return { docs, df, avg, N: docs.length };
+    lastIx = { docs, df, avg, N: docs.length };
+    return lastIx;
   }
   function idfOf(ix, t) { const n = ix.df.get(t) || 0; return Math.log(1 + (ix.N - n + 0.5) / (n + 0.5)); }
 
@@ -704,20 +717,43 @@ const Notes = (() => {
     let eocd = -1;
     for (let i = tail.length - 22; i >= 0; i--) if (u32(tail, i) === 0x06054b50) { eocd = i; break; }
     if (eocd < 0) throw new Error("This is not a ZIP file");
-    const cdSize = u32(tail, eocd + 12) >>> 0;
-    const cdOff = u32(tail, eocd + 16) >>> 0;
-    if (cdOff === 0xffffffff) throw new Error("This ZIP is too big to read here. Unzip it and choose saved_posts.json and saved_collections.json");
+    let cdSize = u32(tail, eocd + 12);
+    let cdOff = u32(tail, eocd + 16);
+    const u64 = (b, o) => u32(b, o) + u32(b, o + 4) * 4294967296;
+    if (cdOff === 0xffffffff || cdSize === 0xffffffff) {  // ZIP64 (big exports): the real numbers sit in the ZIP64 record
+      const loc = eocd - 20;
+      if (loc < 0 || u32(tail, loc) !== 0x07064b50) throw new Error("This ZIP could not be read. Unzip it and choose saved_posts.json and saved_collections.json");
+      const recOff = u64(tail, loc + 8);
+      const rec = await bytes(recOff, recOff + 56);
+      if (u32(rec, 0) !== 0x06064b50) throw new Error("This ZIP could not be read. Unzip it and choose saved_posts.json and saved_collections.json");
+      cdSize = u64(rec, 40);
+      cdOff = u64(rec, 48);
+    }
+    if (cdSize > 200e6) throw new Error("This ZIP's table of contents is too big. Ask Instagram for only Saved");
     const cd = await bytes(cdOff, cdOff + cdSize);
     const out = [];
     let p = 0;
     while (p + 46 <= cd.length && u32(cd, p) === 0x02014b50) {
       const method = u16(cd, p + 10);
-      const csize = u32(cd, p + 20) >>> 0;
+      let csize = u32(cd, p + 20);
+      let usize = u32(cd, p + 24);
       const nlen = u16(cd, p + 28);
       const elen = u16(cd, p + 30);
       const clen = u16(cd, p + 32);
-      const loff = u32(cd, p + 42) >>> 0;
+      let loff = u32(cd, p + 42);
       const name = new TextDecoder().decode(cd.subarray(p + 46, p + 46 + nlen));
+      // ZIP64 extra field: the sizes and offset that did not fit, in this order, only for those set to 0xffffffff
+      for (let x = p + 46 + nlen, xe = x + elen; x + 4 <= xe;) {
+        const id = u16(cd, x);
+        const sz = u16(cd, x + 2);
+        if (id === 1) {
+          let q = x + 4;
+          if (usize === 0xffffffff) { usize = u64(cd, q); q += 8; }
+          if (csize === 0xffffffff) { csize = u64(cd, q); q += 8; }
+          if (loff === 0xffffffff) { loff = u64(cd, q); q += 8; }
+        }
+        x += 4 + sz;
+      }
       p += 46 + nlen + elen + clen;
       if (!/saved[^/]*\.(json|html)$/i.test(name) || csize > 60e6) continue;
       const lh = await bytes(loff, loff + 30);
@@ -732,6 +768,6 @@ const Notes = (() => {
 
   return { FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, material, embedUrl, readPage,
     ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
-    YT_CLIENTS, condense, search, answerPrompt, words, stem, near, related, keywords, autoNotes, sentences,
+    YT_CLIENTS, condense, search, answerPrompt, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
     exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS };
 })();

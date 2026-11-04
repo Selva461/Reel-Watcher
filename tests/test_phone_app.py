@@ -52,6 +52,8 @@ FAKE_RN = r"""
     postJson: (id, url, body) => { st.calls.push(["postJson", url, JSON.parse(body)]); keep(); later(() => {
       st.player ? rnDone(id, true, JSON.stringify(st.player)) : rnDone(id, false, "YouTube answered 403"); }); },
     openInstagram: () => { st.opened.push("instagram-export"); keep(); },
+    instagramWaitingSince: () => st.igWaiting || 0,
+    dismissInstagramWaiting: () => { st.igWaiting = 0; keep(); },
     takeInstagramExport: () => { const s = st.igExport ? JSON.stringify(st.igExport) : ""; st.igExport = null; keep(); return s; },
     signOutInstagram: () => { st.opened.push("ig-signout"); keep(); },
     // the watchlist's online check: st.verifyAnswers is what the phone "finds"; st.verifyPending waits to be taken
@@ -276,6 +278,69 @@ def test_instagram_export_zip_with_collections(phone, tmp_path):
     by = {r["code"]: r for r in db_of(phone)["reels"]}
     assert by["EXP001"]["collections"] == ["Coding tips"] and by["EXP001"]["author"] == "creator_a"
     assert by["EXP002"]["url"] == "https://www.instagram.com/p/EXP002/"
+
+
+def _as_zip64(data, patch_offset_of=None):
+    """Rewrites a small ZIP the way big exports are written: ZIP64 end records, and optionally one entry whose
+    offset sits in a ZIP64 extra field. Python only writes these past 4 GB, so the test builds them by hand."""
+    import struct
+    eocd = data.rindex(b"PK\x05\x06")
+    count, cd_size, cd_off = struct.unpack("<HII", data[eocd + 10:eocd + 20])
+    cd = data[cd_off:cd_off + cd_size]
+    out_cd = b""
+    p = 0
+    while p < len(cd):
+        nlen, elen, clen = struct.unpack("<HHH", cd[p + 28:p + 34])
+        head = bytearray(cd[p:p + 46])
+        name = cd[p + 46:p + 46 + nlen]
+        extra = cd[p + 46 + nlen:p + 46 + nlen + elen]
+        comment = cd[p + 46 + nlen + elen:p + 46 + nlen + elen + clen]
+        if patch_offset_of and name.decode().endswith(patch_offset_of):
+            (loff,) = struct.unpack("<I", head[42:46])
+            head[42:46] = struct.pack("<I", 0xFFFFFFFF)
+            extra = extra + struct.pack("<HHQ", 1, 8, loff)
+            head[30:32] = struct.pack("<H", len(extra))
+        out_cd += bytes(head) + name + extra + comment
+        p += 46 + nlen + elen + clen
+    body = data[:cd_off] + out_cd
+    rec_off = len(body)
+    rec = struct.pack("<IQHHIIQQQQ", 0x06064B50, 44, 45, 45, 0, 0, count, count, len(out_cd), cd_off)
+    loc = struct.pack("<IIQI", 0x07064B50, 0, rec_off, 1)
+    end = struct.pack("<IHHHHIIH", 0x06054B50, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0)
+    return body + rec + loc + end
+
+
+def test_big_zip64_export_is_read(phone, tmp_path):
+    posts = {"saved_saved_media": [
+        {"title": "creator_z", "string_map_data": {"Saved on": {"href": "https://www.instagram.com/reel/BIG001/", "timestamp": 1}}}]}
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as f:
+        f.writestr("media/big.jpg", b"x" * 5000)
+        f.writestr("your_instagram_activity/saved/saved_posts.json", json.dumps(posts))
+    data = _as_zip64(z.getvalue(), patch_offset_of="saved_posts.json")
+    with zipfile.ZipFile(io.BytesIO(data)) as check:  # still a valid ZIP for other readers
+        assert json.loads(check.read("your_instagram_activity/saved/saved_posts.json")) == posts
+    path = tmp_path / "big-export.zip"
+    path.write_bytes(data)
+    phone.open_with(hash_="#/add")
+    phone.locator("#zip").set_input_files(str(path))
+    phone.get_by_text("1 new reel saved").wait_for()
+    assert [r["code"] for r in db_of(phone)["reels"]] == ["BIG001"]
+
+
+def test_waiting_for_instagram_export_reminder(phone):
+    import time
+    phone.open_with({"igWaiting": int(time.time() * 1000) - 3 * 3600 * 1000})
+    card = phone.locator("#igwait")
+    card.get_by_text("3 hours ago").wait_for()
+    card.get_by_role("button", name="Check now").click()
+    assert "instagram-export" in phone.rn()["opened"]
+    phone.goto(phone.url.split("#")[0] + "#/add")
+    phone.locator("#igwait").get_by_role("button", name="Hide").click()
+    assert phone.locator("#igwait").count() == 0 and not phone.rn()["igWaiting"]
+    phone.goto(phone.url.split("#")[0] + "#/")
+    phone.get_by_text("Your reel notes").wait_for()
+    assert phone.locator("#igwait").count() == 0
 
 
 def test_exports_and_leaving_the_app_stops_work(phone):
