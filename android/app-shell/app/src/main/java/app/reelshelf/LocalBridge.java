@@ -42,6 +42,8 @@ final class LocalBridge {
     private final MainActivity act;
     private final SharedPreferences prefs;
     private final LocalModel model;
+    private final ScreenshotReader shots;
+    private final ExecutorService ocr = Executors.newSingleThreadExecutor();
     private final ExecutorService work = Executors.newSingleThreadExecutor();
     private final ExecutorService net = Executors.newSingleThreadExecutor();
     private volatile boolean downloading;
@@ -50,11 +52,14 @@ final class LocalBridge {
         this.act = act;
         this.prefs = prefs;
         this.model = new LocalModel(act);
+        this.shots = new ScreenshotReader(act, prefs);
     }
 
     /** Called when the app leaves the screen: stop downloads and answers, free the model's memory. */
     void pause() {
         model.stopAll();
+        shots.stop();
+        act.keepScreenOn(false);
     }
 
     /** Adds shared text to the queue the page reads when it opens (used by ShareActivity, which has no page). */
@@ -462,5 +467,137 @@ final class LocalBridge {
     public void signOutInstagram() {
         if (!ok()) return;
         act.runOnUiThread(InstagramActivity::signOut);
+    }
+
+    // ------------------------------------------------------------------ screenshots (text read on the phone)
+
+    /** The folders you picked for screenshots: [{uri, name}]. */
+    @JavascriptInterface
+    public String shotFolders() {
+        if (!ok()) return "[]";
+        return shots.folders().toString();
+    }
+
+    /** Opens Android's folder picker (starts at DCIM/Screenshots). Calls back with {uri, name}. */
+    @JavascriptInterface
+    public void addShotFolder(int id) {
+        if (!ok()) return;
+        act.runOnUiThread(() -> act.pickFolder(uri -> {
+            if (uri == null) {
+                done(id, false, "cancelled");
+                return;
+            }
+            try {
+                done(id, true, shots.addFolder(uri).toString());
+            } catch (Exception e) {
+                done(id, false, "Could not keep access to that folder: " + e.getMessage());
+            }
+        }));
+    }
+
+    @JavascriptInterface
+    public void removeShotFolder(String uri) {
+        if (!ok() || uri == null) return;
+        shots.removeFolder(uri);
+    }
+
+    /** Every picture in the picked folders: [{k, n, f, m, s}] (k is the picture's address, m when it was saved). */
+    @JavascriptInterface
+    public void listShots(int id) {
+        if (!ok()) return;
+        shots.allow();
+        ocr.execute(() -> {
+            try {
+                done(id, true, shots.list().toString());
+            } catch (Exception e) {
+                done(id, false, "Could not list the folder: " + e.getMessage());
+            }
+        });
+    }
+
+    /** Reads the text of a few pictures, one after the other: [{k, ok, W, H, lines}]. Stops when you leave the app. */
+    @JavascriptInterface
+    public void readShots(int id, String keysJson) {
+        if (!ok()) return;
+        shots.allow();
+        ocr.execute(() -> {
+            JSONArray out = new JSONArray();
+            try {
+                JSONArray keys = new JSONArray(keysJson == null ? "[]" : keysJson);
+                for (int i = 0; i < keys.length() && i < 50; i++) {
+                    if (shots.stopped()) break;
+                    out.put(shots.read(keys.getString(i)));
+                }
+                if (shots.stopped() && out.length() == 0) done(id, false, "stopped");
+                else done(id, true, out.toString());
+            } catch (Exception e) {
+                done(id, false, "Could not read the pictures: " + e.getMessage());
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public void stopShots() {
+        if (!ok()) return;
+        shots.stop();
+    }
+
+    /** A small preview of one picture as a data: URL ("" when it cannot be opened). */
+    @JavascriptInterface
+    public String shotThumb(String key, int side) {
+        if (!ok()) return "";
+        return shots.thumb(key, side <= 0 ? 320 : Math.min(side, 800));
+    }
+
+    /** Opens one screenshot in Google Lens (or the share menu), to search the picture yourself. */
+    @JavascriptInterface
+    public void shotToLens(String key) {
+        if (!ok() || !shots.allowed(key)) return;
+        act.runOnUiThread(() -> act.sendToLens(Uri.parse(key)));
+    }
+
+    /** {level, charging} */
+    @JavascriptInterface
+    public String battery() {
+        if (!ok()) return "{}";
+        try {
+            return shots.battery().toString();
+        } catch (JSONException e) {
+            return "{}";
+        }
+    }
+
+    /** Keeps the screen on while a long run is going (only while the app is open). */
+    @JavascriptInterface
+    public void keepAwake(boolean on) {
+        if (!ok()) return;
+        act.keepScreenOn(on);
+    }
+
+    /** What has been read from screenshots so far (its own file, so the library file stays small). */
+    @JavascriptInterface
+    public String loadShots() {
+        if (!ok()) return "";
+        try {
+            File f = new File(act.getFilesDir(), "shots.json");
+            return f.isFile() ? new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8) : "";
+        } catch (IOException e) {
+            return "";
+        }
+    }
+
+    @JavascriptInterface
+    public boolean storeShots(String json) {
+        if (!ok() || json == null) return false;
+        synchronized (this) {
+            File tmp = new File(act.getFilesDir(), "shots.json.tmp");
+            try (OutputStream out = new FileOutputStream(tmp)) {
+                out.write(json.getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            } catch (IOException e) {
+                return false;
+            }
+            return tmp.renameTo(new File(act.getFilesDir(), "shots.json"));
+        }
     }
 }
