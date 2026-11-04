@@ -256,7 +256,38 @@ final class LocalBridge {
         request(id, url, body == null ? "{}" : body);
     }
 
+    /**
+     * YouTube requests as one of YouTube's own apps ("ios", "android" or "web"): the player (title, description, caption
+     * list) or the "Show transcript" panel. When YouTube blocks one app, the page tries the next. No account, no cookies.
+     */
+    @JavascriptInterface
+    public void postYoutube(int id, String url, String body, String client) {
+        if (!ok()) return;
+        if (url == null || !(url.startsWith("https://www.youtube.com/youtubei/v1/player")
+                || url.startsWith("https://www.youtube.com/youtubei/v1/get_transcript"))) {
+            done(id, false, "Not allowed");
+            return;
+        }
+        String[] h = YT_APPS.containsKey(client) ? YT_APPS.get(client) : YT_APPS.get("android");
+        request(id, url, body == null ? "{}" : body, h[0], h[1], h[2]);
+    }
+
+    private static final String WEB_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36";
+
+    /** User agent, X-YouTube-Client-Name, X-YouTube-Client-Version for each YouTube app the page may ask as. */
+    private static final java.util.Map<String, String[]> YT_APPS = new java.util.HashMap<>();
+    static {
+        YT_APPS.put("android", new String[]{"com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip", "3", "20.10.38"});
+        YT_APPS.put("ios", new String[]{"com.google.ios.youtube/20.10.38 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X)", "5", "20.10.38"});
+        YT_APPS.put("web", new String[]{WEB_UA, "1", ""});
+    }
+
     private void request(int id, String url, String body) {
+        String[] a = YT_APPS.get("android");
+        request(id, url, body, body != null ? a[0] : WEB_UA, body != null ? a[1] : null, body != null ? a[2] : null);
+    }
+
+    private void request(int id, String url, String body, String ua, String clientName, String clientVersion) {
         net.execute(() -> {
             HttpURLConnection c = null;
             try {
@@ -265,10 +296,11 @@ final class LocalBridge {
                 c.setReadTimeout(20000);
                 c.setInstanceFollowRedirects(true);
                 boolean yt = url.contains("youtube.com/");
-                c.setRequestProperty("User-Agent", body != null ? "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
-                        : "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36");
+                c.setRequestProperty("User-Agent", ua);
                 c.setRequestProperty("Accept-Language", "en-US,en;q=0.8");
                 if (yt) c.setRequestProperty("Cookie", "CONSENT=YES+cb");  // skips the cookie banner page, no account
+                if (yt && clientName != null) c.setRequestProperty("X-YouTube-Client-Name", clientName);
+                if (yt && clientVersion != null && !clientVersion.isEmpty()) c.setRequestProperty("X-YouTube-Client-Version", clientVersion);
                 if (body != null) {
                     c.setRequestMethod("POST");
                     c.setDoOutput(true);
@@ -282,11 +314,16 @@ final class LocalBridge {
                     done(id, false, (yt ? "YouTube" : "Instagram") + " answered " + code);
                     return;
                 }
+                // only the site that was asked: a redirect to another site (a sign-in or consent page) is not read
+                if (!c.getURL().getHost().equals(new URL(url).getHost())) {
+                    done(id, false, (yt ? "YouTube" : "Instagram") + " sent a sign-in or consent page");
+                    return;
+                }
                 try (InputStream in = c.getInputStream()) {
                     ByteArrayOutputStream b = new ByteArrayOutputStream();
                     byte[] buf = new byte[16384];
                     int n;
-                    while ((n = in.read(buf)) > 0 && b.size() < 3_000_000) b.write(buf, 0, n);
+                    while ((n = in.read(buf)) > 0 && b.size() < 4_000_000) b.write(buf, 0, n);
                     done(id, true, b.toString("UTF-8"));
                 }
             } catch (Exception e) {
