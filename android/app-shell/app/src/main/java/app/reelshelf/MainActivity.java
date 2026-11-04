@@ -9,11 +9,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
@@ -33,13 +35,16 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 
 /**
- * Reel Shelf for Android: a full-screen window onto the Reel Shelf app.
- * The engine runs on this phone inside Termux (http://localhost:8765) or on your PC (its address with the access code).
- * When it is not reachable, a start page offers to start it in Termux, connect to a PC, or set it up.
+ * Reel Shelf for Android. By default everything runs inside this app (assets/local): shared reels are saved on the
+ * phone, and only when you open the app and tap Start are they read and written up by the AI model on the phone.
+ * Nothing runs in the background: leaving the app stops downloads and the model.
+ * The older mode (the Python engine in Termux or on a PC) is still reachable from Settings.
  */
 public class MainActivity extends Activity {
     private static final String DEFAULT_URL = "http://localhost:8765/";
     private static final String START_PAGE = "file:///android_asset/start.html";
+    static final String LOCAL_PAGE = "file:///android_asset/local/index.html";
+    private static final int MODEL_REQUEST = 3;
     private static final int FILE_REQUEST = 1;
     private static final int PERMISSION_REQUEST = 2;
     private static final String TERMUX = "com.termux";
@@ -49,6 +54,8 @@ public class MainActivity extends Activity {
     private volatile String currentUrl = "";
     private ValueCallback<Uri[]> fileCallback;
     private SharedPreferences prefs;
+    private LocalBridge local;
+    private java.util.function.Consumer<Uri> modelCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -67,6 +74,8 @@ public class MainActivity extends Activity {
         CookieManager.getInstance().setAcceptCookie(true);
 
         web.addJavascriptInterface(new Bridge(), "ReelShelf");
+        local = new LocalBridge(this, prefs);
+        web.addJavascriptInterface(local, "RN");
         web.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
@@ -88,7 +97,8 @@ public class MainActivity extends Activity {
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame() && !START_PAGE.equals(request.getUrl().toString())) {
+                String failed = request.getUrl().toString();
+                if (request.isForMainFrame() && !failed.startsWith("file:")) {
                     view.loadUrl(START_PAGE);
                 }
             }
@@ -122,18 +132,65 @@ public class MainActivity extends Activity {
                 toast("Could not save: " + e.getMessage());
             }
         });
+        web.loadUrl("server".equals(prefs.getString("mode", "local")) ? serverUrl() : LOCAL_PAGE);
+    }
+
+    /** The built-in page (not a web site) is showing: only it may use window.RN. */
+    boolean localPageTrusted() {
+        return currentUrl.startsWith("file:///android_asset/local/");
+    }
+
+    /** Switch to the older mode: the Reel Shelf engine in Termux or on a PC. */
+    void openServerMode() {
+        prefs.edit().putString("mode", "server").apply();
         web.loadUrl(serverUrl());
+    }
+
+    void openLocalMode() {
+        prefs.edit().putString("mode", "local").apply();
+        web.loadUrl(LOCAL_PAGE);
+    }
+
+    void pickModelFile(java.util.function.Consumer<Uri> cb) {
+        modelCallback = cb;
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        try {
+            startActivityForResult(i, MODEL_REQUEST);
+        } catch (Exception e) {
+            modelCallback = null;
+            cb.accept(null);
+        }
+    }
+
+    String displayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) return c.getString(0);
+        } catch (Exception ignored) {
+            // fall through
+        }
+        return uri.getLastPathSegment();
+    }
+
+    long sizeOf(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.SIZE}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) return c.getLong(0);
+        } catch (Exception ignored) {
+            // unknown
+        }
+        return -1;
     }
 
     private String serverUrl() {
         return prefs.getString("url", DEFAULT_URL);
     }
 
-    private void toast(String msg) {
+    void toast(String msg) {
         runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
     }
 
-    private void openExternal(Uri u) {
+    void openExternal(Uri u) {
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, u));
         } catch (Exception e) {
@@ -153,7 +210,7 @@ public class MainActivity extends Activity {
     /** Only the built-in start page and the Reel Shelf server may use the bridge, never another site shown in the app. */
     private boolean trustedPage() {
         String u = currentUrl;
-        if (u.startsWith(START_PAGE)) return true;
+        if (u.startsWith(START_PAGE) || u.startsWith("file:///android_asset/local/")) return true;
         Uri page = Uri.parse(u);
         Uri server = Uri.parse(serverUrl());
         return page.getScheme() != null && page.getScheme().startsWith("http") && page.getHost() != null
@@ -172,6 +229,13 @@ public class MainActivity extends Activity {
         public boolean hasTermux() {
             if (!trustedPage()) return false;
             return termuxInstalled();
+        }
+
+        /** Back to the built-in Reel Shelf (no Termux, no PC). */
+        @JavascriptInterface
+        public void localMode() {
+            if (!trustedPage()) return;
+            runOnUiThread(MainActivity.this::openLocalMode);
         }
 
         @JavascriptInterface
@@ -353,7 +417,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void callPage(String js) {
+    void callPage(String js) {
         runOnUiThread(() -> web.evaluateJavascript(js, null));
     }
 
@@ -368,6 +432,12 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == MODEL_REQUEST && modelCallback != null) {
+            java.util.function.Consumer<Uri> cb = modelCallback;
+            modelCallback = null;
+            cb.accept(resultCode == RESULT_OK && data != null ? data.getData() : null);
+            return;
+        }
         if (requestCode == FILE_REQUEST && fileCallback != null) {
             Uri[] picked = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
             ClipData clip = data == null ? null : data.getClipData();
@@ -399,5 +469,19 @@ public class MainActivity extends Activity {
     protected void onPause() {
         web.onPause();
         super.onPause();
+    }
+
+    /** Leaving the app (home button, another app, screen off): stop all work so nothing drains the battery. */
+    @Override
+    protected void onStop() {
+        callPage("window.onAppPause && onAppPause()");
+        if (local != null) local.pause();
+        super.onStop();
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (local != null) local.pause();
+        super.onDestroy();
     }
 }

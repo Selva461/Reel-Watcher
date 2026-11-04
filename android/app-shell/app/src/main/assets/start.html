@@ -40,6 +40,7 @@
 <body>
 <main>
   <div class="brand">Reel Shelf</div>
+  <button class="link" id="backLocal">Back to Reel Shelf on this phone (no Termux needed)</button>
 
   <section id="s-checking" class="card"><p>Looking for Reel Shelf...</p></section>
 
@@ -136,6 +137,7 @@
   const CMD = "pkg install -y git && { git -C ~/Reel-Watcher pull -q --ff-only 2>/dev/null || git clone -b " + BRANCH + " " + REPO +
               " ~/Reel-Watcher; } && bash ~/Reel-Watcher/android/termux-setup.sh";
   const $ = (id) => document.getElementById(id);
+  $("backLocal").addEventListener("click", () => { if (RS && RS.localMode) RS.localMode(); });
   const say = (t) => { $("status").textContent = t || ""; };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const flag = (n) => RS ? RS.getFlag(n) : localStorage.getItem(n) === "1";
