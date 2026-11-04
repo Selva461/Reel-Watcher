@@ -54,6 +54,10 @@ FAKE_RN = r"""
     openInstagram: () => { st.opened.push("instagram-export"); keep(); },
     workUpdate: (title, text, d, t) => { st.work = (st.work || []).concat([["update", title]]); keep(); },
     workEnd: () => { st.work = (st.work || []).concat([["end"]]); keep(); },
+    isNight: () => !!st.night,
+    nightDone: () => { st.nightDone = (st.nightDone || 0) + 1; keep(); },
+    nightRunInfo: () => JSON.stringify(st.nightRun || { on: true, hour: 0, minBattery: 40, exact: true }),
+    setNightRun: (on, hour, bat) => { st.nightRun = { on, hour, minBattery: bat, exact: true }; keep(); },
     instagramWaitingSince: () => st.igWaiting || 0,
     dismissInstagramWaiting: () => { st.igWaiting = 0; keep(); },
     takeInstagramExport: () => { const s = st.igExport ? JSON.stringify(st.igExport) : ""; st.igExport = null; keep(); return s; },
@@ -340,6 +344,33 @@ def test_overnight_run_does_everything_then_ends_the_notification(phone):
     assert any(c[0] == "download" for c in st["calls"]) and any(c[0] == "generate" for c in st["calls"])
     assert db_of(phone)["reels"][0]["status"] == "done" and st["saved"][-1]["name"].startswith("reel-notes-")
     assert st["work"][0][1].startswith("Overnight run") and st["work"][-1] == ["end"]
+
+
+def test_nightly_run_files_the_day_and_skips_reels_already_known(phone):
+    done = {"code": "OLD001", "url": "https://www.instagram.com/reel/OLD001/", "status": "done", "added_at": 1,
+            "notes": {"topic": "Old"}, "notes_by": "meta", "collections": []}
+    posts = {"saved_saved_media": [{"title": "c", "string_map_data": {"Saved on": {"href": "https://www.instagram.com/reel/NEW001/"}}},
+                                   {"title": "c", "string_map_data": {"Saved on": {"href": "https://www.instagram.com/reel/OLD001/"}}}]}
+    phone.open_with({"night": True, "db": json.dumps({"reels": [done], "inbox": []}),
+                     "shared": ["https://www.instagram.com/reel/NEW001/", "https://www.instagram.com/reel/OLD001/"],
+                     "igExport": [{"name": "saved_posts.json", "text": json.dumps(posts)}],
+                     "pages": {"NEW001/embed": EMBED}})
+    phone.wait_for_function("window.__rn.nightDone >= 1")
+    st = phone.rn()
+    reels = {r["code"]: r for r in db_of(phone)["reels"]}
+    assert sorted(reels) == ["NEW001", "OLD001"]  # shared and imported twice: still one each
+    assert reels["OLD001"]["notes_by"] == "meta"  # already done: not touched
+    fetched = [c[1] for c in st["calls"] if c[0] == "fetchPage"]
+    assert fetched and all("NEW001" in u for u in fetched)
+    assert not any(c[0] == "download" for c in st["calls"])  # no big model download at night
+    assert st["work"][-1] == ["end"] and db_of(phone)["lastNight"]["log"]
+
+
+def test_nightly_run_settings(phone):
+    phone.open_with(hash_="#/settings")
+    phone.locator("#nrHour").select_option("1")
+    phone.locator("#nrBat").select_option("50")
+    assert phone.rn()["nightRun"] == {"on": True, "hour": 1, "minBattery": 50, "exact": True}
 
 
 def test_waiting_for_instagram_export_reminder(phone):

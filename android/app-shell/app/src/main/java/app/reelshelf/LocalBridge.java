@@ -39,7 +39,7 @@ final class LocalBridge {
     static final String SHARED_KEY = "shared_queue";
     private static final Object SHARED_LOCK = new Object();
 
-    private final MainActivity act;
+    private final Host act;
     private final SharedPreferences prefs;
     private final LocalModel model;
     private final ScreenshotReader shots;
@@ -50,11 +50,11 @@ final class LocalBridge {
     private final ExecutorService verifyWork = Executors.newSingleThreadExecutor();
     private final java.util.concurrent.atomic.AtomicBoolean verifyStop = new java.util.concurrent.atomic.AtomicBoolean(false);
 
-    LocalBridge(MainActivity act, SharedPreferences prefs) {
+    LocalBridge(Host act, SharedPreferences prefs) {
         this.act = act;
         this.prefs = prefs;
-        this.model = new LocalModel(act);
-        this.shots = new ScreenshotReader(act, prefs);
+        this.model = new LocalModel(act.ctx());
+        this.shots = new ScreenshotReader(act.ctx(), prefs);
     }
 
     /** Called when the app leaves the screen: stop downloads and answers, free the model's memory. */
@@ -103,7 +103,7 @@ final class LocalBridge {
     // ------------------------------------------------------------------ library (one JSON file in the app's storage)
 
     private File dbFile() {
-        return new File(act.getFilesDir(), "reels.json");
+        return new File(act.ctx().getFilesDir(), "reels.json");
     }
 
     @JavascriptInterface
@@ -121,7 +121,7 @@ final class LocalBridge {
     public boolean store(String json) {
         if (!ok() || json == null) return false;
         synchronized (this) {
-            File tmp = new File(act.getFilesDir(), "reels.json.tmp");
+            File tmp = new File(act.ctx().getFilesDir(), "reels.json.tmp");
             try (OutputStream out = new FileOutputStream(tmp)) {
                 out.write(json.getBytes(StandardCharsets.UTF_8));
                 out.flush();
@@ -160,7 +160,7 @@ final class LocalBridge {
     public void copy(String text) {
         if (!ok()) return;
         act.runOnUiThread(() -> {
-            ClipboardManager cm = (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);
+            ClipboardManager cm = (ClipboardManager) act.ctx().getSystemService(Context.CLIPBOARD_SERVICE);
             cm.setPrimaryClip(ClipData.newPlainText("Reel Shelf", text == null ? "" : text));
         });
     }
@@ -206,15 +206,15 @@ final class LocalBridge {
                     v.put(MediaStore.Downloads.DISPLAY_NAME, safe);
                     v.put(MediaStore.Downloads.MIME_TYPE, mime == null || mime.isEmpty() ? "text/plain" : mime);
                     v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ReelShelf");
-                    Uri uri = act.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                    Uri uri = act.ctx().getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
                     if (uri == null) throw new IOException("Android did not give a place to save");
-                    try (OutputStream out = act.getContentResolver().openOutputStream(uri)) {
+                    try (OutputStream out = act.ctx().getContentResolver().openOutputStream(uri)) {
                         if (out == null) throw new IOException("Could not write the file");
                         out.write(data);
                     }
                     done(id, true, "Downloads/ReelShelf/" + safe);
                 } else {
-                    File d = new File(act.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "ReelShelf");
+                    File d = new File(act.ctx().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "ReelShelf");
                     //noinspection ResultOfMethodCallIgnored
                     d.mkdirs();
                     File f = new File(d, safe);
@@ -426,7 +426,7 @@ final class LocalBridge {
             }
             File dest = model.file(name);
             File part = new File(dest.getPath() + ".part");
-            try (InputStream in = act.getContentResolver().openInputStream(uri); OutputStream out = new FileOutputStream(part)) {
+            try (InputStream in = act.ctx().getContentResolver().openInputStream(uri); OutputStream out = new FileOutputStream(part)) {
                 if (in == null) throw new IOException("Could not open the file");
                 byte[] buf = new byte[1 << 16];
                 long total = act.sizeOf(uri);
@@ -491,14 +491,14 @@ final class LocalBridge {
     @JavascriptInterface
     public void openInstagram() {
         if (!ok()) return;
-        act.runOnUiThread(() -> act.startActivity(new android.content.Intent(act, InstagramActivity.class)));
+        act.runOnUiThread(() -> act.startActivity(new android.content.Intent(act.ctx(), InstagramActivity.class)));
     }
 
     /** The saved-posts files brought back by the last in-app export download, as [{name, text}] JSON, or "". */
     @JavascriptInterface
     public String takeInstagramExport() {
         if (!ok()) return "";
-        String r = InstagramActivity.takeResult(act);
+        String r = InstagramActivity.takeResult(act.ctx());
         return r == null ? "" : r;
     }
 
@@ -632,7 +632,7 @@ final class LocalBridge {
     public String loadShots() {
         if (!ok()) return "";
         try {
-            File f = new File(act.getFilesDir(), "shots.json");
+            File f = new File(act.ctx().getFilesDir(), "shots.json");
             return f.isFile() ? new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8) : "";
         } catch (IOException e) {
             return "";
@@ -643,14 +643,14 @@ final class LocalBridge {
     public boolean storeShots(String json) {
         if (!ok() || json == null) return false;
         synchronized (this) {
-            File tmp = new File(act.getFilesDir(), "shots.json.tmp");
+            File tmp = new File(act.ctx().getFilesDir(), "shots.json.tmp");
             try (OutputStream out = new FileOutputStream(tmp)) {
                 out.write(json.getBytes(StandardCharsets.UTF_8));
                 out.flush();
             } catch (IOException e) {
                 return false;
             }
-            return tmp.renameTo(new File(act.getFilesDir(), "shots.json"));
+            return tmp.renameTo(new File(act.ctx().getFilesDir(), "shots.json"));
         }
     }
 
@@ -671,8 +671,8 @@ final class LocalBridge {
         verifyStop.set(false);
         verifyWork.execute(() -> {
             try {
-                TitleVerifier v = new TitleVerifier(TitleVerifier.NET, TitleVerifier.REAL_CLOCK, NightlyCheck.tmdbKey(act), verifyStop);
-                JSONObject sum = new VerifyJob(act.getFilesDir(), v, verifyStop).run(0, 0, (d, t, title) -> progress("verify", d, t));
+                TitleVerifier v = new TitleVerifier(TitleVerifier.NET, TitleVerifier.REAL_CLOCK, NightlyCheck.tmdbKey(act.ctx()), verifyStop);
+                JSONObject sum = new VerifyJob(act.ctx().getFilesDir(), v, verifyStop).run(0, 0, (d, t, title) -> progress("verify", d, t));
                 done(id, true, sum.toString());
             } catch (Throwable e) {
                 done(id, false, "The online check failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
@@ -690,7 +690,7 @@ final class LocalBridge {
     @JavascriptInterface
     public String takeVerified() {
         if (!ok()) return "{}";
-        return VerifyJob.take(act.getFilesDir());
+        return VerifyJob.take(act.ctx().getFilesDir());
     }
 
     /** The nightly check (Wi-Fi + charging + phone not in use). Off unless you switch it on. */
@@ -698,7 +698,7 @@ final class LocalBridge {
     public void setNightly(boolean on) {
         if (!ok()) return;
         prefs.edit().putBoolean("nightly_check", on).apply();
-        NightlyCheck.schedule(act, on);
+        NightlyCheck.schedule(act.ctx(), on);
     }
 
     /** {"on", "scheduled", "last": {checked, verified, review, notFound, left, at}} */
@@ -708,7 +708,7 @@ final class LocalBridge {
         JSONObject o = new JSONObject();
         try {
             o.put("on", prefs.getBoolean("nightly_check", false));
-            o.put("scheduled", NightlyCheck.scheduled(act));
+            o.put("scheduled", NightlyCheck.scheduled(act.ctx()));
             o.put("running", VerifyJob.running());
             String last = prefs.getString("nightly_last", "");
             if (!last.isEmpty()) o.put("last", new JSONObject(last));
@@ -725,7 +725,7 @@ final class LocalBridge {
     public void workUpdate(String title, String text, int done, int total) {
         if (!ok()) return;
         act.setWorking(true);
-        WorkService.show(act, title, text, done, total);
+        WorkService.show(act.ctx(), title, text, done, total);
     }
 
     /** No job is running any more: the notification goes and nothing keeps the phone busy. */
@@ -733,6 +733,43 @@ final class LocalBridge {
     public void workEnd() {
         if (!ok()) return;
         act.setWorking(false);
-        WorkService.end(act);
+        WorkService.end(act.ctx());
+    }
+
+    // ------------------------------------------------------------------ the nightly run
+
+    /** True when the page runs for the nightly run (no screen): it then does the overnight run and calls nightDone. */
+    @JavascriptInterface
+    public boolean isNight() {
+        return ok() && act.isNight();
+    }
+
+    @JavascriptInterface
+    public void nightDone() {
+        if (!ok()) return;
+        act.nightDone();
+    }
+
+    /** {on, hour, minBattery, exact}: the nightly run's settings. */
+    @JavascriptInterface
+    public String nightRunInfo() {
+        if (!ok()) return "{}";
+        try {
+            Context c = act.ctx();
+            android.app.AlarmManager am = (android.app.AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
+            return new JSONObject().put("on", NightRun.on(c)).put("hour", NightRun.hour(c)).put("minBattery", NightRun.minBattery(c))
+                    .put("exact", Build.VERSION.SDK_INT < 31 || (am != null && am.canScheduleExactAlarms())).toString();
+        } catch (JSONException e) {
+            return "{}";
+        }
+    }
+
+    @JavascriptInterface
+    public void setNightRun(boolean on, int hour, int minBattery) {
+        if (!ok()) return;
+        Context c = act.ctx();
+        NightRun.prefs(c).edit().putBoolean(NightRun.ON, on).putInt(NightRun.HOUR, Math.max(0, Math.min(23, hour)))
+                .putInt(NightRun.MIN_BATTERY, Math.max(0, Math.min(100, minBattery))).apply();
+        NightRun.schedule(c);
     }
 }

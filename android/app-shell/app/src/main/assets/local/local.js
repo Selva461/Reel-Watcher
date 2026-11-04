@@ -382,16 +382,23 @@ function nightText() {
   return night.detail || "";
 }
 const nap = (ms) => new Promise((r) => setTimeout(r, ms));
-async function overnightRun() {
+async function overnightRun(auto) {
   if (night && !night.finished) return;
-  const b = (() => { try { return JSON.parse(sync("battery") || "{}"); } catch (e) { return {}; } })();
-  if (b.level >= 0 && !b.charging && !confirm("The phone is not charging. Run everything anyway?")) return;
-  night = { step: "AI model", detail: "", stop: false, finished: false, log: [] };
+  if (!auto) {
+    const b = (() => { try { return JSON.parse(sync("battery") || "{}"); } catch (e) { return {}; } })();
+    if (b.level >= 0 && !b.charging && !confirm("The phone is not charging. Run everything anyway?")) return;
+  }
+  night = { step: "AI model", detail: "", stop: false, finished: false, log: [], auto: !!auto };
   const say = (t) => { night.log.push(t); if (location.hash === "#/run") runScreen(); };
   workTick();
   try {
     sync("allowWork");
-    if (!modelInfo().ready) {
+    if (auto) {  // the nightly run: what was shared or imported during the day comes in first (already-known reels are skipped)
+      takeShared();
+      takeInstagramExport();
+    }
+    if (!modelInfo().ready && auto) say("No on-phone AI yet: notes are written without AI (download it in Settings)");
+    else if (!modelInfo().ready) {
       const m = MODELS.find((x) => x.file === settings.modelFile) || MODELS[0];
       onProgress.download = (d, t) => { night.detail = `Downloading the AI model: ${mb(d)} of ${mb(t > 0 ? t : m.size)}`; };
       try { await phone("downloadModel", m.url, m.file); say("AI model downloaded"); }
@@ -413,7 +420,7 @@ async function overnightRun() {
       while (Verify.job && !Verify.job.finished && !night.stop) await nap(2000);
       say("Titles checked online");
     }
-    if (!night.stop) {
+    if (!night.stop && !auto) {
       night.step = "backup"; night.detail = "Saving a JSON copy";
       const where = await phone("saveFile", `reel-notes-${new Date().toISOString().slice(0, 10)}.json`, "application/json", Notes.exportJson(db.reels)).catch(() => "");
       if (where) say("Backup saved to " + where);
@@ -421,9 +428,34 @@ async function overnightRun() {
   } finally {
     if (night.stop) say("Stopped");
     night.finished = true;
+    if (auto) {
+      db.lastNight = { at: Date.now(), log: night.log.slice(0, 12) };
+      saveDb();
+    }
     workTick();
+    if (auto) sync("nightDone");
     if (location.hash === "#/run") runScreen();
   }
+}
+
+/** Settings: the nightly run (on by default): hour and the lowest battery level it starts at. */
+function nightSettingsHtml() {
+  const n = (() => { try { return JSON.parse(sync("nightRunInfo") || "{}"); } catch (e) { return {}; } })();
+  if (n.on === undefined) return "";
+  const hours = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${h === n.hour ? "selected" : ""}>${String(h).padStart(2, "0")}:00</option>`).join("");
+  const levels = [0, 20, 30, 40, 50, 60, 80].map((l) => `<option value="${l}" ${l === n.minBattery ? "selected" : ""}>${l ? `Above ${l}%` : "Any level"}</option>`).join("");
+  return `<div class="stack" id="nightset"><h2>Nightly run</h2>
+    <label class="row" style="gap:10px"><input type="checkbox" id="nrOn" ${n.on ? "checked" : ""}><span>Every night: file what you shared and imported, write notes for new reels, read new screenshots, check titles</span></label>
+    <div class="grid2"><label class="field">Time<select class="input" id="nrHour">${hours}</select></label>
+      <label class="field">Battery<select class="input" id="nrBat">${levels}</select></label></div>
+    <p class="hint">Reels already on your shelf or done are skipped. Below the battery level (and not charging) that night is skipped. A notification shows it, with Stop.</p></div>`;
+}
+function bindNightSettings() {
+  const save = () => {
+    sync("setNightRun", document.getElementById("nrOn").checked, Number(document.getElementById("nrHour").value), Number(document.getElementById("nrBat").value));
+    toast("Nightly run saved");
+  };
+  bind("#nrOn", "change", save); bind("#nrHour", "change", save); bind("#nrBat", "change", save);
 }
 
 // ------------------------------------------------------------------ jobs that keep going after you leave the app
@@ -805,7 +837,8 @@ function runScreen() {
         <span class="hint">Plug in the charger, tap this and leave the phone. In one go: downloads the on-phone AI if needed, writes notes for every reel waiting, reads your screenshots, checks titles online and saves a backup to Downloads/ReelShelf. A notification shows it, with Stop.</span>
         ${night && !night.finished ? `<strong>${esc("Now: " + night.step)}</strong><span class="small muted">${esc(nightText())}</span>`
           : `<button class="btn block" id="night">Run everything overnight</button>`}
-        ${night && night.log.length ? `<span class="small muted">${night.log.map(esc).join("<br>")}</span>` : ""}</div>
+        ${night && night.log.length ? `<span class="small muted">${night.log.map(esc).join("<br>")}</span>` : ""}
+        ${(!night || night.finished) && db.lastNight ? `<span class="small muted">Last nightly run, ${esc(new Date(db.lastNight.at).toLocaleString())}:<br>${db.lastNight.log.map(esc).join("<br>")}</span>` : ""}</div>
       <a class="card" href="#/shots" id="shotslink"><span class="grow"><strong>Screenshots to watchlist</strong><br><span class="small muted">Find the movie, series, anime and manga names in your screenshots and reel captions</span></span>${ICON.chev}</a>
       ${ready ? "" : `<a class="card" href="#/settings"><span class="grow"><strong>Download the on-phone AI</strong><br><span class="small muted">Without it, Start only reads the captions; use Ask Meta AI for the notes</span></span>${ICON.chev}</a>`}`;
     bind("#start", "click", () => startRun());
@@ -870,6 +903,7 @@ function settingsScreen() {
       <label class="field">Your prompt ({link} is replaced by the reel link)<textarea class="input tall" id="prompt">${esc(settings.prompt)}</textarea></label>
       <div class="grid2"><button class="btn" id="savep">Save prompt</button><button class="btn" id="resetp">Reset</button></div>
     </div>
+    ${nightSettingsHtml()}
     ${Verify.settingsHtml()}
     <div class="stack"><h2>Export (${plural(db.reels.length, "reel")})</h2>
       <div class="grid2"><button class="btn" id="exjson">Save JSON</button><button class="btn" id="exmd">Save Markdown</button></div>
@@ -906,6 +940,7 @@ function settingsScreen() {
   });
   bind("#pickm", "change", (e, el) => { settings.modelFile = el.value; saveSettings(); settingsScreen(); });
   bind("#lextra", "change", (e, el) => { settings.localExtra = el.value.slice(0, 2000); saveSettings(); toast("Saved"); });
+  bindNightSettings();
   bind("#metaon", "change", (e, el) => { settings.metaAi = el.checked; saveSettings(); });
   bind("#savep", "click", () => { settings.prompt = document.getElementById("prompt").value.slice(0, 8000) || Notes.META_PROMPT; saveSettings(); toast("Prompt saved"); });
   bind("#resetp", "click", () => { settings.prompt = Notes.META_PROMPT; saveSettings(); settingsScreen(); toast("Prompt reset"); });
@@ -949,3 +984,4 @@ loadDb();
 takeShared();
 Verify.onOpen();
 render();
+if (sync("isNight")) overnightRun(true);  // the nightly run (no screen): see NightRun.java

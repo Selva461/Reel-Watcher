@@ -40,7 +40,7 @@ import java.net.URL;
  * Nothing runs in the background: leaving the app stops downloads and the model.
  * The older mode (the Python engine in Termux or on a PC) is still reachable from Settings.
  */
-public class MainActivity extends Activity {
+public class MainActivity extends Activity implements Host {
     private static final String DEFAULT_URL = "http://localhost:8765/";
     private static final String START_PAGE = "file:///android_asset/start.html";
     static final String LOCAL_PAGE = "file:///android_asset/local/index.html";
@@ -136,15 +136,16 @@ public class MainActivity extends Activity {
         });
         web.loadUrl("server".equals(prefs.getString("mode", "local")) ? serverUrl() : LOCAL_PAGE);
         WorkService.STOP_HOOKS.add(stopHook);
+        NightRun.schedule(this);  // the nightly run (on unless switched off in Settings)
     }
 
     /** The built-in page (not a web site) is showing: only it may use window.RN. */
-    boolean localPageTrusted() {
+    public boolean localPageTrusted() {
         return currentUrl.startsWith("file:///android_asset/local/");
     }
 
     /** Switch to the older mode: the Reel Shelf engine in Termux or on a PC. */
-    void openServerMode() {
+    public void openServerMode() {
         prefs.edit().putString("mode", "server").apply();
         web.loadUrl(serverUrl());
     }
@@ -154,7 +155,7 @@ public class MainActivity extends Activity {
         web.loadUrl(LOCAL_PAGE);
     }
 
-    void pickModelFile(java.util.function.Consumer<Uri> cb) {
+    public void pickModelFile(java.util.function.Consumer<Uri> cb) {
         modelCallback = cb;
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -168,7 +169,7 @@ public class MainActivity extends Activity {
     }
 
     /** Android's folder picker, opening at DCIM/Screenshots. Only the folder you choose can be read. */
-    void pickFolder(java.util.function.Consumer<Uri> cb) {
+    public void pickFolder(java.util.function.Consumer<Uri> cb) {
         folderCallback = cb;
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
@@ -185,7 +186,7 @@ public class MainActivity extends Activity {
     }
 
     /** Hands one picture to Google Lens (inside the Google app), or to the share menu when that app is missing. */
-    void sendToLens(Uri uri) {
+    public void sendToLens(Uri uri) {
         Intent send = new Intent(Intent.ACTION_SEND);
         send.setType("image/*");
         send.putExtra(Intent.EXTRA_STREAM, uri);
@@ -202,14 +203,14 @@ public class MainActivity extends Activity {
         }
     }
 
-    void keepScreenOn(boolean on) {
+    public void keepScreenOn(boolean on) {
         runOnUiThread(() -> {
             if (on) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             else getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         });
     }
 
-    String displayName(Uri uri) {
+    public String displayName(Uri uri) {
         try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
             if (c != null && c.moveToFirst()) return c.getString(0);
         } catch (Exception ignored) {
@@ -218,7 +219,7 @@ public class MainActivity extends Activity {
         return uri.getLastPathSegment();
     }
 
-    long sizeOf(Uri uri) {
+    public long sizeOf(Uri uri) {
         try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.SIZE}, null, null, null)) {
             if (c != null && c.moveToFirst() && !c.isNull(0)) return c.getLong(0);
         } catch (Exception ignored) {
@@ -231,11 +232,11 @@ public class MainActivity extends Activity {
         return prefs.getString("url", DEFAULT_URL);
     }
 
-    void toast(String msg) {
+    public void toast(String msg) {
         runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
     }
 
-    void openExternal(Uri u) {
+    public void openExternal(Uri u) {
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, u));
         } catch (Exception e) {
@@ -462,7 +463,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    void callPage(String js) {
+    public void callPage(String js) {
         runOnUiThread(() -> web.evaluateJavascript(js, null));
     }
 
@@ -552,7 +553,21 @@ public class MainActivity extends Activity {
         if (local != null) local.pause();
     });
 
-    void setWorking(boolean on) {
+    @Override
+    public Context ctx() {
+        return this;
+    }
+
+    @Override
+    public boolean isNight() {
+        return false;
+    }
+
+    @Override
+    public void nightDone() {
+    }
+
+    public void setWorking(boolean on) {
         working = on;
         if (on) askNotificationPermission();
     }

@@ -30,7 +30,22 @@ public class WorkService extends Service {
     static final Set<Runnable> STOP_HOOKS = new CopyOnWriteArraySet<>();
     private static volatile boolean running;
 
+    private static final String ACTION_NIGHT = "app.reelshelf.NIGHT";
     private PowerManager.WakeLock lock;
+    private NightRun.Headless night;
+
+    /** The nightly run (from NightRun's alarm): the page runs without a screen inside this service. */
+    static void startNight(Context ctx) {
+        if (running) return;  // something you started is already running
+        Intent i = new Intent(ctx, WorkService.class).setAction(ACTION_NIGHT)
+                .putExtra("title", "Nightly run").putExtra("text", "Shared reels, new screenshots, titles");
+        try {
+            if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
+            else ctx.startService(i);
+        } catch (Exception ignored) {
+            // Android refused tonight; the alarm is set again for tomorrow
+        }
+    }
 
     /** Starts the service, or updates its notification. */
     static void show(Context ctx, String title, String text, int done, int total) {
@@ -58,6 +73,7 @@ public class WorkService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            if (night != null) night.callPage("window.stopAllWork && stopAllWork()");
             for (Runnable r : STOP_HOOKS) {
                 try {
                     r.run();
@@ -78,6 +94,10 @@ public class WorkService extends Service {
             lock.acquire(MAX_HOLD_MS);
         } else {
             ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).notify(ID, n);
+        }
+        if (intent != null && ACTION_NIGHT.equals(intent.getAction()) && night == null) {
+            night = new NightRun.Headless(this, this::stopSelf);
+            night.start();
         }
         return START_NOT_STICKY;  // if Android kills it, it does not come back by itself
     }
@@ -114,6 +134,8 @@ public class WorkService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        if (night != null) night.stop();
+        night = null;
         if (lock != null && lock.isHeld()) lock.release();
         super.onDestroy();
     }
