@@ -132,3 +132,27 @@ def test_review_unsure_screenshots_and_low_battery_pause(phone):
     phone.click("#go")
     phone.wait_for_selector("text=Battery at 9%")
     assert not [c for c in phone.rn()["calls"] if c[0] == "readShots"]
+
+
+def test_quotes_kept_from_screenshots_and_searchable(phone):
+    phone.open_with()
+    pick = lambda t: phone.evaluate("t => Quotes.pick(t)", t)  # noqa: E731
+    film = "12:30\nInterstellar (2014)\n\"Do not go gentle into that good night.\"\n1.2M likes\nReply"
+    assert pick(film) == ["Do not go gentle into that good night."]
+    wrapped = "Love is the one thing we're capable of perceiving\nthat transcends dimensions of time and space.\nView all 120 comments"
+    assert pick(wrapped) == ["Love is the one thing we're capable of perceiving that transcends dimensions of time and space."]
+    assert pick("Follow\nLiked by someone and 2,301 others\nShutter Island\nwww.example.com is great for you all") == []
+    phone.context.add_init_script(SHOTS_RN)
+    pics = [{"k": "content://x/tree/primary%3AScreens/document/1", "n": "Screenshot_1.jpg", "f": "DCIM/Screenshots", "m": 1001, "s": 1}]
+    text = {pics[0]["k"]: [L("Movie: Interstellar", 300), L("Love is the one thing we're capable of perceiving", 600),
+                           L("that transcends dimensions of time and space.", 650)]}
+    phone.open_with({"folders": [{"uri": "content://x/tree/primary%3AScreens", "name": "DCIM/Screenshots"}], "pics": pics, "text": text}, "#/shots")
+    phone.click("#go")
+    phone.wait_for_selector("text=Done")
+    q = db_of(phone)["quotes"]
+    assert len(q) == 1 and q[0]["from"] == "Interstellar" and q[0]["text"].startswith("Love is the one thing")
+    phone.goto(phone.url.split("#")[0] + "#/quotes")
+    phone.fill("#qq", "dimensions TIME")
+    phone.get_by_text("Interstellar").wait_for()
+    phone.fill("#qq", "banana")
+    phone.get_by_text("No quote has those words.").wait_for()

@@ -304,7 +304,7 @@ public class InstagramActivity extends Activity {
     }
 
     /** Takes the saved-reels files the last export brought in (once), or null. */
-    static String takeResult(Activity a) {
+    static String takeResult(android.content.Context a) {
         File f = new File(a.getFilesDir(), RESULT_FILE);
         if (!f.exists()) return null;
         try (InputStream in = new java.io.FileInputStream(f)) {

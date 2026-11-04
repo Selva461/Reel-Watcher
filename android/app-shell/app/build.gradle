@@ -10,8 +10,8 @@ android {
         applicationId 'app.reelshelf'
         minSdk 26
         targetSdk 34
-        versionCode 4
-        versionName '1.0.0'  // raise both on every change (versionCode +1); CHANGELOG.md gets a matching section
+        versionCode 5
+        versionName '1.1.0'  // raise both on every change (versionCode +1); CHANGELOG.md gets a matching section
     }
     // Release builds are not debuggable. They are signed with your own key when the GitHub secrets
     // ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD are set
