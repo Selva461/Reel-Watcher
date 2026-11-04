@@ -85,7 +85,7 @@ const MODELS = [
     url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
     size: 2.58e9, note: "Free, about 2.6 GB. Google's on-phone model, tuned for summarizing and rewriting; follows the notes format better. Slower to download, uses more battery per reel." },
 ];
-const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en", tmdbKey: "" };
+const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en", tmdbKey: "", metaAi: false };
 let settings = { ...DEFAULTS };
 function loadSettings() { try { settings = { ...DEFAULTS, ...JSON.parse(sync("getSettings") || "{}") }; } catch (e) { settings = { ...DEFAULTS }; } }
 function saveSettings() { sync("setSettings", JSON.stringify(settings)); }
@@ -372,11 +372,66 @@ function stopRun() {
   sync("stopModel");
 }
 
+// ------------------------------------------------------------------ overnight run: everything in one go, while charging
+// 1. the on-phone AI model (downloaded if missing), 2. Start on every reel waiting, 3. screenshots, 4. titles checked
+// online, 5. a JSON backup in Downloads/ReelShelf. One notification with Stop the whole time. Never starts by itself.
+let night = null;
+function nightText() {
+  if (!night) return "";
+  if (night.step === "notes" && run && !run.finished) return `Reel ${Math.min(run.i + 1, run.codes.length)} of ${run.codes.length}`;
+  return night.detail || "";
+}
+const nap = (ms) => new Promise((r) => setTimeout(r, ms));
+async function overnightRun() {
+  if (night && !night.finished) return;
+  const b = (() => { try { return JSON.parse(sync("battery") || "{}"); } catch (e) { return {}; } })();
+  if (b.level >= 0 && !b.charging && !confirm("The phone is not charging. Run everything anyway?")) return;
+  night = { step: "AI model", detail: "", stop: false, finished: false, log: [] };
+  const say = (t) => { night.log.push(t); if (location.hash === "#/run") runScreen(); };
+  workTick();
+  try {
+    sync("allowWork");
+    if (!modelInfo().ready) {
+      const m = MODELS.find((x) => x.file === settings.modelFile) || MODELS[0];
+      onProgress.download = (d, t) => { night.detail = `Downloading the AI model: ${mb(d)} of ${mb(t > 0 ? t : m.size)}`; };
+      try { await phone("downloadModel", m.url, m.file); say("AI model downloaded"); }
+      catch (e) { say("AI model not downloaded (" + e.message + "): notes are written without AI"); }
+    } else say("AI model ready");
+    if (!night.stop) {
+      night.step = "notes";
+      await startRun();
+      say(`Reel notes: ${run ? run.done : 0} written, ${run ? run.failed : 0} failed`);
+    }
+    if (!night.stop && typeof Shots !== "undefined") {
+      night.step = "screenshots"; night.detail = "Reading pictures";
+      await Shots.process();
+      say("Screenshots read");
+    }
+    if (!night.stop && typeof Verify !== "undefined" && Verify.counts(db).waiting) {
+      night.step = "titles"; night.detail = "Checking titles online";
+      Verify.start();
+      while (Verify.job && !Verify.job.finished && !night.stop) await nap(2000);
+      say("Titles checked online");
+    }
+    if (!night.stop) {
+      night.step = "backup"; night.detail = "Saving a JSON copy";
+      const where = await phone("saveFile", `reel-notes-${new Date().toISOString().slice(0, 10)}.json`, "application/json", Notes.exportJson(db.reels)).catch(() => "");
+      if (where) say("Backup saved to " + where);
+    }
+  } finally {
+    if (night.stop) say("Stopped");
+    night.finished = true;
+    workTick();
+    if (location.hash === "#/run") runScreen();
+  }
+}
+
 // ------------------------------------------------------------------ jobs that keep going after you leave the app
 // While a job you started runs (Start, screenshots, online check), the phone shows a notification with its progress and a
 // Stop button, so leaving the app does not stop it. It disappears as soon as no job is running.
 let workOn = false;
 function workNow() {
+  if (night && !night.finished) return [`Overnight run: ${night.step}`, nightText(), 0, 0];
   if (run && !run.finished) return ["Writing reel notes", `${run.i + 1} of ${run.codes.length}`, run.i, run.codes.length];
   const s = typeof Shots !== "undefined" && Shots.job;
   if (s && !s.finished && !s.paused && !s.stop) return ["Reading screenshots", s.total ? `${s.i} of ${s.total}` : "Listing pictures", s.i, s.total];
@@ -392,6 +447,7 @@ function workTick() {
 setInterval(workTick, 2000);
 /** Stop in the notification. */
 window.stopAllWork = () => {
+  if (night) night.stop = true;
   stopRun();
   if (typeof Shots !== "undefined") Shots.stop();
   if (typeof Verify !== "undefined" && Verify.job && !Verify.job.finished) sync("stopVerify");
@@ -413,7 +469,7 @@ window.onAppResume = () => {
 // ------------------------------------------------------------------ screens
 
 const STATUS = {
-  new: ["Not read yet", ""], working: ["Working...", "warn"], ready: ["Ready for Meta AI", "warn"], ready_no_text: ["Needs Meta AI", "warn"],
+  new: ["Not read yet", ""], working: ["Working...", "warn"], ready: ["Caption read", ""], ready_no_text: ["Little text", "warn"],
   failed: ["Could not finish", "warn"], done: ["Notes", "ok"],
 };
 const BY = { meta: "Notes by Meta AI", phone: "Notes by the on-phone AI (from the caption)", you: "Your notes",
@@ -436,7 +492,7 @@ function homeScreen() {
     ${running ? `<a class="card accent" href="#/run"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="grow"><strong>Working: ${run.i + 1} of ${run.codes.length}</strong><br><span>Keeps going if you leave the app</span></span></a>`
       : todo.length ? `<button class="card accent" id="start"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="stack grow" style="gap:2px">
         <strong style="font-size:17px">Start: ${plural(todo.length, "reel")}</strong><span>${ready ? "Reads each caption and writes the notes on this phone" : "Reads each caption. Download the AI model in Settings to write notes too"}</span></span></button>` : ""}
-    ${forMeta().length > 1 && !running ? `<button class="card" id="batch"><span class="grow stack" style="gap:2px"><strong>Ask Meta AI about ${Math.min(BATCH, forMeta().length)} reels at once</strong><span class="small muted">One message instead of ${Math.min(BATCH, forMeta().length)}. Share its answer back and each part is filed.</span></span>${ICON.chev}</button>` : ""}
+    ${settings.metaAi && forMeta().length > 1 && !running ? `<button class="card" id="batch"><span class="grow stack" style="gap:2px"><strong>Ask Meta AI about ${Math.min(BATCH, forMeta().length)} reels at once</strong><span class="small muted">One message instead of ${Math.min(BATCH, forMeta().length)}. Share its answer back and each part is filed.</span></span>${ICON.chev}</button>` : ""}
     ${top.length ? `<div class="chips"><button class="chip" data-tag="" aria-pressed="${!filter.tag}">All</button>${top.map((t) => `<button class="chip" data-tag="${esc(t)}" aria-pressed="${filter.tag === t}">#${esc(t)}</button>`).join("")}</div>` : ""}
     <div class="stack" id="list">${listHtml()}</div>`;
   bind("#q", "input", (e, el) => { filter.q = el.value; document.getElementById("list").innerHTML = listHtml(); });
@@ -521,7 +577,7 @@ function reelScreen(code) {
     ${r.error && !n ? `<div class="card small">${esc(r.error)}</div>` : ""}
     ${n ? notesHtml(n) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">Ask Meta AI (best: it watches the whole reel), or ${ready ? "let the on-phone AI write them from the caption" : "download the on-phone AI in Settings"}.</span></div>`}
     <div class="grid2">
-      ${r.url ? `<button class="btn ${n && r.notes_by !== "auto" ? "" : "primary"}" id="meta">Ask Meta AI</button>` : ""}
+      ${r.url ? `<button class="btn ${!settings.metaAi || (n && r.notes_by !== "auto") ? "" : "primary"}" id="meta">Ask Meta AI</button>` : ""}
       <button class="btn" id="paste">Paste an answer</button>
       ${r.url ? `<button class="btn" id="open">Open in ${Notes.isYoutube(r) ? "YouTube" : "Instagram"}</button>` : ""}
       ${n ? `<button class="btn" id="copy">Copy notes</button>` : ""}
@@ -739,15 +795,21 @@ function inboxScreen() {
 const RUN_STEPS = [["caption", "Reading the caption (and, for YouTube, the spoken words)"], ["ai", "Writing the notes with the on-phone AI"]];
 
 function runScreen() {
-  if (!run) {
+  if (!run || (night && run.finished)) {
     const ready = !!modelInfo().ready;
     const todo = db.reels.filter((r) => needsWork(r, ready));
     $app.innerHTML = `${header("Start", "")}
       <p class="soft" style="margin:0">You can leave the app while it works: a notification shows the progress, with Stop. It ends by itself when done.</p>
       ${todo.length ? `<button class="btn primary block" id="start">Start: ${plural(todo.length, "reel")}</button>` : `<div class="empty">Nothing waiting. Share a reel to Reel Shelf first.</div>`}
+      <div class="card stack"><strong>Overnight run</strong>
+        <span class="hint">Plug in the charger, tap this and leave the phone. In one go: downloads the on-phone AI if needed, writes notes for every reel waiting, reads your screenshots, checks titles online and saves a backup to Downloads/ReelShelf. A notification shows it, with Stop.</span>
+        ${night && !night.finished ? `<strong>${esc("Now: " + night.step)}</strong><span class="small muted">${esc(nightText())}</span>`
+          : `<button class="btn block" id="night">Run everything overnight</button>`}
+        ${night && night.log.length ? `<span class="small muted">${night.log.map(esc).join("<br>")}</span>` : ""}</div>
       <a class="card" href="#/shots" id="shotslink"><span class="grow"><strong>Screenshots to watchlist</strong><br><span class="small muted">Find the movie, series, anime and manga names in your screenshots and reel captions</span></span>${ICON.chev}</a>
       ${ready ? "" : `<a class="card" href="#/settings"><span class="grow"><strong>Download the on-phone AI</strong><br><span class="small muted">Without it, Start only reads the captions; use Ask Meta AI for the notes</span></span>${ICON.chev}</a>`}`;
     bind("#start", "click", () => startRun());
+    bind("#night", "click", () => overnightRun());
     return;
   }
   paintRun(true);
@@ -803,6 +865,8 @@ function settingsScreen() {
       <p class="hint">Reel Shelf reads a Short's title, description and captions from YouTube, with no account. Shorts without captions get notes from the title and description.</p>
     </div>
     <div class="stack"><h2>Meta AI</h2>
+      <label class="row" style="gap:10px"><input type="checkbox" id="metaon" ${settings.metaAi ? "checked" : ""}><span>Suggest Meta AI on the Shelf (off: only when you tap Ask Meta AI on a reel)</span></label>
+      <p class="hint">Meta AI is never opened by itself. Asking copies a prompt with the reel link and opens Meta AI; you send it there, then tap Share on its answer and pick Reel Shelf to file the notes.</p>
       <label class="field">Your prompt ({link} is replaced by the reel link)<textarea class="input tall" id="prompt">${esc(settings.prompt)}</textarea></label>
       <div class="grid2"><button class="btn" id="savep">Save prompt</button><button class="btn" id="resetp">Reset</button></div>
     </div>
@@ -842,6 +906,7 @@ function settingsScreen() {
   });
   bind("#pickm", "change", (e, el) => { settings.modelFile = el.value; saveSettings(); settingsScreen(); });
   bind("#lextra", "change", (e, el) => { settings.localExtra = el.value.slice(0, 2000); saveSettings(); toast("Saved"); });
+  bind("#metaon", "change", (e, el) => { settings.metaAi = el.checked; saveSettings(); });
   bind("#savep", "click", () => { settings.prompt = document.getElementById("prompt").value.slice(0, 8000) || Notes.META_PROMPT; saveSettings(); toast("Prompt saved"); });
   bind("#resetp", "click", () => { settings.prompt = Notes.META_PROMPT; saveSettings(); settingsScreen(); toast("Prompt reset"); });
   const stamp = () => new Date().toISOString().slice(0, 10);

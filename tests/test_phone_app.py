@@ -332,6 +332,16 @@ def test_big_zip64_export_is_read(phone, tmp_path):
     assert [r["code"] for r in db_of(phone)["reels"]] == ["BIG001"]
 
 
+def test_overnight_run_does_everything_then_ends_the_notification(phone):
+    phone.open_with({"shared": ["https://www.instagram.com/reel/NIG001/"], "pages": {"NIG001/embed": EMBED}, "answers": [ANSWER]}, "#/run")
+    phone.get_by_role("button", name="Run everything overnight").click()
+    phone.get_by_text("Backup saved to Downloads/ReelShelf/").wait_for()
+    st = phone.rn()
+    assert any(c[0] == "download" for c in st["calls"]) and any(c[0] == "generate" for c in st["calls"])
+    assert db_of(phone)["reels"][0]["status"] == "done" and st["saved"][-1]["name"].startswith("reel-notes-")
+    assert st["work"][0][1].startswith("Overnight run") and st["work"][-1] == ["end"]
+
+
 def test_waiting_for_instagram_export_reminder(phone):
     import time
     phone.open_with({"igWaiting": int(time.time() * 1000) - 3 * 3600 * 1000})
@@ -438,6 +448,8 @@ def test_ask_meta_ai_about_several_reels_in_one_message(phone):
     codes = ["AAA111", "BBB222", "CCC333"]
     db = {"reels": [{"code": c, "url": f"https://www.instagram.com/reel/{c}/", "status": "new", "added_at": 1} for c in codes], "inbox": []}
     phone.open_with({"db": json.dumps(db)})
+    assert phone.get_by_role("button", name="Ask Meta AI about 3 reels at once").count() == 0  # off unless you switch it on
+    phone.open_with({"db": json.dumps(db), "settings": json.dumps({"metaAi": True})})
     phone.get_by_role("button", name="Ask Meta AI about 3 reels at once").click()
     title, text = phone.rn()["sharedOut"][0]
     assert title == "Ask Meta AI" and all(f"https://www.instagram.com/reel/{c}/" in text for c in codes) and "REEL:" in text
