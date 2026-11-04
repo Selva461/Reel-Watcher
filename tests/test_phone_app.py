@@ -52,6 +52,8 @@ FAKE_RN = r"""
     postJson: (id, url, body) => { st.calls.push(["postJson", url, JSON.parse(body)]); keep(); later(() => {
       st.player ? rnDone(id, true, JSON.stringify(st.player)) : rnDone(id, false, "YouTube answered 403"); }); },
     openInstagram: () => { st.opened.push("instagram-export"); keep(); },
+    workUpdate: (title, text, d, t) => { st.work = (st.work || []).concat([["update", title]]); keep(); },
+    workEnd: () => { st.work = (st.work || []).concat([["end"]]); keep(); },
     instagramWaitingSince: () => st.igWaiting || 0,
     dismissInstagramWaiting: () => { st.igWaiting = 0; keep(); },
     takeInstagramExport: () => { const s = st.igExport ? JSON.stringify(st.igExport) : ""; st.igExport = null; keep(); return s; },
@@ -196,6 +198,8 @@ def test_shared_reel_is_only_saved_then_start_reads_and_writes_notes(phone):
     gen = [c for c in phone.rn()["calls"] if c[0] == "generate"][0]
     assert "Obsidian" in gen[1] and "TOPIC:" in gen[1] and gen[2]["gpu"] is True and gen[2]["maxTokens"] == 800
     assert phone.rn()["stopped"] >= 1  # the model is freed as soon as the work is done
+    work = phone.rn()["work"]  # a notification (with Stop) while it runs, gone as soon as it is done
+    assert work[0] == ["update", "Writing reel notes"] and work[-1] == ["end"]
     phone.goto(phone.url.split("#")[0] + "#/")
     phone.get_by_text("Hardcoded secrets in mobile apps").click()
     phone.get_by_text("Notes by the on-phone AI (from the caption)").wait_for()

@@ -167,10 +167,15 @@ public class InstagramActivity extends Activity {
                 if (!stop) say("The download did not finish (" + e.getMessage() + "). Tap Download again, or tap Chrome.");
             } finally {
                 download = null;
+                WorkService.STOP_HOOKS.remove(stopHook);
+                WorkService.end(this);
             }
         }, "ig-export");
         download = t;
-        say("Downloading your export. Keep this screen open...");
+        // the download keeps going if you leave the app, with a notification that has Stop
+        WorkService.STOP_HOOKS.add(stopHook);
+        WorkService.show(this, "Downloading your Instagram export", "Your saved reels come in when it is done", 0, 0);
+        say("Downloading your export. You can leave the app; the notification shows it.");
         t.start();
     }
 
@@ -278,18 +283,22 @@ public class InstagramActivity extends Activity {
         else super.onBackPressed();
     }
 
-    /** Leaving this screen stops the download: nothing runs in the background. */
-    @Override
-    protected void onStop() {
+    private final Runnable stopHook = () -> {
         stop = true;
         Thread t = download;
         if (t != null) t.interrupt();
+    };
+
+    /** Leaving this screen: a running download keeps going (its notification has Stop); nothing else runs. */
+    @Override
+    protected void onStop() {
         CookieManager.getInstance().flush();
         super.onStop();
     }
 
     @Override
     protected void onDestroy() {
+        if (download != null) stopHook.run();
         if (web != null) web.destroy();
         super.onDestroy();
     }

@@ -135,6 +135,7 @@ public class MainActivity extends Activity {
             }
         });
         web.loadUrl("server".equals(prefs.getString("mode", "local")) ? serverUrl() : LOCAL_PAGE);
+        WorkService.STOP_HOOKS.add(stopHook);
     }
 
     /** The built-in page (not a web site) is showing: only it may use window.RN. */
@@ -517,21 +518,50 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
-        web.onPause();
+        if (!working) web.onPause();  // a running job keeps its page alive
         super.onPause();
     }
 
-    /** Leaving the app (home button, another app, screen off): stop all work so nothing drains the battery. */
+    /**
+     * Leaving the app (home button, another app, screen off). A job you started keeps running with its notification
+     * (Stop is there); with no job running, everything stops so nothing drains the battery.
+     */
     @Override
     protected void onStop() {
-        callPage("window.onAppPause && onAppPause()");
-        if (local != null) local.pause();
+        if (!working) {
+            callPage("window.onAppPause && onAppPause()");
+            if (local != null) local.pause();
+        }
         super.onStop();
     }
 
     @Override
     protected void onDestroy() {
+        WorkService.STOP_HOOKS.remove(stopHook);
         if (local != null) local.pause();
+        WorkService.end(this);
+        working = false;
         super.onDestroy();
+    }
+
+    private volatile boolean working;
+    /** Stop in the notification: the page stops every job, then everything is paused as when leaving the app. */
+    private final Runnable stopHook = () -> runOnUiThread(() -> {
+        working = false;
+        web.evaluateJavascript("window.stopAllWork && stopAllWork()", null);
+        if (local != null) local.pause();
+    });
+
+    void setWorking(boolean on) {
+        working = on;
+        if (on) askNotificationPermission();
+    }
+
+    /** Android 13+: the progress notification needs permission (asked once, when the first job starts). */
+    private void askNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33 || prefs.getBoolean("asked_notify", false)) return;
+        if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED) return;
+        prefs.edit().putBoolean("asked_notify", true).apply();
+        runOnUiThread(() -> requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 4));
     }
 }

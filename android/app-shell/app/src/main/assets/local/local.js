@@ -1,7 +1,7 @@
 /* Reel Shelf, built into the Android app: no Termux, no PC, nothing else to install.
    Sharing a reel only saves it. Work happens only while this screen is open and you tap Start:
    the caption is read from the reel's public page, then the AI model on the phone writes the notes.
-   Or tap Ask Meta AI and share its answer back. Leaving the app stops everything (onAppPause). */
+   Or tap Ask Meta AI and share its answer back. A job you start can keep going after you leave the app (WorkService notification with Stop). */
 "use strict";
 
 const $app = document.getElementById("app");
@@ -316,6 +316,7 @@ async function startRun(codes) {
   const list = (codes || db.reels.filter((r) => needsWork(r, ready)).map((r) => r.code)).filter((c) => reel(c));
   run = { codes: list, i: 0, step: "", stop: false, done: 0, failed: 0, current: "", finished: false, log: [], ready };
   sync("allowWork");
+  workTick();  // the notification appears now, while the app is on screen
   location.hash = "#/run";
   render();
   for (; run.i < run.codes.length && !run.stop; run.i++) {
@@ -359,6 +360,7 @@ async function startRun(codes) {
   }
   run.finished = true;
   run.step = "";
+  workTick();
   sync("stopModel");  // free the model's memory as soon as the work is done
   saveDb();
   paintRun();
@@ -369,6 +371,33 @@ function stopRun() {
   run.stop = true;
   sync("stopModel");
 }
+
+// ------------------------------------------------------------------ jobs that keep going after you leave the app
+// While a job you started runs (Start, screenshots, online check), the phone shows a notification with its progress and a
+// Stop button, so leaving the app does not stop it. It disappears as soon as no job is running.
+let workOn = false;
+function workNow() {
+  if (run && !run.finished) return ["Writing reel notes", `${run.i + 1} of ${run.codes.length}`, run.i, run.codes.length];
+  const s = typeof Shots !== "undefined" && Shots.job;
+  if (s && !s.finished && !s.paused && !s.stop) return ["Reading screenshots", s.total ? `${s.i} of ${s.total}` : "Listing pictures", s.i, s.total];
+  const v = typeof Verify !== "undefined" && Verify.job;
+  if (v && !v.finished) return ["Checking titles online", `${v.done} of ${v.total}`, v.done, v.total];
+  return null;
+}
+function workTick() {
+  const w = workNow();
+  if (w) { sync("workUpdate", w[0], w[1], w[2] || 0, w[3] || 0); workOn = true; }
+  else if (workOn) { sync("workEnd"); workOn = false; }
+}
+setInterval(workTick, 2000);
+/** Stop in the notification. */
+window.stopAllWork = () => {
+  stopRun();
+  if (typeof Shots !== "undefined") Shots.stop();
+  if (typeof Verify !== "undefined" && Verify.job && !Verify.job.finished) sync("stopVerify");
+  workOn = false;
+  render();
+};
 
 window.onAppPause = () => {  // the app left the screen: nothing keeps running
   if (run && !run.finished) { run.paused = true; stopRun(); }
@@ -404,7 +433,7 @@ function homeScreen() {
     <label class="search">${ICON.search}<input id="q" type="search" placeholder="Search topics, points, tools, tags" value="${esc(filter.q)}" aria-label="Search"></label>
     ${igWaitingCard()}
     ${db.inbox.length ? `<a class="card accent" href="#/inbox"><span class="grow"><strong>${plural(db.inbox.length, "Meta AI answer")} to file</strong><br><span>Pick the reel each one belongs to</span></span></a>` : ""}
-    ${running ? `<a class="card accent" href="#/run"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="grow"><strong>Working: ${run.i + 1} of ${run.codes.length}</strong><br><span>Keep the app open</span></span></a>`
+    ${running ? `<a class="card accent" href="#/run"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="grow"><strong>Working: ${run.i + 1} of ${run.codes.length}</strong><br><span>Keeps going if you leave the app</span></span></a>`
       : todo.length ? `<button class="card accent" id="start"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="stack grow" style="gap:2px">
         <strong style="font-size:17px">Start: ${plural(todo.length, "reel")}</strong><span>${ready ? "Reads each caption and writes the notes on this phone" : "Reads each caption. Download the AI model in Settings to write notes too"}</span></span></button>` : ""}
     ${forMeta().length > 1 && !running ? `<button class="card" id="batch"><span class="grow stack" style="gap:2px"><strong>Ask Meta AI about ${Math.min(BATCH, forMeta().length)} reels at once</strong><span class="small muted">One message instead of ${Math.min(BATCH, forMeta().length)}. Share its answer back and each part is filed.</span></span>${ICON.chev}</button>` : ""}
@@ -714,7 +743,7 @@ function runScreen() {
     const ready = !!modelInfo().ready;
     const todo = db.reels.filter((r) => needsWork(r, ready));
     $app.innerHTML = `${header("Start", "")}
-      <p class="soft" style="margin:0">Reel Shelf works only while this screen is open. Leaving the app stops it; tap Start again to continue.</p>
+      <p class="soft" style="margin:0">You can leave the app while it works: a notification shows the progress, with Stop. It ends by itself when done.</p>
       ${todo.length ? `<button class="btn primary block" id="start">Start: ${plural(todo.length, "reel")}</button>` : `<div class="empty">Nothing waiting. Share a reel to Reel Shelf first.</div>`}
       <a class="card" href="#/shots" id="shotslink"><span class="grow"><strong>Screenshots to watchlist</strong><br><span class="small muted">Find the movie, series, anime and manga names in your screenshots and reel captions</span></span>${ICON.chev}</a>
       ${ready ? "" : `<a class="card" href="#/settings"><span class="grow"><strong>Download the on-phone AI</strong><br><span class="small muted">Without it, Start only reads the captions; use Ask Meta AI for the notes</span></span>${ICON.chev}</a>`}`;
@@ -737,7 +766,7 @@ function paintRun(force) {
       ${run.paused ? `<span class="small">You left the app, so it stopped. Tap Start again to continue.</span>` : ""}</div>
     ${!run.finished && r ? `<div class="card steps"><span class="small muted clamp">${esc(r.caption ? r.caption.split("\n")[0] : r.url)}</span>
       ${RUN_STEPS.filter(([k]) => k !== "ai" || run.ready).map(([k, l], n) => `<div class="step ${n < at ? "done" : n === at ? "now" : "todo"}"><span class="ring">${n < at ? ICON.check : ""}</span><span>${l}</span></div>`).join("")}</div>` : ""}
-    ${!run.finished ? `<p class="hint">${run.step === "ai" ? "The AI on your phone can take a minute per reel. Keep the app open." : "Keep the app open."}</p><button class="btn block" id="stop">Stop</button>`
+    ${!run.finished ? `<p class="hint">${run.step === "ai" ? "The AI on your phone can take a minute per reel. You can leave the app; the notification has Stop." : "You can leave the app; the notification has Stop."}</p><button class="btn block" id="stop">Stop</button>`
       : `<button class="btn primary block" id="again">${run.paused ? "Continue" : "Back to the shelf"}</button>`}
     ${run.log.length ? `<div class="stack"><h2>Results</h2>${run.log.slice(0, 40).map((l) => `<a class="list-item" href="#/r/${enc(l.code)}"><span aria-hidden="true">${l.ok ? "✓" : "–"}</span><span class="grow small">${esc(l.text)}</span>${ICON.chev}</a>`).join("")}</div>` : ""}`;
   bind("#stop", "click", () => { stopRun(); });
@@ -787,7 +816,7 @@ function settingsScreen() {
     <div class="stack"><h2>Instagram</h2>
       <button class="btn block" id="igsignout">Sign Reel Shelf out of Instagram</button>
       <p class="hint">Only signs out the page Reel Shelf opens for your saved-reels export. Your Instagram app stays signed in.</p></div>
-    <p class="hint">Reel Shelf does nothing in the background. Sharing a reel only saves it; leaving the app stops the AI and any download.</p>
+    <p class="hint">Sharing a reel only saves it. Work starts only when you tap Start (or Process); it can keep going after you leave the app, always with a notification and a Stop button, and ends when done.</p>
     <button class="btn block link" id="old">Use the old Reel Shelf on a PC or Termux</button>
     <button class="btn block danger" id="wipe">Delete all reels and notes</button>`;
   Verify.bindSettings(settingsScreen);

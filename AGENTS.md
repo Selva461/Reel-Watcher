@@ -61,7 +61,7 @@ Tests live in `tests/`; they use no network and no models (Ollama, OCR and whisp
 - New input source: add a parser that yields Instagram URLs, write a TSV (`url<TAB>collection`).
 - Add a test for every pure function you change (`dedupe_frames`, `parse_giveaway`, `map_tiles`, parsers).
 - Do not publish or push anything without the owner's approval.
-- Phone app: never add background services, workers or alarms. Work runs only while the app is open; `onStop` stops it.
+- Phone app: nothing starts on its own (no alarms or workers besides the opt-in NightlyCheck). A job the user starts may keep running after they leave the app only through `WorkService` (foreground service, progress notification with Stop, ended as soon as no job runs). With no job, `onStop` stops everything.
   Meta AI is used only by the user's own tap (share sheet), never called by the app. The model download host is huggingface.co only.
   Never automate Instagram (no scripted clicks, scrolling or scraping of a signed-in session): the user taps in InstagramActivity themselves. The app never reads the Instagram cookies except to fetch the export file the user tapped. Fetches: instagram.com, youtube.com (watch page, youtubei/v1/player, timedtext), huggingface.co.
   Library features must work without AI first; AI is an optional extra.
