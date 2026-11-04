@@ -158,7 +158,7 @@ const Notes = (() => {
     if (reel.title) parts.push(`Title: ${reel.title}`);
     if (reel.author) parts.push(`Creator: ${yt ? "" : "@"}${reel.author}`);
     if (reel.caption) parts.push(`${yt ? "Description" : "Caption"}:\n${reel.caption.slice(0, 3000)}`);
-    if (reel.transcript) parts.push(`What is said (transcript):\n${reel.transcript.slice(0, 7000)}`);
+    if (reel.transcript) parts.push(`What is said (transcript):\n${condense(reel.transcript, 7000)}`);
     if (reel.extra) parts.push(`What the reel says (typed by me):\n${reel.extra.slice(0, 6000)}`);
     parts.push(`Write notes in exactly this format:\n\n${FORMAT}`);
     if (extra && extra.trim()) parts.push(`Also: ${extra.trim()}`);
@@ -176,10 +176,59 @@ const Notes = (() => {
   function ytWatchUrl(r) { return `https://www.youtube.com/watch?v=${ytId(r)}`; }
   function ytKey(html) { const m = String(html || "").match(/"INNERTUBE_API_KEY":\s*"([a-zA-Z0-9_-]+)"/); return m ? m[1] : ""; }
   function ytPlayerUrl(key) { return `https://www.youtube.com/youtubei/v1/player${key ? "?key=" + key : ""}`; }
-  function ytPlayerBody(r) { return JSON.stringify({ context: { client: { clientName: "ANDROID", clientVersion: "20.10.38", hl: "en" } }, videoId: ytId(r) }); }
 
-  /** From the player answer: {title, author, description, track, blocked, why} */
-  function ytPick(json) {
+  // YouTube's own apps, tried in this order. When YouTube blocks one (no captions, an empty caption file, a bot check),
+  // the next one is tried. The phone sends the matching app name (LocalBridge.postYoutube); no account, no cookies.
+  const YT_CLIENTS = [
+    { id: "ios", name: "IOS", version: "20.10.38", extra: { deviceMake: "Apple", deviceModel: "iPhone16,2", osName: "iPhone", osVersion: "17.5.1.21F90" } },
+    { id: "android", name: "ANDROID", version: "20.10.38", extra: { androidSdkVersion: 34, osName: "Android", osVersion: "14" } },
+  ];
+  function ytPlayerBody(r, client = YT_CLIENTS[1], lang = "en") {
+    const c = typeof client === "string" ? YT_CLIENTS.find((x) => x.id === client) || YT_CLIENTS[1] : client;
+    return JSON.stringify({ context: { client: { clientName: c.name, clientVersion: c.version, hl: lang || "en", ...(c.extra || {}) } },
+      videoId: ytId(r), contentCheckOk: true, racyCheckOk: true });
+  }
+
+  /** A JSON object written into a page's script after `marker` (balanced braces, strings respected). null if none. */
+  function jsonAfter(html, marker) {
+    const s = String(html || "");
+    const at = s.indexOf(marker);
+    if (at < 0) return null;
+    const start = s.indexOf("{", at + marker.length);
+    if (start < 0 || start - at - marker.length > 20) return null;
+    let depth = 0;
+    let str = false;
+    for (let i = start; i < s.length && i - start < 3e6; i++) {
+      const ch = s[i];
+      if (str) { if (ch === "\\") i++; else if (ch === '"') str = false; continue; }
+      if (ch === '"') str = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) { try { return JSON.parse(s.slice(start, i + 1)); } catch (e) { return null; } }
+    }
+    return null;
+  }
+
+  /** What the watch page itself carries: {key, version, visitor, player, transcriptParams}. */
+  function ytPage(html) {
+    const s = String(html || "");
+    const get = (rx) => { const m = s.match(rx); return m ? m[1] : ""; };
+    let params = get(/"getTranscriptEndpoint":\s*\{\s*"params":\s*"([^"]+)"/);
+    try { params = decodeURIComponent(params); } catch (e) { /* keep as it is */ }
+    return {
+      key: ytKey(s),
+      version: get(/"INNERTUBE_CONTEXT_CLIENT_VERSION":\s*"([\d.]+)"/) || get(/"clientVersion":\s*"(2\.[\d.]+)"/),
+      visitor: get(/"VISITOR_DATA":\s*"([^"]+)"/),
+      player: jsonAfter(s, "ytInitialPlayerResponse = ") || jsonAfter(s, "ytInitialPlayerResponse="),
+      transcriptParams: params,
+    };
+  }
+
+  /**
+   * From a player answer: {title, author, description, track, language, translated, original, why}.
+   * pref "en": an English track, else another language translated to English by YouTube (original kept as a fallback).
+   * pref "orig": the language the video is spoken in.
+   */
+  function ytPick(json, pref = "en") {
     let j = json;
     if (typeof j === "string") { try { j = JSON.parse(j); } catch (e) { return { why: "YouTube sent an answer that could not be read" }; } }
     const out = {};
@@ -188,28 +237,125 @@ const Notes = (() => {
     if (v.author) out.author = String(v.author);
     if (v.shortDescription) out.description = String(v.shortDescription);
     const st = (j && j.playabilityStatus) || {};
-    if (st.status && st.status !== "OK") out.why = `YouTube: ${st.reason || st.status}`;
-    const tracks = (((j || {}).captions || {}).playerCaptionsTracklistRenderer || {}).captionTracks || [];
-    const score = (t) => (/^en/.test(t.languageCode || "") ? 2 : 0) + (t.kind === "asr" ? 0 : 1);
+    if (st.status && st.status !== "OK") {
+      out.why = `YouTube: ${st.reason || st.status}`;
+      if (/LOGIN_REQUIRED/.test(st.status) || /bot|sign in/i.test(st.reason || "")) out.botCheck = true;
+    }
+    const tracks = ((((j || {}).captions || {}).playerCaptionsTracklistRenderer || {}).captionTracks || []).filter((t) => t && t.baseUrl);
+    if (!tracks.length) { if (!out.why) out.why = "This video has no captions"; return out; }
+    const spoken = (tracks.find((t) => t.kind === "asr") || {}).languageCode || "";  // auto captions are in the spoken language
+    const lang = (t) => String(t.languageCode || "");
+    const score = (t) => (pref === "orig" ? (spoken && lang(t) === spoken ? 4 : 0) : (/^en/.test(lang(t)) ? 4 : 0)) +
+      (t.kind === "asr" ? 0 : 1) + (lang(t) === spoken ? 0.5 : 0);
     const best = tracks.slice().sort((a, b) => score(b) - score(a))[0];
-    if (best && best.baseUrl) {
-      if (String(best.baseUrl).includes("&exp=xpe")) out.blocked = true;
-      out.track = String(best.baseUrl).replace("&fmt=srv3", "");
-      out.language = best.languageCode || "";
-    } else if (!out.why) out.why = "This video has no captions";
+    const url = (t) => String(t.baseUrl).replace(/&fmt=[a-z0-9]+/g, "");
+    out.track = url(best);
+    out.language = lang(best);
+    if (String(best.baseUrl).includes("&exp=xpe")) out.blocked = true;  // may come back empty; it is still tried
+    if (pref !== "orig" && !/^en/.test(lang(best)) && best.isTranslatable !== false) {
+      out.original = out.track;
+      out.track += "&tlang=en";
+      out.translated = true;
+    }
     return out;
   }
 
-  /** Caption file (XML) to plain text. */
-  function ytCaptions(xml) {
-    const doc = new DOMParser().parseFromString(String(xml || ""), "text/xml");
-    if (doc.querySelector("parsererror")) return "";
-    const lines = [...doc.querySelectorAll("text, p")].map((e) => {
-      const d = document.createElement("textarea");
-      d.innerHTML = e.textContent || "";  // captions are HTML-escaped twice; a textarea only decodes, never runs anything
-      return d.value.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
-    }).filter(Boolean);
-    return lines.join(" ").replace(/\s+([.,!?])/g, "$1").trim();
+  function unescapeHtml(s) {
+    const d = document.createElement("textarea");
+    d.innerHTML = s || "";  // captions are HTML-escaped twice; a textarea only decodes, never runs anything
+    return d.value.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+  }
+
+  /**
+   * A caption file (XML in any of YouTube's formats, or json3) to plain text. Auto captions often have no full stops:
+   * then a new line starts at each pause (or every 30 words), so the notes can still pick out sentences.
+   */
+  function ytCaptions(file) {
+    const s = String(file || "").trim();
+    let cues = [];
+    if (s.startsWith("{")) {
+      try {
+        for (const e of JSON.parse(s).events || []) {
+          const t = (e.segs || []).map((x) => x.utf8 || "").join("");
+          if (t.trim()) cues.push({ t: (e.tStartMs || 0) / 1000, d: (e.dDurationMs || 0) / 1000, text: t.replace(/\s+/g, " ").trim() });
+        }
+      } catch (e) { return ""; }
+    } else {
+      const doc = new DOMParser().parseFromString(s, "text/xml");
+      if (doc.querySelector("parsererror")) return "";
+      cues = [...doc.querySelectorAll("text, p")].map((e) => {
+        const ms = e.tagName === "p";
+        const t = parseFloat(e.getAttribute(ms ? "t" : "start")) || 0;
+        const d = parseFloat(e.getAttribute(ms ? "d" : "dur")) || 0;
+        return { t: ms ? t / 1000 : t, d: ms ? d / 1000 : d, text: unescapeHtml(e.textContent) };
+      }).filter((c) => c.text);
+    }
+    return joinCues(cues);
+  }
+
+  function joinCues(cues) {
+    const all = cues.map((c) => c.text).join(" ");
+    const wordsN = all.split(/\s+/).filter(Boolean).length;
+    const stops = (all.match(/[.!?](?:\s|$)/g) || []).length;
+    if (!wordsN) return "";
+    if (stops * 40 >= wordsN) return all.replace(/\s+/g, " ").replace(/\s+([.,!?])/g, "$1").trim();
+    const out = [];
+    let line = [];
+    let n = 0;
+    cues.forEach((c, i) => {
+      line.push(c.text);
+      n += c.text.split(/\s+/).length;
+      const next = cues[i + 1];
+      const gap = next ? next.t - (c.t + c.d) : 1;
+      if (gap >= 0.6 || n >= 30 || /[.!?]$/.test(c.text)) { out.push(line.join(" ")); line = []; n = 0; }
+    });
+    if (line.length) out.push(line.join(" "));
+    return out.map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n");
+  }
+
+  /** The web "Show transcript" request (last resort, uses the watch page's own values). */
+  function ytTranscriptBody(page, lang = "en") {
+    return JSON.stringify({ context: { client: { clientName: "WEB", clientVersion: page.version || "2.20251101.01.00", hl: lang || "en",
+      visitorData: page.visitor || undefined } }, params: page.transcriptParams });
+  }
+  function ytTranscriptUrl(key) { return `https://www.youtube.com/youtubei/v1/get_transcript${key ? "?key=" + key : ""}`; }
+  /** The "Show transcript" answer to plain text. */
+  function ytTranscriptText(json) {
+    let j = json;
+    if (typeof j === "string") { try { j = JSON.parse(j); } catch (e) { return ""; } }
+    const cues = [];
+    const walk = (o) => {
+      if (Array.isArray(o)) { o.forEach(walk); return; }
+      if (!o || typeof o !== "object") return;
+      const seg = o.transcriptSegmentRenderer;
+      if (seg) {
+        const text = ((seg.snippet || {}).runs || []).map((x) => x.text || "").join("") || (seg.snippet || {}).simpleText || "";
+        const t = (+seg.startMs || 0) / 1000;
+        if (text.trim()) cues.push({ t, d: Math.max(0, (+seg.endMs || 0) / 1000 - t), text: text.replace(/\s+/g, " ").trim() });
+        return;
+      }
+      Object.values(o).forEach(walk);
+    };
+    walk(j);
+    return joinCues(cues);
+  }
+
+  /** A long transcript cut to fit the phone AI: the most informative sentences, kept in their order. */
+  function condense(text, max) {
+    const s = String(text || "");
+    if (s.length <= max) return s;
+    const sents = sentences(s);
+    const freq = new Map();
+    for (const w of words(s)) freq.set(w, (freq.get(w) || 0) + 1);
+    const ranked = sents.map((x, i) => ({ x, i, v: words(x).reduce((a, w) => a + Math.log(1 + (freq.get(w) || 0)), 0) / Math.sqrt(words(x).length || 1) }));
+    const keep = new Set();
+    let len = 0;
+    for (const r of ranked.slice().sort((a, b) => b.v - a.v)) {
+      if (len + r.x.length + 1 > max) continue;
+      keep.add(r.i);
+      len += r.x.length + 1;
+    }
+    return ranked.filter((r) => keep.has(r.i)).map((r) => r.x).join("\n");
   }
 
   // ---------------------------------------------------------------- the library as a search engine
@@ -585,6 +731,7 @@ const Notes = (() => {
   }
 
   return { FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, material, embedUrl, readPage,
-    ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, search, answerPrompt, words, stem, near, related, keywords, autoNotes, sentences,
+    ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
+    YT_CLIENTS, condense, search, answerPrompt, words, stem, near, related, keywords, autoNotes, sentences,
     exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS };
 })();
