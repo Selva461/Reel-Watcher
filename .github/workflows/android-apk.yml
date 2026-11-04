@@ -1,7 +1,9 @@
 name: Android APK
 
 on:
+  # only the install branch builds the APK, to save GitHub Actions minutes; other branches are tested by tests.yml
   push:
+    branches: [ccr-d0c0b070-bdpssy]
     paths:
       - "android/app-shell/**"
       - ".github/workflows/android-apk.yml"

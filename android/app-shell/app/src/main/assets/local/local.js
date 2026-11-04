@@ -70,7 +70,7 @@ function loadDb() {
   if (t) {
     try {
       const d = JSON.parse(t);
-      db = { reels: d.reels || [], inbox: d.inbox || [], media: d.media || [], mediaTypes: d.mediaTypes || [] };
+      db = { ...d, reels: d.reels || [], inbox: d.inbox || [], media: d.media || [], mediaTypes: d.mediaTypes || [] };
       for (const r of db.reels) if (r.status === "working") r.status = r.notes ? "done" : "new";  // the app was closed mid-way
     } catch (e) { toast("Your library file could not be read"); } }
 }
@@ -356,6 +356,7 @@ function stopRun() {
 
 window.onAppPause = () => {  // the app left the screen: nothing keeps running
   if (run && !run.finished) { run.paused = true; stopRun(); }
+  Shots.pause();
 };
 window.onAppResume = () => {
   const fromIg = takeInstagramExport();
@@ -665,6 +666,7 @@ function runScreen() {
     $app.innerHTML = `${header("Start", "")}
       <p class="soft" style="margin:0">Reel Shelf works only while this screen is open. Leaving the app stops it; tap Start again to continue.</p>
       ${todo.length ? `<button class="btn primary block" id="start">Start: ${plural(todo.length, "reel")}</button>` : `<div class="empty">Nothing waiting. Share a reel to Reel Shelf first.</div>`}
+      <a class="card" href="#/shots" id="shotslink"><span class="grow"><strong>Screenshots to watchlist</strong><br><span class="small muted">Find the movie, series, anime and manga names in your screenshots and reel captions</span></span>${ICON.chev}</a>
       ${ready ? "" : `<a class="card" href="#/settings"><span class="grow"><strong>Download the on-phone AI</strong><br><span class="small muted">Without it, Start only reads the captions; use Ask Meta AI for the notes</span></span>${ICON.chev}</a>`}`;
     bind("#start", "click", () => startRun());
     return;
@@ -780,7 +782,8 @@ const ROUTES = [
   [/^#?\/?$/, homeScreen, "home"], [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "home"], [/^#\/inbox$/, inboxScreen, "home"],
   [/^#\/ask(\?.*)?$/, askScreen, "ask"],
   [/^#\/watch$/, watchScreen, "watch"], [/^#\/m\/(.+)$/, (m) => titleScreen(decodeURIComponent(m[1])), "watch"],
-  [/^#\/add$/, addScreen, "add"], [/^#\/run$/, runScreen, "run"], [/^#\/settings$/, settingsScreen, "settings"],
+  [/^#\/add$/, addScreen, "add"], [/^#\/run$/, runScreen, "run"],
+  [/^#\/shots$/, () => Shots.screen(), "run"], [/^#\/shots\/review$/, () => Shots.review(), "run"], [/^#\/settings$/, settingsScreen, "settings"],
   [/^#\/check$/, () => Verify.screen(), "watch"],
 ];
 

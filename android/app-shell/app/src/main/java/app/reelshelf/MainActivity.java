@@ -45,6 +45,7 @@ public class MainActivity extends Activity {
     private static final String START_PAGE = "file:///android_asset/start.html";
     static final String LOCAL_PAGE = "file:///android_asset/local/index.html";
     private static final int MODEL_REQUEST = 3;
+    private static final int FOLDER_REQUEST = 4;
     private static final int FILE_REQUEST = 1;
     private static final int PERMISSION_REQUEST = 2;
     private static final String TERMUX = "com.termux";
@@ -56,6 +57,7 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     private LocalBridge local;
     private java.util.function.Consumer<Uri> modelCallback;
+    private java.util.function.Consumer<Uri> folderCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -162,6 +164,48 @@ public class MainActivity extends Activity {
             modelCallback = null;
             cb.accept(null);
         }
+    }
+
+    /** Android's folder picker, opening at DCIM/Screenshots. Only the folder you choose can be read. */
+    void pickFolder(java.util.function.Consumer<Uri> cb) {
+        folderCallback = cb;
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        if (Build.VERSION.SDK_INT >= 26) {
+            i.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                    Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADCIM%2FScreenshots"));
+        }
+        try {
+            startActivityForResult(i, FOLDER_REQUEST);
+        } catch (Exception e) {
+            folderCallback = null;
+            cb.accept(null);
+        }
+    }
+
+    /** Hands one picture to Google Lens (inside the Google app), or to the share menu when that app is missing. */
+    void sendToLens(Uri uri) {
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("image/*");
+        send.putExtra(Intent.EXTRA_STREAM, uri);
+        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        Intent lens = new Intent(send).setPackage("com.google.android.googlequicksearchbox");
+        try {
+            startActivity(lens);
+        } catch (Exception e) {
+            try {
+                startActivity(Intent.createChooser(send, "Search with Google Lens"));
+            } catch (Exception e2) {
+                toast("No app can search this picture");
+            }
+        }
+    }
+
+    void keepScreenOn(boolean on) {
+        runOnUiThread(() -> {
+            if (on) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            else getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        });
     }
 
     String displayName(Uri uri) {
@@ -435,6 +479,12 @@ public class MainActivity extends Activity {
         if (requestCode == MODEL_REQUEST && modelCallback != null) {
             java.util.function.Consumer<Uri> cb = modelCallback;
             modelCallback = null;
+            cb.accept(resultCode == RESULT_OK && data != null ? data.getData() : null);
+            return;
+        }
+        if (requestCode == FOLDER_REQUEST && folderCallback != null) {
+            java.util.function.Consumer<Uri> cb = folderCallback;
+            folderCallback = null;
             cb.accept(resultCode == RESULT_OK && data != null ? data.getData() : null);
             return;
         }
