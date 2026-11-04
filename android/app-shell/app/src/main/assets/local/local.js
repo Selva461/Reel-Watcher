@@ -181,6 +181,22 @@ function takeInstagramExport() {
   return true;
 }
 
+/** You opened Instagram's export page but no file came back yet: a reminder to fetch it once Meta has it ready. */
+function igWaitingCard() {
+  const since = Number(sync("instagramWaitingSince") || 0);
+  if (!since) return "";
+  const mins = Math.max(0, Math.round((Date.now() - since) / 60000));
+  const ago = mins < 60 ? plural(mins, "minute") : mins < 2880 ? plural(Math.round(mins / 60), "hour") : plural(Math.round(mins / 1440), "day");
+  const late = mins > 4 * 1440;  // Meta keeps a finished export for 4 days
+  return `<div class="card stack" id="igwait"><strong>Your Instagram export</strong>
+    <span class="hint">You asked Instagram for it ${esc(ago)} ago. ${late ? "Meta deletes a finished export after 4 days, so you may need to ask again." : "It is usually ready within minutes to a few hours, and Meta emails you."} Tap Check, then Download on the finished file.</span>
+    <div class="grid2"><button class="btn" id="igdismiss">Hide</button><button class="btn primary" id="igcheck">Check now</button></div></div>`;
+}
+function bindIgWaiting() {
+  bind("#igcheck", "click", () => sync("openInstagram"));
+  bind("#igdismiss", "click", () => { sync("dismissInstagramWaiting"); const c = document.getElementById("igwait"); if (c) c.remove(); });
+}
+
 // ------------------------------------------------------------------ Start: work only while the app is open
 
 let run = null;  // {codes, i, step, stop, done, failed, current}
@@ -340,6 +356,7 @@ function homeScreen() {
     <div class="brand">Reel Shelf</div>
     <h1>Your reel notes</h1>
     <label class="search">${ICON.search}<input id="q" type="search" placeholder="Search topics, points, tools, tags" value="${esc(filter.q)}" aria-label="Search"></label>
+    ${igWaitingCard()}
     ${db.inbox.length ? `<a class="card accent" href="#/inbox"><span class="grow"><strong>${plural(db.inbox.length, "Meta AI answer")} to file</strong><br><span>Pick the reel each one belongs to</span></span></a>` : ""}
     ${running ? `<a class="card accent" href="#/run"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="grow"><strong>Working: ${run.i + 1} of ${run.codes.length}</strong><br><span>Keep the app open</span></span></a>`
       : todo.length ? `<button class="card accent" id="start"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="stack grow" style="gap:2px">
@@ -351,6 +368,7 @@ function homeScreen() {
   bind("[data-tag]", "click", (e, b) => { filter.tag = b.dataset.tag; homeScreen(); });
   bind("#start", "click", () => startRun());
   bind("#batch", "click", askMetaBatch);
+  bindIgWaiting();
 }
 
 
@@ -528,12 +546,13 @@ function pasteDialog(r) {
 
 function addScreen() {
   $app.innerHTML = `${header("Add reels", "")}
+    ${igWaitingCard()}
     <div class="card stack"><strong>Paste links or answers</strong>
       <p class="hint">Reel links (one or many, any text around them is fine), or Meta AI answers in the notes format. Several answers at once are split up.</p>
       <textarea class="input tall" id="paste" placeholder="https://www.instagram.com/reel/..."></textarea>
       <button class="btn primary block" id="add">Save to shelf</button></div>
     <div class="card stack"><strong>All your saved reels, straight from Instagram</strong>
-      <p class="hint">Opens Instagram's own "Download your information" page inside Reel Shelf. You sign in and tap the buttons yourself, like in a browser, so it is safe for your account. Tick <strong>Saved</strong>, format <strong>JSON</strong>. When Meta says the file is ready (it emails you), open this again and tap Download: your reels and collections come straight in.</p>
+      <p class="hint">Opens Instagram's own "Download your information" page inside Reel Shelf. You sign in and tap the buttons yourself, like in a browser, so it is safe for your account. Tick <strong>Saved</strong>, format <strong>JSON</strong>. When Meta says the file is ready (it emails you), open this again and tap Download: your reels and collections come straight in. If Instagram will not sign you in there, tap <strong>Chrome</strong> at the top and choose the downloaded file below.</p>
       <button class="btn primary block" id="ig">Get my saved reels from Instagram</button>
       ${RN && RN.openInstagram ? "" : `<p class="hint">Only in the Android app.</p>`}</div>
     <div class="card stack"><strong>Or choose an export you already downloaded</strong>
@@ -562,6 +581,7 @@ function addScreen() {
     location.hash = "#/";
   });
   bind("#ig", "click", () => sync("openInstagram"));
+  bindIgWaiting();
   bind("#zip", "change", async (e, el) => {
     const out = document.getElementById("result");
     const files = [...el.files];

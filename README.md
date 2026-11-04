@@ -46,6 +46,9 @@ this format: **TOPIC, POINTS, MEANING, USE IT FOR, TOOLS, TAKEAWAY, TAGS**.
    "Download your information" export (collections become labels). **Get my saved reels from Instagram** opens
    Instagram's own export page inside the app: you sign in and tap the buttons yourself (the app never clicks,
    scrolls or reads your password), and when the file is ready, tapping Download brings the saved reels straight in.
+   Until it comes back, Shelf and Add show a "check now" reminder (Meta keeps a finished export for 4 days). If
+   Instagram will not sign you in there, **Chrome** at the top does the same steps in your browser; then choose the
+   downloaded ZIP in Add (big and ZIP64 exports are fine).
 6. **Settings, Export** saves everything to Downloads/ReelShelf as JSON (to analyze with Claude) or Markdown.
 
 Battery: nothing runs in the background. Sharing only saves; the work and the model download run only while

@@ -558,20 +558,43 @@ const Notes = (() => {
     let eocd = -1;
     for (let i = tail.length - 22; i >= 0; i--) if (u32(tail, i) === 0x06054b50) { eocd = i; break; }
     if (eocd < 0) throw new Error("This is not a ZIP file");
-    const cdSize = u32(tail, eocd + 12) >>> 0;
-    const cdOff = u32(tail, eocd + 16) >>> 0;
-    if (cdOff === 0xffffffff) throw new Error("This ZIP is too big to read here. Unzip it and choose saved_posts.json and saved_collections.json");
+    let cdSize = u32(tail, eocd + 12);
+    let cdOff = u32(tail, eocd + 16);
+    const u64 = (b, o) => u32(b, o) + u32(b, o + 4) * 4294967296;
+    if (cdOff === 0xffffffff || cdSize === 0xffffffff) {  // ZIP64 (big exports): the real numbers sit in the ZIP64 record
+      const loc = eocd - 20;
+      if (loc < 0 || u32(tail, loc) !== 0x07064b50) throw new Error("This ZIP could not be read. Unzip it and choose saved_posts.json and saved_collections.json");
+      const recOff = u64(tail, loc + 8);
+      const rec = await bytes(recOff, recOff + 56);
+      if (u32(rec, 0) !== 0x06064b50) throw new Error("This ZIP could not be read. Unzip it and choose saved_posts.json and saved_collections.json");
+      cdSize = u64(rec, 40);
+      cdOff = u64(rec, 48);
+    }
+    if (cdSize > 200e6) throw new Error("This ZIP's table of contents is too big. Ask Instagram for only Saved");
     const cd = await bytes(cdOff, cdOff + cdSize);
     const out = [];
     let p = 0;
     while (p + 46 <= cd.length && u32(cd, p) === 0x02014b50) {
       const method = u16(cd, p + 10);
-      const csize = u32(cd, p + 20) >>> 0;
+      let csize = u32(cd, p + 20);
+      let usize = u32(cd, p + 24);
       const nlen = u16(cd, p + 28);
       const elen = u16(cd, p + 30);
       const clen = u16(cd, p + 32);
-      const loff = u32(cd, p + 42) >>> 0;
+      let loff = u32(cd, p + 42);
       const name = new TextDecoder().decode(cd.subarray(p + 46, p + 46 + nlen));
+      // ZIP64 extra field: the sizes and offset that did not fit, in this order, only for those set to 0xffffffff
+      for (let x = p + 46 + nlen, xe = x + elen; x + 4 <= xe;) {
+        const id = u16(cd, x);
+        const sz = u16(cd, x + 2);
+        if (id === 1) {
+          let q = x + 4;
+          if (usize === 0xffffffff) { usize = u64(cd, q); q += 8; }
+          if (csize === 0xffffffff) { csize = u64(cd, q); q += 8; }
+          if (loff === 0xffffffff) { loff = u64(cd, q); q += 8; }
+        }
+        x += 4 + sz;
+      }
       p += 46 + nlen + elen + clen;
       if (!/saved[^/]*\.(json|html)$/i.test(name) || csize > 60e6) continue;
       const lh = await bytes(loff, loff + 30);
