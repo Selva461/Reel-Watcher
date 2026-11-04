@@ -46,6 +46,8 @@ uv run reel-watcher study --input urls.tsv --out-root .\out --run --limit 3    #
 | `server.py`, `webapp/` | `reel-watcher app`: JSON API + phone UI (plain JS, no build step) |
 | `demo.py` | Sample library for `--demo` and UI tests |
 | `android/` | Termux setup scripts and the Android APK shell (built by GitHub Actions) |
+| `android/app-shell/app/src/main/assets/local/catalog.js` | Watchlist store: open category list (movie, series, K-drama, anime, manga, manhwa, webtoon...), language codes, dedupe, filters, verify API (`Catalog.add`, `Catalog.verify`, `Catalog.toVerify`). Schema notes in its header |
+| `.../assets/local/watch.js` | Watch tab: filters, title page, add/edit dialog, `Watch.addCandidate` |
 | `android/app-shell/app/src/main/assets/local/` | The built-in phone app (no Termux): `notes.js` (notes format, links, exports, export ZIP), `local.js` (screens), library search without AI (BM25, stems, synonyms, typos, related reels, quick notes) in `notes.js`; `InstagramActivity.java` is Instagram's own export page (no bridge, Meta hosts only, downloads the ZIP to the app cache, keeps only saved*.json/html via `ExportReader.java` (ZipFile, ZIP64 safe) and deletes it), `app.css` is a copy of `webapp/app.css` (a test keeps them equal) |
 | `android/app-shell/.../LocalBridge.java`, `LocalModel.java`, `ShareActivity.java` | `window.RN` bridge (storage file, caption fetch, saving files), on-phone model (LiteRT-LM, download with resume), share target that only saves |
 
