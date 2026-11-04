@@ -8,3 +8,5 @@
 details > summary { cursor: pointer; list-style-position: inside; }
 textarea.input.tall { min-height: 160px; }
 .hint { font-size: 13px; color: var(--muted); line-height: 1.45; margin: 0; }
+mark { background: rgba(242, 181, 68, 0.28); color: inherit; border-radius: 3px; padding: 0 1px; }
+a.chip { display: inline-flex; align-items: center; text-decoration: none; }

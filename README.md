@@ -41,7 +41,11 @@ this format: **TOPIC, POINTS, MEANING, USE IT FOR, TOOLS, TAKEAWAY, TAGS**.
      and no login, and the notes are written from what is actually said.
 4. **Ask** is a search engine over what you learned: ranked results (BM25), typos and similar words allowed,
    the lines that answer you, related reels, and optionally a short answer from the on-phone AI that cites the reels.
-   None of it needs AI except that last button.
+   None of it needs AI except that last button. Type `"exact words"`, `-word` to leave a word out, and `#tag` to keep
+   one tag; a misspelt word gets a "Did you mean" from the words in your own library, and matching words are marked.
+   With nothing typed, Ask shows **Topics you learned** (reels grouped by the words they share, using TF-IDF and cosine
+   similarity) and the tools you saw most. A topic page lists its reels, their takeaways and tools. The search index is
+   kept in memory until a reel changes, so typing stays fast with thousands of reels (`assets/local/library.js`).
 5. **Add** takes many reel links at once, pasted Meta AI answers (several are split up), or Instagram's
    "Download your information" export (collections become labels). **Get my saved reels from Instagram** opens
    Instagram's own export page inside the app: you sign in and tap the buttons yourself (the app never clicks,
