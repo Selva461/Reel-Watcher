@@ -632,13 +632,13 @@ function addScreen() {
       <textarea class="input tall" id="paste" placeholder="https://www.instagram.com/reel/..."></textarea>
       <button class="btn primary block" id="add">Save to shelf</button></div>
     <div class="card stack"><strong>All your saved reels, straight from Instagram</strong>
-      <p class="hint">Opens Instagram's own "Download your information" page inside Reel Shelf. You sign in and tap the buttons yourself, like in a browser, so it is safe for your account. Tick <strong>Saved</strong>, format <strong>JSON</strong>. When Meta says the file is ready (it emails you), open this again and tap Download: your reels and collections come straight in. If Instagram will not sign you in there, tap <strong>Chrome</strong> at the top and choose the downloaded file below.</p>
+      <p class="hint">Opens Instagram's own "Download your information" page inside Reel Shelf. You sign in and tap the buttons yourself, like in a browser, so it is safe for your account. Tick only <strong>Saved</strong>, date range <strong>All time</strong>, format <strong>JSON</strong>, media quality <strong>Low</strong> (Reel Shelf only reads the list of saved posts, so higher quality just makes the file bigger). When Meta says the file is ready (it emails you), open this again and tap Download: your reels and collections come straight in. If the download cannot finish inside the app, Chrome opens and saves it to Downloads: then choose it below.</p>
       <button class="btn primary block" id="ig">Get my saved reels from Instagram</button>
       ${RN && RN.openInstagram ? "" : `<p class="hint">Only in the Android app.</p>`}</div>
     <div class="card stack"><strong>Or choose an export you already downloaded</strong>
       <ol class="hint" style="padding-left:18px">
         <li>Instagram: Settings, Accounts Center, Your information and permissions, Download your information.</li>
-        <li>Some of your information, tick <strong>Saved</strong>, format <strong>JSON</strong>, export to device.</li>
+        <li>Some of your information, tick only <strong>Saved</strong>, All time, format <strong>JSON</strong>, media quality Low, export to device.</li>
         <li>Choose the ZIP here (or saved_posts.json and saved_collections.json). Your collections become labels.</li></ol>
       <label class="btn block" for="zip">Choose the export</label>
       <input id="zip" class="sr" type="file" multiple accept=".zip,.json,.html,application/zip,application/json,text/html">
