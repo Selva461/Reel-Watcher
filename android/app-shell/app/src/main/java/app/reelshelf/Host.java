@@ -25,7 +25,6 @@ interface Host {
 
     void openExternal(Uri u);
 
-    void openServerMode();
 
     void pickModelFile(Consumer<Uri> cb);
 

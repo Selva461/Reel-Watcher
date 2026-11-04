@@ -174,17 +174,7 @@ function importParts(parts) {
   return { found: rows.length, added: addReels(rows, "export") };
 }
 
-/** The export the in-app Instagram page downloaded, if it just came back. */
-function takeInstagramExport() {
-  let parts = [];
-  try { parts = JSON.parse(sync("takeInstagramExport") || "[]"); } catch (e) { parts = []; }
-  if (!Array.isArray(parts) || !parts.length) return false;
-  const r = importParts(parts.filter((p) => p && typeof p.name === "string" && typeof p.text === "string"));
-  toast(`From Instagram: ${plural(r.added, "new reel")} saved (${r.found} in your saved posts). Tap Start when you want notes.`);
-  return true;
-}
-
-/** You opened Instagram's export page but no file came back yet: a reminder to fetch it once Meta has it ready. */
+/** You opened Instagram's export page (in Chrome) and no export was chosen since: a reminder to fetch it once Meta has it ready. */
 function igWaitingCard() {
   const since = Number(sync("instagramWaitingSince") || 0);
   if (!since) return "";
@@ -192,7 +182,7 @@ function igWaitingCard() {
   const ago = mins < 60 ? plural(mins, "minute") : mins < 2880 ? plural(Math.round(mins / 60), "hour") : plural(Math.round(mins / 1440), "day");
   const late = mins > 4 * 1440;  // Meta keeps a finished export for 4 days
   return `<div class="card stack" id="igwait"><strong>Your Instagram export</strong>
-    <span class="hint">You asked Instagram for it ${esc(ago)} ago. ${late ? "Meta deletes a finished export after 4 days, so you may need to ask again." : "It is usually ready within minutes to a few hours, and Meta emails you."} Tap Check, then Download on the finished file.</span>
+    <span class="hint">You asked Instagram for it ${esc(ago)} ago. ${late ? "Meta deletes a finished export after 4 days, so you may need to ask again." : "It is usually ready within minutes to a few hours, and Meta emails you."} Tap Check, download the finished file in Chrome, then choose it under Add.</span>
     <div class="grid2"><button class="btn" id="igdismiss">Hide</button><button class="btn primary" id="igcheck">Check now</button></div></div>`;
 }
 function bindIgWaiting() {
@@ -266,6 +256,36 @@ async function readYoutube(r) {
   r.yt_tried = tried.slice(0, 12);
 }
 
+// Instagram is read logged out (no cookies, no account), one page at a time, a few seconds apart, like a person
+// opening links. When Instagram says "slow down" (429), the run waits 2, then 10, then 30 minutes; after that it stops
+// and the remaining reels wait for the next run. This keeps the phone's internet address from being blocked.
+const { gap: IG_GAP_MS, jitter: IG_JITTER_MS, backoff: IG_BACKOFF_MIN } = window.__igPace || { gap: 4000, jitter: 3000, backoff: [2, 10, 30] };
+let igNextAt = 0, igStrikes = 0;
+async function napUnlessStopped(ms) {
+  const until = Date.now() + ms;
+  while (Date.now() < until && !(run && run.stop) && !(night && night.stop)) await nap(Math.min(1000, until - Date.now()));
+}
+async function igFetch(url) {
+  for (;;) {
+    await napUnlessStopped(igNextAt - Date.now());
+    if ((run && run.stop) || (night && night.stop)) throw new Error("stopped");
+    igNextAt = Date.now() + IG_GAP_MS + Math.random() * IG_JITTER_MS;
+    try {
+      const html = await phone("fetchPage", url);
+      igStrikes = 0;
+      return html;
+    } catch (e) {
+      if (!/\b429\b|wait a few minutes|too many/i.test(e.message)) throw e;
+      if (igStrikes >= IG_BACKOFF_MIN.length) throw new Error("Instagram asked to slow down. The rest waits for the next run.");
+      const mins = IG_BACKOFF_MIN[igStrikes++];
+      if (run) run.wait = `Instagram asked to slow down: waiting ${mins} minutes`;
+      if (typeof paintRun === "function") paintRun();
+      await napUnlessStopped(mins * 60000);
+      if (run) run.wait = "";
+    }
+  }
+}
+
 async function readCaption(r) {
   if (!r.url) return;
   if (Notes.isYoutube(r)) {
@@ -275,19 +295,20 @@ async function readCaption(r) {
     return;
   }
   try {
-    const html = await phone("fetchPage", Notes.embedUrl(r.code));
+    const html = await igFetch(Notes.embedUrl(r.code));
     const got = Notes.readPage(html);
     if (got.caption) r.caption = got.caption.slice(0, 8000);
     if (got.author) r.author = got.author;
   } catch (e) {
     r.error = e.message;
+    if (/slow down|stopped/.test(e.message)) throw e;
   }
-  if (!r.caption) {  // the embed page did not have it: the reel's own page sometimes has it in its description
+  if (!r.caption && !r.error) {  // the embed page did not have it: the reel's own page sometimes has it in its description
     try {
-      const got = Notes.readPage(await phone("fetchPage", r.url));
+      const got = Notes.readPage(await igFetch(r.url));
       if (got.caption) r.caption = got.caption.slice(0, 8000);
       if (got.author && !r.author) r.author = got.author;
-    } catch (e) { /* offline or refused: keep going */ }
+    } catch (e) { if (/slow down|stopped/.test(e.message)) throw e; /* offline or refused: keep going */ }
   }
   r.caption_read = Date.now();
   r.keywords = Notes.keywords(r.caption || "", 10);
@@ -350,11 +371,12 @@ async function startRun(codes) {
       if (r.notes) r.status = "done";
     } catch (e) {
       if (run.stop || e.message === "stopped") { r.status = "new"; break; }
+      if (/slow down/.test(e.message)) { r.status = "new"; run.note = e.message; break; }
       r.status = "failed";
       r.error = e.message;
       run.failed++;
     }
-    run.log.unshift({ code: r.code, ok: r.status === "done", text: r.status === "done" ? (r.notes.topic || "Notes written") : r.error || "Caption read" });
+    run.log.unshift({ code: r.code, ok: r.status === "done", text: r.status === "done" ? (r.notes.topic || "Notes written") : r.error || (r.caption ? "Caption read, too short for notes" : "No caption from Instagram") });
     saveDb();
     paintRun();
   }
@@ -395,10 +417,10 @@ async function overnightRun(auto) {
     sync("allowWork");
     if (auto) {  // the nightly run: what was shared or imported during the day comes in first (already-known reels are skipped)
       takeShared();
-      takeInstagramExport();
     }
-    if (!modelInfo().ready && auto) say("No on-phone AI yet: notes are written without AI (download it in Settings)");
-    else if (!modelInfo().ready) {
+    const mi = modelInfo();
+    if (!mi.ready && auto && !mi.partial) say("No on-phone AI yet: notes are written without AI (download it in Settings)");
+    else if (!mi.ready) {  // at night only a download you already started is continued
       const m = MODELS.find((x) => x.file === settings.modelFile) || MODELS[0];
       onProgress.download = (d, t) => { night.detail = `Downloading the AI model: ${mb(d)} of ${mb(t > 0 ? t : m.size)}`; };
       try { await phone("downloadModel", m.url, m.file); say("AI model downloaded"); }
@@ -462,6 +484,7 @@ function bindNightSettings() {
 // While a job you started runs (Start, screenshots, online check), the phone shows a notification with its progress and a
 // Stop button, so leaving the app does not stop it. It disappears as soon as no job is running.
 let workOn = false;
+let modelDl = null;  // {d, t} while the AI model downloads from Settings
 function workNow() {
   if (night && !night.finished) return [`Overnight run: ${night.step}`, nightText(), 0, 0];
   if (run && !run.finished) return ["Writing reel notes", `${run.i + 1} of ${run.codes.length}`, run.i, run.codes.length];
@@ -469,6 +492,7 @@ function workNow() {
   if (s && !s.finished && !s.paused && !s.stop) return ["Reading screenshots", s.total ? `${s.i} of ${s.total}` : "Listing pictures", s.i, s.total];
   const v = typeof Verify !== "undefined" && Verify.job;
   if (v && !v.finished) return ["Checking titles online", `${v.done} of ${v.total}`, v.done, v.total];
+  if (modelDl) return ["Downloading the AI model", `${mb(modelDl.d)} of ${mb(modelDl.t)}`, Math.round(modelDl.d / 1e6), Math.round(modelDl.t / 1e6)];
   return null;
 }
 function workTick() {
@@ -483,6 +507,7 @@ window.stopAllWork = () => {
   stopRun();
   if (typeof Shots !== "undefined") Shots.stop();
   if (typeof Verify !== "undefined" && Verify.job && !Verify.job.finished) sync("stopVerify");
+  if (modelDl) { sync("stopModel"); modelDl = null; }
   workOn = false;
   render();
 };
@@ -492,9 +517,8 @@ window.onAppPause = () => {  // the app left the screen: nothing keeps running
   Shots.pause();
 };
 window.onAppResume = () => {
-  const fromIg = takeInstagramExport();
   const checked = Verify.onOpen();  // titles checked online overnight
-  if (takeShared() || fromIg || checked) render();
+  if (takeShared() || checked) render();
   else if (location.hash === "#/settings") render();
 };
 
@@ -745,14 +769,17 @@ function pasteDialog(r) {
 function addScreen() {
   $app.innerHTML = `${header("Add reels", "")}
     ${igWaitingCard()}
+    <div class="card stack"><strong>From your screenshots</strong>
+      <p class="hint">Reads the text in your screenshots on the phone: movie, series, anime and manga names go to Watch, lines worth keeping go to Quotes. Only new screenshots are read each time.</p>
+      <a class="btn block" href="#/shots" id="shotsbtn">${ICON.search} Read my screenshots</a></div>
     <div class="card stack"><strong>Paste links or answers</strong>
       <p class="hint">Reel links (one or many, any text around them is fine), or Meta AI answers in the notes format. Several answers at once are split up.</p>
       <textarea class="input tall" id="paste" placeholder="https://www.instagram.com/reel/..."></textarea>
       <button class="btn primary block" id="add">Save to shelf</button></div>
     <div class="card stack"><strong>All your saved reels, straight from Instagram</strong>
-      <p class="hint">Opens Instagram's own "Download your information" page inside Reel Shelf. You sign in and tap the buttons yourself, like in a browser, so it is safe for your account. Tick only <strong>Saved</strong>, date range <strong>All time</strong>, format <strong>JSON</strong>, media quality <strong>Low</strong> (Reel Shelf only reads the list of saved posts, so higher quality just makes the file bigger). When Meta says the file is ready (it emails you), open this again and tap Download: your reels and collections come straight in. If the download cannot finish inside the app, Chrome opens and saves it to Downloads: then choose it below.</p>
+      <p class="hint">Opens Instagram's own "Download your information" page in Chrome. Reel Shelf never sees your Instagram password, and you tap the buttons yourself, so it is safe for your account. Tick only <strong>Saved</strong>, date range <strong>All time</strong>, format <strong>JSON</strong>, media quality <strong>Low</strong> (Reel Shelf only reads the list of saved posts, so higher quality just makes the file bigger). When Meta says the file is ready (it emails you), download it in Chrome and choose it below: your reels and collections come in.</p>
       <button class="btn primary block" id="ig">Get my saved reels from Instagram</button>
-      ${RN && RN.openInstagram ? "" : `<p class="hint">Only in the Android app.</p>`}</div>
+</div>
     <div class="card stack"><strong>Or choose an export you already downloaded</strong>
       <ol class="hint" style="padding-left:18px">
         <li>Instagram: Settings, Accounts Center, Your information and permissions, Download your information.</li>
@@ -795,6 +822,7 @@ function addScreen() {
       } catch (err) { skipped.push(`${f.name}: ${err.message}`); }
     }
     const { found, added } = importParts(parts);
+    if (parts.length) { sync("dismissInstagramWaiting"); const c = document.getElementById("igwait"); if (c) c.remove(); }
     out.innerHTML = `<div class="stack"><strong>${plural(added, "new reel")} saved</strong><span class="hint">${found} found in the export${skipped.length ? `; ${esc(skipped.join("; "))}` : ""}</span>
       ${added ? `<button class="btn primary block" id="go">Start now</button>` : ""}</div>`;
     const go = document.getElementById("go");
@@ -834,6 +862,7 @@ function runScreen() {
     $app.innerHTML = `${header("Start", "")}
       <p class="soft" style="margin:0">You can leave the app while it works: a notification shows the progress, with Stop. It ends by itself when done.</p>
       ${todo.length ? `<button class="btn primary block" id="start">Start: ${plural(todo.length, "reel")}</button>` : `<div class="empty">Nothing waiting. Share a reel to Reel Shelf first.</div>`}
+      <a class="btn block" href="#/shots" id="shotsbtn">${ICON.search} Read my screenshots</a>
       <div class="card stack"><strong>Overnight run</strong>
         <span class="hint">Plug in the charger, tap this and leave the phone. In one go: downloads the on-phone AI if needed, writes notes for every reel waiting, reads your screenshots, checks titles online and saves a backup to Downloads/ReelShelf. A notification shows it, with Stop.</span>
         ${night && !night.finished ? `<strong>${esc("Now: " + night.step)}</strong><span class="small muted">${esc(nightText())}</span>`
@@ -862,7 +891,8 @@ function paintRun(force) {
       ${run.paused ? `<span class="small">You left the app, so it stopped. Tap Start again to continue.</span>` : ""}</div>
     ${!run.finished && r ? `<div class="card steps"><span class="small muted clamp">${esc(r.caption ? r.caption.split("\n")[0] : r.url)}</span>
       ${RUN_STEPS.filter(([k]) => k !== "ai" || run.ready).map(([k, l], n) => `<div class="step ${n < at ? "done" : n === at ? "now" : "todo"}"><span class="ring">${n < at ? ICON.check : ""}</span><span>${l}</span></div>`).join("")}</div>` : ""}
-    ${!run.finished ? `<p class="hint">${run.step === "ai" ? "The AI on your phone can take a minute per reel. You can leave the app; the notification has Stop." : "You can leave the app; the notification has Stop."}</p><button class="btn block" id="stop">Stop</button>`
+    ${run.wait ? `<p class="hint"><strong>${esc(run.wait)}</strong></p>` : ""}${run.finished && run.note ? `<p class="hint"><strong>${esc(run.note)}</strong></p>` : ""}
+    ${!run.finished ? `<p class="hint">${run.step === "ai" ? "The AI on your phone can take a minute per reel. You can leave the app; the notification has Stop." : "You can leave the app; the notification has Stop."}</p><button class="btn block" id="stop">Stop</button><a class="btn block" href="#/shots">Read my screenshots too</a>`
       : `<button class="btn primary block" id="again">${run.paused ? "Continue" : "Back to the shelf"}</button>`}
     ${run.log.length ? `<div class="stack"><h2>Results</h2>${run.log.slice(0, 40).map((l) => `<a class="list-item" href="#/r/${enc(l.code)}"><span aria-hidden="true">${l.ok ? "✓" : "–"}</span><span class="grow small">${esc(l.text)}</span>${ICON.chev}</a>`).join("")}</div>` : ""}`;
   bind("#stop", "click", () => { stopRun(); });
@@ -885,7 +915,7 @@ function settingsScreen() {
         ${info.ready ? `<span class="small muted">${mb(info.bytes)} on this phone${info.backend ? ` · running on ${info.backend.toUpperCase()}` : ""}</span>` : ""}
         ${!info.ready && m ? (dl ? `<button class="btn block" id="pause">Pause download</button>` : `<button class="btn primary block" id="dl">${info.partial ? "Continue download" : "Download model"}</button>`) : ""}
         ${info.ready || info.partial ? `<button class="btn block danger" id="delm">Delete the model</button>` : ""}
-        <p class="hint">The download only runs while Reel Shelf is open. If you leave, it pauses and continues from where it stopped.</p>
+        <p class="hint">The download keeps going if you leave the app, with a notification and a Stop button. If it stops, it continues from where it stopped (also during the nightly run).</p>
       </div>
       ${others.length || MODELS.length > 1 ? `<label class="field">Model to use<select class="input" id="pickm">${[...MODELS.map((x) => [x.file, x.name]), ...others.map((f) => [f, f])].map(([f, l]) => `<option value="${esc(f)}" ${settings.modelFile === f ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>` : ""}
       <button class="btn block" id="own">Use my own model file (.litertlm)</button>
@@ -912,11 +942,7 @@ function settingsScreen() {
       <button class="btn block" id="excsv">Save watchlist (${plural((db.media || []).length, "title")}, CSV)</button>
       <p class="hint">Files go to Downloads/ReelShelf. Send the JSON to Claude to analyze all your reels together.</p>
     </div>
-    <div class="stack"><h2>Instagram</h2>
-      <button class="btn block" id="igsignout">Sign Reel Shelf out of Instagram</button>
-      <p class="hint">Only signs out the page Reel Shelf opens for your saved-reels export. Your Instagram app stays signed in.</p></div>
     <p class="hint">Sharing a reel only saves it. Work starts only when you tap Start (or Process); it can keep going after you leave the app, always with a notification and a Stop button, and ends when done.</p>
-    <button class="btn block link" id="old">Use the old Reel Shelf on a PC or Termux</button>
     <button class="btn block danger" id="wipe">Delete all reels and notes</button>`;
   Verify.bindSettings(settingsScreen);
   bind("[data-set]", "click", (e, b) => { settings[b.dataset.set] = JSON.parse(b.dataset.val); saveSettings(); settingsScreen(); });
@@ -927,12 +953,15 @@ function settingsScreen() {
       const tot = t > 0 ? t : m.size;
       if (bar) bar.style.width = Math.round((d / tot) * 100) + "%";
       if (txt) txt.textContent = `${mb(d)} of ${mb(tot)}`;
+      modelDl = { d, t: tot };
     };
-    phone("downloadModel", m.url, m.file).then(() => { toast("The AI model is ready"); if (location.hash === "#/settings") settingsScreen(); })
-      .catch((err) => { if (err.message !== "paused") toast(err.message); if (location.hash === "#/settings") settingsScreen(); });
+    modelDl = { d: 0, t: m.size };
+    workTick();
+    phone("downloadModel", m.url, m.file).then(() => { modelDl = null; toast("The AI model is ready"); if (location.hash === "#/settings") settingsScreen(); })
+      .catch((err) => { modelDl = null; if (err.message !== "paused") toast(err.message); if (location.hash === "#/settings") settingsScreen(); });
     setTimeout(() => { if (location.hash === "#/settings") settingsScreen(); }, 300);
   });
-  bind("#pause", "click", () => { sync("stopModel"); setTimeout(settingsScreen, 400); });
+  bind("#pause", "click", () => { sync("stopModel"); modelDl = null; workTick(); setTimeout(settingsScreen, 400); });
   bind("#delm", "click", () => { if (confirm("Delete the AI model from this phone? You can download it again later.")) { sync("deleteModel", settings.modelFile); settingsScreen(); } });
   bind("#own", "click", () => {
     onProgress.import = (d, t) => { toast(`Copying the model: ${mb(d)}${t > 0 ? " of " + mb(t) : ""}`); };
@@ -951,8 +980,6 @@ function settingsScreen() {
   bind("#excsv", "click", () => phone("saveFile", `watchlist-${stamp()}.csv`, "text/csv", Catalog.exportCsv(db)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#exshare", "click", () => sync("shareText", Notes.exportMarkdown(db.reels), "Share your reel notes"));
   bind("#excopy", "click", () => { sync("copy", Notes.exportMarkdown(db.reels)); toast("All notes copied"); });
-  bind("#old", "click", () => sync("openServerMode"));
-  bind("#igsignout", "click", () => { if (confirm("Sign Reel Shelf's Instagram page out?")) { sync("signOutInstagram"); toast("Signed out"); } });
   bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes? This cannot be undone.`)) { db.reels = []; db.inbox = []; saveDb(); toast("Deleted (your watchlist is kept)"); settingsScreen(); } });
 }
 

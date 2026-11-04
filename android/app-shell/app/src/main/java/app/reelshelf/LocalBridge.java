@@ -187,11 +187,6 @@ final class LocalBridge {
         act.runOnUiThread(() -> act.openExternal(Uri.parse(url)));
     }
 
-    @JavascriptInterface
-    public void openServerMode() {
-        if (!ok()) return;
-        act.runOnUiThread(act::openServerMode);
-    }
 
     /** Saves a text file to Downloads/ReelShelf. Calls back with the place it was saved. */
     @JavascriptInterface
@@ -487,39 +482,29 @@ final class LocalBridge {
         model.allow();
     }
 
-    /** Opens Instagram's own "Download your information" page inside Reel Shelf (you sign in and tap yourself). */
+    /** Where Instagram's own "Download your information" page is. Opened in Chrome, never inside Reel Shelf. */
+    static final String IG_EXPORT_PAGE = "https://accountscenter.instagram.com/info_and_permissions/dyi/";
+    static final String IG_WAITING_KEY = "ig_export_opened_at";
+
+    /** Opens Instagram's export page in the browser (you sign in there; Reel Shelf never sees it) and starts the reminder. */
     @JavascriptInterface
     public void openInstagram() {
         if (!ok()) return;
-        act.runOnUiThread(() -> act.startActivity(new android.content.Intent(act.ctx(), InstagramActivity.class)));
+        prefs.edit().putLong(IG_WAITING_KEY, System.currentTimeMillis()).apply();
+        act.runOnUiThread(() -> act.openExternal(android.net.Uri.parse(IG_EXPORT_PAGE)));
     }
 
-    /** The saved-posts files brought back by the last in-app export download, as [{name, text}] JSON, or "". */
-    @JavascriptInterface
-    public String takeInstagramExport() {
-        if (!ok()) return "";
-        String r = InstagramActivity.takeResult(act.ctx());
-        return r == null ? "" : r;
-    }
-
-    /** Signs Reel Shelf's own web pages out of Instagram (clears the app's web cookies). */
-    @JavascriptInterface
-    public void signOutInstagram() {
-        if (!ok()) return;
-        act.runOnUiThread(InstagramActivity::signOut);
-    }
-
-    /** When the Instagram export page was last opened without a file coming back (ms), or 0. Shown as a reminder. */
+    /** When the Instagram export page was opened and no export was chosen since (ms), or 0. Shown as a reminder. */
     @JavascriptInterface
     public long instagramWaitingSince() {
         if (!ok()) return 0;
-        return prefs.getLong(InstagramActivity.WAITING_KEY, 0);
+        return prefs.getLong(IG_WAITING_KEY, 0);
     }
 
     @JavascriptInterface
     public void dismissInstagramWaiting() {
         if (!ok()) return;
-        prefs.edit().remove(InstagramActivity.WAITING_KEY).apply();
+        prefs.edit().remove(IG_WAITING_KEY).apply();
     }
 
     // ------------------------------------------------------------------ screenshots (text read on the phone)

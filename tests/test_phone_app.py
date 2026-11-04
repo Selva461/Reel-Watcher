@@ -18,6 +18,7 @@ LOCAL = Path(__file__).resolve().parents[1] / "android" / "app-shell" / "app" / 
 
 # The fake bridge. window.__rn holds its state so tests can set it up and look at it.
 FAKE_RN = r"""
+window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting between Instagram pages in tests
 (() => {
   const st = window.__rn = Object.assign({
     db: "", settings: "{}", shared: [], pages: {}, model: { ready: false, partial: 0, installed: [] },
@@ -34,7 +35,6 @@ FAKE_RN = r"""
     copy: (t) => { st.copied = t; keep(); },
     shareText: (t, title) => { st.sharedOut.push([title, t]); keep(); },
     openUrl: (u) => { st.opened.push(u); keep(); },
-    openServerMode: () => { st.opened.push("server"); keep(); },
     allowWork: () => {},
     stopModel: () => { st.stopped++; keep(); },
     modelInfo: (name) => JSON.stringify({ file: name, ready: st.model.ready, bytes: st.model.ready ? 1.6e9 : 0, partial: st.model.partial,
@@ -42,7 +42,7 @@ FAKE_RN = r"""
     deleteModel: () => { st.model.ready = false; keep(); return true; },
     fetchPage: (id, url) => { st.calls.push(["fetchPage", url]); keep(); later(() => {
       const p = Object.keys(st.pages).find((k) => url.includes(k));
-      p ? rnDone(id, true, st.pages[p]) : rnDone(id, false, "Instagram answered 429"); }); },
+      p ? rnDone(id, true, st.pages[p]) : rnDone(id, false, st.igStatus || "Instagram answered 404"); }); },
     generate: (id, prompt, opts) => { st.calls.push(["generate", prompt, JSON.parse(opts)]); keep(); later(() => {
       const a = st.answers.shift();
       a ? rnDone(id, true, JSON.stringify({ text: a, backend: "gpu", ms: 10 })) : rnDone(id, false, "The AI model failed: out of memory"); }); },
@@ -60,8 +60,6 @@ FAKE_RN = r"""
     setNightRun: (on, hour, bat) => { st.nightRun = { on, hour, minBattery: bat, exact: true }; keep(); },
     instagramWaitingSince: () => st.igWaiting || 0,
     dismissInstagramWaiting: () => { st.igWaiting = 0; keep(); },
-    takeInstagramExport: () => { const s = st.igExport ? JSON.stringify(st.igExport) : ""; st.igExport = null; keep(); return s; },
-    signOutInstagram: () => { st.opened.push("ig-signout"); keep(); },
     // the watchlist's online check: st.verifyAnswers is what the phone "finds"; st.verifyPending waits to be taken
     verifyNow: (id) => { st.calls.push(["verifyNow"]); keep(); later(() => rnProgress("verify", 1, 2)); later(() => {
       st.verifyPending = Object.assign(st.verifyPending || {}, st.verifyAnswers || {}); keep();
@@ -243,6 +241,8 @@ def test_custom_prompt_and_model_settings_are_used(phone):
     phone.get_by_role("button", name="Download model").click()
     phone.get_by_text("The AI model is ready").wait_for()
     dl = [c for c in phone.rn()["calls"] if c[0] == "download"][0]
+    assert ["update", "Downloading the AI model"] in phone.rn()["work"]  # keeps going after leaving the app, with Stop
+    phone.wait_for_function("() => (window.__rn.work || []).slice(-1)[0][0] === 'end'")
     assert dl[1].startswith("https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/") and dl[2].endswith(".litertlm")
     phone.get_by_text("running on GPU").wait_for()
     phone.evaluate("() => { const s = window.__rn; s.shared.push('https://www.instagram.com/reel/CCC333/'); sessionStorage.setItem('rn', JSON.stringify(s)); onAppResume(); }")
@@ -349,16 +349,14 @@ def test_overnight_run_does_everything_then_ends_the_notification(phone):
 def test_nightly_run_files_the_day_and_skips_reels_already_known(phone):
     done = {"code": "OLD001", "url": "https://www.instagram.com/reel/OLD001/", "status": "done", "added_at": 1,
             "notes": {"topic": "Old"}, "notes_by": "meta", "collections": []}
-    posts = {"saved_saved_media": [{"title": "c", "string_map_data": {"Saved on": {"href": "https://www.instagram.com/reel/NEW001/"}}},
-                                   {"title": "c", "string_map_data": {"Saved on": {"href": "https://www.instagram.com/reel/OLD001/"}}}]}
     phone.open_with({"night": True, "db": json.dumps({"reels": [done], "inbox": []}),
-                     "shared": ["https://www.instagram.com/reel/NEW001/", "https://www.instagram.com/reel/OLD001/"],
-                     "igExport": [{"name": "saved_posts.json", "text": json.dumps(posts)}],
+                     "shared": ["https://www.instagram.com/reel/NEW001/", "https://www.instagram.com/reel/OLD001/",
+                                "https://www.instagram.com/reel/NEW001/"],
                      "pages": {"NEW001/embed": EMBED}})
     phone.wait_for_function("window.__rn.nightDone >= 1")
     st = phone.rn()
     reels = {r["code"]: r for r in db_of(phone)["reels"]}
-    assert sorted(reels) == ["NEW001", "OLD001"]  # shared and imported twice: still one each
+    assert sorted(reels) == ["NEW001", "OLD001"]  # shared twice, or already known: still one each
     assert reels["OLD001"]["notes_by"] == "meta"  # already done: not touched
     fetched = [c[1] for c in st["calls"] if c[0] == "fetchPage"]
     assert fetched and all("NEW001" in u for u in fetched)
@@ -537,19 +535,31 @@ def test_ask_your_library_answers_from_your_notes(phone):
     assert phone.locator('.pre a[href="#/r/SEC002"]', has_text="[1]").count() == 1
 
 
-def test_saved_reels_come_back_from_the_in_app_instagram_page(phone):
-    phone.open_with(hash_="#/add")
+def test_instagram_export_opens_in_chrome_and_the_reminder_goes_once_a_zip_is_chosen(phone, tmp_path):
+    import time
+    phone.open_with({"igWaiting": int(time.time() * 1000) - 3600 * 1000}, "#/add")
     phone.get_by_role("button", name="Get my saved reels from Instagram").click()
     assert phone.rn()["opened"] == ["instagram-export"]
+    phone.locator("#igwait").wait_for()
     saved = {"saved_saved_media": [{"title": "creator_a", "string_map_data": {"Saved on": {"href": "https://www.instagram.com/reel/IGX001/", "timestamp": 1}}}]}
-    colls = {"saved_saved_collections": [{"title": "Collection", "string_map_data": {"Name": {"value": "Tech"}}},
-                                         {"title": "creator_a", "string_map_data": {"Name": {"value": "creator_a", "href": "https://www.instagram.com/reel/IGX001/"}}}]}
-    parts = [{"name": "saved_collections.json", "text": json.dumps(colls)}, {"name": "saved_posts.json", "text": json.dumps(saved)}]
-    phone.evaluate("p => { const s = window.__rn; s.igExport = p; sessionStorage.setItem('rn', JSON.stringify(s)); onAppResume(); }", parts)
-    phone.get_by_text("From Instagram: 1 new reel saved").wait_for()
+    f = tmp_path / "saved_posts.json"
+    f.write_text(json.dumps(saved))
+    phone.locator("#zip").set_input_files(str(f))
+    phone.get_by_text("1 new reel saved").wait_for()
+    assert phone.locator("#igwait").count() == 0 and not phone.rn()["igWaiting"]
     r = db_of(phone)["reels"][0]
-    assert r["code"] == "IGX001" and r["added_by"] == "export" and r["collections"] == ["Tech"]
+    assert r["code"] == "IGX001" and r["added_by"] == "export"
     assert not any(c[0] in ("fetchPage", "generate") for c in phone.rn()["calls"])  # importing does no other work
+
+
+def test_instagram_slow_down_waits_then_stops_and_keeps_the_rest(phone):
+    links = [f"https://www.instagram.com/reel/SLW00{i}/" for i in range(3)]
+    phone.open_with({"shared": links, "igStatus": "Instagram answered 429"})
+    phone.get_by_role("button", name="Start: 3 reels").click()
+    phone.get_by_text("Instagram asked to slow down. The rest waits for the next run.").wait_for()
+    reels = db_of(phone)["reels"]
+    assert all(r["status"] == "new" and not r.get("caption_read") for r in reels)  # nothing marked read: retried next time
+    assert len([c for c in phone.rn()["calls"] if c[0] == "fetchPage"]) == 4  # one try, then 3 waits, then it stops
 
 
 # ---------------------------------------------------------------- YouTube: when YouTube blocks one way, the next one is tried
