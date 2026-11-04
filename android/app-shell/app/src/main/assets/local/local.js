@@ -85,7 +85,7 @@ const MODELS = [
     url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
     size: 2.58e9, note: "Free, about 2.6 GB. Google's on-phone model, tuned for summarizing and rewriting; follows the notes format better. Slower to download, uses more battery per reel." },
 ];
-const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "" };
+const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en" };
 let settings = { ...DEFAULTS };
 function loadSettings() { try { settings = { ...DEFAULTS, ...JSON.parse(sync("getSettings") || "{}") }; } catch (e) { settings = { ...DEFAULTS }; } }
 function saveSettings() { sync("setSettings", JSON.stringify(settings)); }
@@ -195,18 +195,59 @@ function needsWork(r, ready) {
   return ready && Notes.material(r) >= 30 && r.status !== "ready_no_text";
 }
 
-/** A YouTube Short or video: title, description and the spoken words (its captions), with no key and no login. */
+/** A YouTube Short or video: title, description and the spoken words (its captions), with no key and no login.
+    YouTube often blocks one way of asking, so several are tried in turn; the first one that gives the words wins. */
 async function readYoutube(r) {
-  const key = Notes.ytKey(await phone("fetchPage", Notes.ytWatchUrl(r)));
-  const got = Notes.ytPick(JSON.parse(await phone("postJson", Notes.ytPlayerUrl(key), Notes.ytPlayerBody(r)) || "{}"));
-  if (got.title) r.title = got.title.slice(0, 300);
-  if (got.author) r.author = got.author;
-  if (got.description) r.caption = got.description.slice(0, 8000);
-  if (got.track && !got.blocked) {
-    const said = Notes.ytCaptions(await phone("fetchPage", got.track));
-    if (said) r.transcript = said.slice(0, 40000);
+  const pref = settings.ytLang === "orig" ? "orig" : "en";
+  const tried = [];
+  const meta = (got) => {
+    if (got.title) r.title = got.title.slice(0, 300);
+    if (got.author) r.author = got.author;
+    if (got.description) r.caption = got.description.slice(0, 8000);
+  };
+  const words = async (got, how) => {  // fetches the caption file; an empty file means YouTube refused it quietly
+    for (const url of [got.track, got.original].filter(Boolean)) {
+      try {
+        const said = Notes.ytCaptions(await phone("fetchPage", url));
+        if (said) { r.transcript = said.slice(0, 40000); r.transcript_lang = got.translated && url === got.track ? "en" : got.language || ""; r.transcript_via = how; return true; }
+        tried.push(`${how}: empty caption file`);
+      } catch (e) { tried.push(`${how}: ${e.message}`); }
+    }
+    return false;
+  };
+  let page = {};
+  try { page = Notes.ytPage(await phone("fetchPage", Notes.ytWatchUrl(r))); } catch (e) { tried.push(`page: ${e.message}`); }
+  r.transcript = "";
+  const own = !!(RN && typeof RN.postYoutube === "function");  // newer app: says which YouTube app is asking
+  for (const c of own ? Notes.YT_CLIENTS : Notes.YT_CLIENTS.filter((x) => x.id === "android")) {
+    if (run && run.stop) return;
+    let got;
+    try {
+      const body = Notes.ytPlayerBody(r, c, pref === "en" ? "en" : "");
+      const ans = own ? await phone("postYoutube", Notes.ytPlayerUrl(page.key), body, c.id) : await phone("postJson", Notes.ytPlayerUrl(page.key), body);
+      got = Notes.ytPick(ans || "{}", pref);
+    } catch (e) { tried.push(`${c.id}: ${e.message}`); continue; }
+    meta(got);
+    if (got.track && await words(got, c.id)) break;
+    if (!got.track) tried.push(`${c.id}: ${got.why || "no captions"}`);
   }
-  if (!r.transcript) r.error = got.why || "YouTube did not give the spoken words for this video.";
+  if (!r.transcript && page.player) {  // the captions listed on the watch page itself
+    const got = Notes.ytPick(page.player, pref);
+    meta(got);
+    if (got.track) await words(got, "page");
+  }
+  if (!r.transcript && page.transcriptParams && own) {  // the web "Show transcript" panel
+    try {
+      const said = Notes.ytTranscriptText(await phone("postYoutube", Notes.ytTranscriptUrl(page.key), Notes.ytTranscriptBody(page, pref === "en" ? "en" : ""), "web"));
+      if (said) { r.transcript = said.slice(0, 40000); r.transcript_via = "transcript panel"; } else tried.push("transcript panel: empty");
+    } catch (e) { tried.push(`transcript panel: ${e.message}`); }
+  }
+  if (r.transcript) { r.error = ""; return; }
+  r.error = (/no captions/i.test(tried.join(" ")) && !/empty|403|429/.test(tried.join(" "))
+    ? "This video has no captions, so the spoken words could not be read. "
+    : "YouTube did not give the spoken words this time (it limits apps that are not its own). Try Start again later. ") +
+    "The notes use the title and description; type what is said below for better notes.";
+  r.yt_tried = tried.slice(0, 12);
 }
 
 async function readCaption(r) {
@@ -435,6 +476,7 @@ function reelScreen(code) {
       <button class="btn" id="paste">Paste an answer</button>
       ${r.url ? `<button class="btn" id="open">Open in ${Notes.isYoutube(r) ? "YouTube" : "Instagram"}</button>` : ""}
       ${n ? `<button class="btn" id="copy">Copy notes</button>` : ""}
+      ${Notes.isYoutube(r) && r.caption_read && !r.transcript ? `<button class="btn" id="ytagain">Read from YouTube again</button>` : ""}
       ${ready && r.url ? `<button class="btn" id="phoneai">${n ? "Redo with phone AI" : "Write with phone AI"}</button>` : ""}
     </div>
     ${r.asked_at && !(n && r.notes_by === "meta") ? `<p class="hint">When Meta AI answers, tap Share on its answer and choose Reel Shelf. It will be filed here.</p>` : ""}
@@ -452,6 +494,7 @@ function reelScreen(code) {
   bind("#paste", "click", () => pasteDialog(r));
   bind("#saveExtra", "click", () => { r.extra = document.getElementById("extra").value.slice(0, 10000); if (!r.notes && r.status === "ready_no_text") r.status = "ready"; saveDb(); toast("Saved"); reelScreen(code); });
   bind("#phoneai", "click", () => startRun([r.code]).then(() => {}));
+  bind("#ytagain", "click", () => { r.caption_read = 0; if (r.notes_by === "auto") { r.notes = null; r.status = "new"; } saveDb(); startRun([r.code]); });
   bind("#del", "click", () => { if (confirm("Remove this reel and its notes from Reel Shelf?")) { db.reels = db.reels.filter((x) => x !== r); saveDb(); location.hash = "#/"; } });
 }
 
@@ -670,6 +713,10 @@ function settingsScreen() {
       <div class="stack"><span class="label">Answer length</span>${seg("maxTokens", [[400, "Short"], [800, "Normal"], [1500, "Long"]])}</div>
       <div class="stack"><span class="label">Style</span>${seg("temperature", [[0.1, "Exact"], [0.3, "Balanced"], [0.7, "Free"]])}</div>
       <label class="field">Extra instructions for the on-phone AI<textarea class="input" id="lextra" placeholder="e.g. keep every number and step">${esc(settings.localExtra)}</textarea></label>
+    </div>
+    <div class="stack"><h2>YouTube</h2>
+      <div class="stack"><span class="label">Spoken words in</span>${seg("ytLang", [["en", "English (translated if needed)"], ["orig", "The video's own language"]])}</div>
+      <p class="hint">Reel Shelf reads a Short's title, description and captions from YouTube, with no account. Shorts without captions get notes from the title and description.</p>
     </div>
     <div class="stack"><h2>Meta AI</h2>
       <label class="field">Your prompt ({link} is replaced by the reel link)<textarea class="input tall" id="prompt">${esc(settings.prompt)}</textarea></label>
