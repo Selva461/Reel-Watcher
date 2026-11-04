@@ -106,7 +106,7 @@ function addReels(found, how) {
 }
 
 /** An answer in the notes format: filed under the reel it names, else the reel you last asked Meta AI about. */
-function fileAnswer(text, by = "meta", target = null) {
+function fileAnswer(text, by = "meta", target = null, standalone = false) {
   const parts = Notes.splitAnswers(text);
   if (!parts.length) return { filed: 0, inbox: 0 };
   let filed = 0;
@@ -117,11 +117,11 @@ function fileAnswer(text, by = "meta", target = null) {
       r = reel(p.links[0].code);
       if (!r) { addReels([p.links[0]], "answer"); r = reel(p.links[0].code); }
     }
-    if (!r && parts.length === 1) {
+    if (!r && parts.length === 1 && !standalone) {
       const asked = db.reels.filter((x) => x.asked_at && !(x.notes && x.notes_by === "meta")).sort((a, b) => b.asked_at - a.asked_at)[0];
       if (asked && Date.now() - asked.asked_at < 3 * 86400e3) r = asked;
     }
-    if (!r && parts.length > 1) {  // a batch of old answers without links: keep each one as its own note
+    if (!r && (parts.length > 1 || standalone)) {  // pasted answers without links: keep each one as its own note
       const code = "note-" + Date.now().toString(36) + "-" + filed;
       db.reels.unshift({ code, url: "", author: "", collections: [], status: "new", added_at: Date.now(), added_by: "paste" });
       r = reel(code);
@@ -425,7 +425,7 @@ function addScreen() {
     const answers = Notes.splitAnswers(t);
     let msg;
     if (answers.length) {
-      const r = fileAnswer(t, "meta");
+      const r = fileAnswer(t, "meta", null, true);
       msg = `${plural(r.filed, "answer")} saved` + (r.inbox ? `, ${r.inbox} to file` : "");
     } else {
       const found = Notes.links(t);

@@ -46,6 +46,8 @@ uv run reel-watcher study --input urls.tsv --out-root .\out --run --limit 3    #
 | `server.py`, `webapp/` | `reel-watcher app`: JSON API + phone UI (plain JS, no build step) |
 | `demo.py` | Sample library for `--demo` and UI tests |
 | `android/` | Termux setup scripts and the Android APK shell (built by GitHub Actions) |
+| `android/app-shell/app/src/main/assets/local/` | The built-in phone app (no Termux): `notes.js` (notes format, links, exports, export ZIP), `local.js` (screens), `app.css` is a copy of `webapp/app.css` (a test keeps them equal) |
+| `android/app-shell/.../LocalBridge.java`, `LocalModel.java`, `ShareActivity.java` | `window.RN` bridge (storage file, caption fetch, saving files), on-phone model (LiteRT-LM, download with resume), share target that only saves |
 
 Tests live in `tests/`; they use no network and no models (Ollama, OCR and whisper are faked). `tests/test_app.py` drives the UI in Chromium at phone size.
 
@@ -56,3 +58,6 @@ Tests live in `tests/`; they use no network and no models (Ollama, OCR and whisp
 - New input source: add a parser that yields Instagram URLs, write a TSV (`url<TAB>collection`).
 - Add a test for every pure function you change (`dedupe_frames`, `parse_giveaway`, `map_tiles`, parsers).
 - Do not publish or push anything without the owner's approval.
+- Phone app: never add background services, workers or alarms. Work runs only while the app is open; `onStop` stops it.
+  Meta AI is used only by the user's own tap (share sheet), never called by the app. The model download host is huggingface.co only.
+- `tests/test_phone_app.py` drives the built-in phone app in Chromium with a fake `window.RN`.

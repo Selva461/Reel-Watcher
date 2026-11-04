@@ -51,7 +51,10 @@ const Notes = (() => {
   const HEAD = new RegExp("^[\\s>#*_]*(" + Object.keys(ALIASES).sort((a, b) => b.length - a.length).map((k) => k.replace(/ /g, "\\s+")).join("|") +
     ")\\s*[*_]*\\s*(?:[:\\uFF1A\\u2013-]\\s*[*_]*\\s*(.*)|$)", "i");
 
-  function clean(s) { return String(s || "").replace(/\*\*|__|`/g, "").replace(/^\s*[*_]+|[*_]+\s*$/g, "").replace(/\s+/g, " ").trim(); }
+  function clean(s) {
+    return String(s || "").replace(/\*\*|`/g, "").replace(/(^|\s)__(\S[^_]*?)__(?=\s|$)/g, "$1$2").replace(/^\s*[*_]+(?=\S)|(?<=\S)[*_]+\s*$/g, "")
+      .replace(/\s+/g, " ").trim();
+  }
   function bulletless(s) { return clean(String(s).replace(/^\s*(?:[-*•▪◦‣]+|\d{1,3}[.)])\s*/, "")); }
   function lines(arr) { return arr.map(bulletless).filter(Boolean); }
   function para(arr) { return clean(arr.join(" ")); }

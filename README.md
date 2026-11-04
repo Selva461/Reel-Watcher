@@ -21,7 +21,30 @@ tricks, any "comment WORD and I'll send you X" giveaway, and a one-line verdict 
 one searchable JSON file per reel. Everything except the media download runs on your machine, and nothing costs money:
 no account, no API key, no credit card.
 
-## Reel Shelf: the app
+## Reel Shelf on Android: reel notes, nothing else to install
+
+The Android app now works on its own: no Termux, no PC, no account. It turns the reels you share into notes in
+this format: **TOPIC, POINTS, MEANING, USE IT FOR, TOOLS, TAKEAWAY, TAGS**.
+
+1. Install `ReelShelf.apk` (see below) and open it once.
+2. In Instagram, tap the share arrow on a reel and pick **Reel Shelf**. It is only saved (you stay in Instagram).
+3. When you want the notes, open Reel Shelf and tap **Start**. Two ways to get them:
+   - **On-phone AI**: Settings, **Download model** (Qwen2.5 1.5B, about 1.6 GB, free, Apache 2.0). Start then reads
+     each reel's public caption and the model writes the notes on the phone (GPU, falls back to CPU).
+     Answer length, style, extra instructions and your own `.litertlm` model file can be set in Settings.
+   - **Ask Meta AI** on a reel: your prompt plus the reel link go to Meta AI in one tap. Share Meta AI's answer
+     back to Reel Shelf and it is filed under that reel. Best quality, because Meta AI watches the whole reel.
+4. **Add** takes many reel links at once, pasted Meta AI answers (several are split up), or Instagram's
+   "Download your information" ZIP (collections become labels).
+5. **Settings, Export** saves everything to Downloads/ReelShelf as JSON (to analyze with Claude) or Markdown.
+
+Battery: nothing runs in the background. Sharing only saves; the work and the model download run only while
+the app is open, and leaving the app stops them (the download continues from where it stopped).
+Limit: without a server the app can read a reel's link and caption, not its speech or on-screen text, so the
+on-phone AI works from the caption plus anything you type under "What the reel says". Meta AI has no such limit.
+The older engine below (Termux or PC) is still reachable from Settings.
+
+## Reel Shelf: the app (PC, or Termux on the phone)
 
 `reel-watcher app` is a phone-friendly app on top of the reel reader. Everything in it is free.
 
