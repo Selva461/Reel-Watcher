@@ -4,14 +4,14 @@ plugins {
 
 android {
     namespace 'app.reelshelf'
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
         applicationId 'app.reelshelf'
         minSdk 26
         targetSdk 34
-        versionCode 2
-        versionName '0.3'
+        versionCode 3
+        versionName '0.4'
     }
     // Release builds are not debuggable. They are signed with your own key when the GitHub secrets
     // ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD are set
@@ -38,4 +38,9 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    // The AI model that runs on the phone (Google LiteRT-LM, free, Apache 2.0). Called from Java.
+    implementation 'com.google.ai.edge.litertlm:litertlm-android:latest.release'
 }
