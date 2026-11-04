@@ -57,6 +57,7 @@ function watchScreen() {
     <div class="brand">Reel Shelf</div>
     <div class="row between"><h1>Watchlist</h1><button class="btn primary" id="addt">Add</button></div>
     <label class="search">${ICON.search}<input id="wq" type="search" placeholder="Search titles, other names, genres" value="${esc(wf.q)}" aria-label="Search titles"></label>
+    ${Verify.cardHtml()}
     ${all.length ? `<div class="seg" role="group" aria-label="Watch or read">${[["", "All", all.length], ["watch", "To watch", fGroup.watch || 0], ["read", "To read", fGroup.read || 0]]
       .concat(fGroup.other ? [["other", "Other", fGroup.other]] : []).map(([v, l, c]) => `<button data-group="${v}" aria-pressed="${wf.group === v}">${l} ${c}</button>`).join("")}</div>
     ${types.length > 1 || wf.type ? `<div class="chips"><button class="chip" data-type="" aria-pressed="${!wf.type}">All kinds</button>${types.map((id) => `<button class="chip" data-type="${esc(id)}" aria-pressed="${wf.type === id}">${esc(Catalog.typeInfo(db, id).plural)} ${fType[id]}</button>`).join("")}</div>` : ""}

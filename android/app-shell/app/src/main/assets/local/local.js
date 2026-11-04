@@ -85,7 +85,7 @@ const MODELS = [
     url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
     size: 2.58e9, note: "Free, about 2.6 GB. Google's on-phone model, tuned for summarizing and rewriting; follows the notes format better. Slower to download, uses more battery per reel." },
 ];
-const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en" };
+const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en", tmdbKey: "" };
 let settings = { ...DEFAULTS };
 function loadSettings() { try { settings = { ...DEFAULTS, ...JSON.parse(sync("getSettings") || "{}") }; } catch (e) { settings = { ...DEFAULTS }; } }
 function saveSettings() { sync("setSettings", JSON.stringify(settings)); }
@@ -376,7 +376,8 @@ window.onAppPause = () => {  // the app left the screen: nothing keeps running
 };
 window.onAppResume = () => {
   const fromIg = takeInstagramExport();
-  if (takeShared() || fromIg) render();
+  const checked = Verify.onOpen();  // titles checked online overnight
+  if (takeShared() || fromIg || checked) render();
   else if (location.hash === "#/settings") render();
 };
 
@@ -776,6 +777,7 @@ function settingsScreen() {
       <label class="field">Your prompt ({link} is replaced by the reel link)<textarea class="input tall" id="prompt">${esc(settings.prompt)}</textarea></label>
       <div class="grid2"><button class="btn" id="savep">Save prompt</button><button class="btn" id="resetp">Reset</button></div>
     </div>
+    ${Verify.settingsHtml()}
     <div class="stack"><h2>Export (${plural(db.reels.length, "reel")})</h2>
       <div class="grid2"><button class="btn" id="exjson">Save JSON</button><button class="btn" id="exmd">Save Markdown</button></div>
       <div class="grid2"><button class="btn" id="exshare">Share notes</button><button class="btn" id="excopy">Copy all</button></div>
@@ -788,6 +790,7 @@ function settingsScreen() {
     <p class="hint">Reel Shelf does nothing in the background. Sharing a reel only saves it; leaving the app stops the AI and any download.</p>
     <button class="btn block link" id="old">Use the old Reel Shelf on a PC or Termux</button>
     <button class="btn block danger" id="wipe">Delete all reels and notes</button>`;
+  Verify.bindSettings(settingsScreen);
   bind("[data-set]", "click", (e, b) => { settings[b.dataset.set] = JSON.parse(b.dataset.val); saveSettings(); settingsScreen(); });
   bind("#dl", "click", () => {
     onProgress.download = (d, t) => {
@@ -831,6 +834,7 @@ const ROUTES = [
   [/^#\/watch$/, watchScreen, "watch"], [/^#\/m\/(.+)$/, (m) => titleScreen(decodeURIComponent(m[1])), "watch"],
   [/^#\/add$/, addScreen, "add"], [/^#\/run$/, runScreen, "run"],
   [/^#\/shots$/, () => Shots.screen(), "run"], [/^#\/shots\/review$/, () => Shots.review(), "run"], [/^#\/settings$/, settingsScreen, "settings"],
+  [/^#\/check$/, () => Verify.screen(), "watch"],
 ];
 
 function render() {
@@ -849,4 +853,5 @@ window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); }
 loadSettings();
 loadDb();
 takeShared();
+Verify.onOpen();
 render();

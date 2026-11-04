@@ -1,7 +1,9 @@
 name: Android APK
 
 on:
+  # only the install branch builds the APK, to save GitHub Actions minutes; other branches are tested by tests.yml
   push:
+    branches: [ccr-d0c0b070-bdpssy]
     paths:
       - "android/app-shell/**"
       - ".github/workflows/android-apk.yml"
@@ -39,7 +41,7 @@ jobs:
             echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
             export RS_KEYSTORE="$RUNNER_TEMP/release.jks"
           fi
-          gradle -p android/app-shell assembleRelease --no-daemon --stacktrace
+          gradle -p android/app-shell testReleaseUnitTest assembleRelease --no-daemon --stacktrace
           rm -f "$RUNNER_TEMP/release.jks"
           cp android/app-shell/app/build/outputs/apk/release/app-release.apk ReelShelf.apk
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
