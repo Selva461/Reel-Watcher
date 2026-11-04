@@ -66,10 +66,11 @@ final class LocalModel {
         Conversation c = current;
         if (c != null) {
             try {
-                c.cancelProcess();
+                c.cancelProcess();  // generate() frees the model when the cancelled answer returns
             } catch (Throwable ignored) {
                 // already finished
             }
+            return;
         }
         synchronized (this) {
             closeEngine();
@@ -183,6 +184,11 @@ final class LocalModel {
                 conv.close();
             } catch (Throwable ignored) {
                 // freed with the engine
+            }
+            if (stop) {
+                synchronized (this) {
+                    closeEngine();
+                }
             }
         }
     }

@@ -1,0 +1,10 @@
+/* Extra pieces for the built-in (no Termux) Reel Shelf. Everything else comes from app.css, the same look as before. */
+.note-block { display: flex; flex-direction: column; gap: 6px; }
+.note-block p { margin: 0; line-height: 1.5; }
+.note-block ol, .note-block ul { margin: 0; padding-left: 22px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px; }
+.pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; margin: 0; }
+.clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tagrow { display: flex; flex-wrap: wrap; gap: 6px; }
+details > summary { cursor: pointer; list-style-position: inside; }
+textarea.input.tall { min-height: 160px; }
+.hint { font-size: 13px; color: var(--muted); line-height: 1.45; margin: 0; }

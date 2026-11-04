@@ -24,7 +24,7 @@ jobs:
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3  # v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a  # v4
         with:
           gradle-version: "8.13"
@@ -40,7 +40,6 @@ jobs:
             export RS_KEYSTORE="$RUNNER_TEMP/release.jks"
           fi
           gradle -p android/app-shell assembleRelease --no-daemon --stacktrace
-          gradle -p android/app-shell :app:dependencies --configuration releaseRuntimeClasspath --no-daemon -q | grep -i litertlm || true
           rm -f "$RUNNER_TEMP/release.jks"
           cp android/app-shell/app/build/outputs/apk/release/app-release.apk ReelShelf.apk
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
