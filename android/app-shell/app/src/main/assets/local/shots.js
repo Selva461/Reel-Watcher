@@ -104,6 +104,7 @@ const Shots = (() => {
         const st = Titles.verdict(res);
         const kept = keep(res);
         for (const c of kept) { job.found++; job.added += toCatalog(c, "screenshot", p.k); job.recent.unshift(c.title); }
+        job.quotes = (job.quotes || 0) + Quotes.addFrom(db, res, p.k);  // lines worth keeping go to Quotes
         state.seen[p.k] = { m: p.m, st: kept.length ? st : (st === "found" || st === "several" ? "unsure" : st), n: p.n, f: p.f,
           c: res.candidates.slice(0, 5).map((c) => c.title), x: res.text.slice(0, 300) };
       }

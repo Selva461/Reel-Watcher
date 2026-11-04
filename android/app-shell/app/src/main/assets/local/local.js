@@ -520,6 +520,7 @@ function homeScreen() {
     <h1>Your reel notes</h1>
     <label class="search">${ICON.search}<input id="q" type="search" placeholder="Search topics, points, tools, tags" value="${esc(filter.q)}" aria-label="Search"></label>
     ${igWaitingCard()}
+    ${(db.quotes || []).length ? `<a class="card" href="#/quotes"><span class="grow"><strong>Quotes (${db.quotes.length})</strong><br><span class="small muted">Lines kept from your screenshots, searchable</span></span>${ICON.chev}</a>` : ""}
     ${db.inbox.length ? `<a class="card accent" href="#/inbox"><span class="grow"><strong>${plural(db.inbox.length, "Meta AI answer")} to file</strong><br><span>Pick the reel each one belongs to</span></span></a>` : ""}
     ${running ? `<a class="card accent" href="#/run"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="grow"><strong>Working: ${run.i + 1} of ${run.codes.length}</strong><br><span>Keeps going if you leave the app</span></span></a>`
       : todo.length ? `<button class="card accent" id="start"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="stack grow" style="gap:2px">
@@ -963,7 +964,7 @@ const ROUTES = [
   [/^#\/watch$/, watchScreen, "watch"], [/^#\/m\/(.+)$/, (m) => titleScreen(decodeURIComponent(m[1])), "watch"],
   [/^#\/add$/, addScreen, "add"], [/^#\/run$/, runScreen, "run"],
   [/^#\/shots$/, () => Shots.screen(), "run"], [/^#\/shots\/review$/, () => Shots.review(), "run"], [/^#\/settings$/, settingsScreen, "settings"],
-  [/^#\/check$/, () => Verify.screen(), "watch"],
+  [/^#\/check$/, () => Verify.screen(), "watch"], [/^#\/quotes$/, () => Quotes.screen(), "home"],
 ];
 
 function render() {
