@@ -208,7 +208,9 @@ const Titles = (() => {
     const W = opts.W || 0;
     const H = opts.H || 0;
     const ctx = context(opts.name || "", opts.folder || "");
-    let rows = (lines || []).map((l, i) => typeof l === "string" ? { t: l, i } : { ...l, i });
+    // plain text (a caption): one row per sentence too, so "Loved it. Movie name: Arrival" is read like two lines
+    let rows = (lines || []).flatMap((l) => typeof l === "string" ? l.split(/(?<=\p{Ll}{2}[.!?])\s+(?=\p{Lu})/u).map((t) => ({ t })) : [{ ...l }]);
+    rows = rows.map((r, i) => ({ ...r, i }));
     rows = rows.map((r) => ({ ...r, t: strip(r.t) })).filter((r) => r.t);
     // the phone's status bar (time, battery) and navigation bar are never part of the post
     if (H) rows = rows.filter((r) => r.y == null || (r.y > H * 0.035 && r.y + (r.h || 0) < H * 0.97));
