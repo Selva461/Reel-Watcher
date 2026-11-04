@@ -419,17 +419,30 @@ const Notes = (() => {
       [n.meaning, 1], [(n.use || []).join(" "), 1], [n.takeaway, 1.5], [r.caption, 0.6], [r.transcript, 0.4], [r.extra, 0.6],
       [(r.collections || []).join(" "), 1], [(r.keywords || []).join(" "), 1.5], [r.author, 0.5]];
   }
+  // Each reel's words are kept until its text changes, and the whole index until any reel changes,
+  // so typing in a search box or opening a reel does not re-read the library every time.
+  const docCache = new WeakMap();
+  let lastIx = null;
+  function docOf(r) {
+    const f = fieldsOf(r);
+    const sig = f.map((x) => x[0] || "").join("\u0001");
+    const hit = docCache.get(r);
+    if (hit && hit.sig === sig) return hit.d;
+    const tf = new Map();
+    let len = 0;
+    for (const [text, w] of f) for (const t of words(text)) { tf.set(t, (tf.get(t) || 0) + w); len += w; }
+    const d = { r, tf, len };
+    docCache.set(r, { sig, d });
+    return d;
+  }
   function index(reels) {
-    const docs = reels.map((r) => {
-      const tf = new Map();
-      let len = 0;
-      for (const [text, w] of fieldsOf(r)) for (const t of words(text)) { tf.set(t, (tf.get(t) || 0) + w); len += w; }
-      return { r, tf, len };
-    });
+    const docs = reels.map(docOf);
+    if (lastIx && lastIx.docs.length === docs.length && lastIx.docs.every((d, i) => d === docs[i])) return lastIx;
     const df = new Map();
     for (const d of docs) for (const t of d.tf.keys()) df.set(t, (df.get(t) || 0) + 1);
     const avg = docs.reduce((a, d) => a + d.len, 0) / Math.max(1, docs.length) || 1;
-    return { docs, df, avg, N: docs.length };
+    lastIx = { docs, df, avg, N: docs.length };
+    return lastIx;
   }
   function idfOf(ix, t) { const n = ix.df.get(t) || 0; return Math.log(1 + (ix.N - n + 0.5) / (n + 0.5)); }
 
@@ -755,6 +768,6 @@ const Notes = (() => {
 
   return { FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, material, embedUrl, readPage,
     ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
-    YT_CLIENTS, condense, search, answerPrompt, words, stem, near, related, keywords, autoNotes, sentences,
+    YT_CLIENTS, condense, search, answerPrompt, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
     exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS };
 })();

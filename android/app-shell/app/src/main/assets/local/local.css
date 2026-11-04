@@ -17,3 +17,5 @@ textarea.input.tall { min-height: 160px; }
 nav.tabs a { min-width: 52px; }
 .seg button { font-size: 14px; }
 .thumb.big.poster { aspect-ratio: 2/3; width: 120px; }
+mark { background: rgba(242, 181, 68, 0.28); color: inherit; border-radius: 3px; padding: 0 1px; }
+a.chip { display: inline-flex; align-items: center; text-decoration: none; }

@@ -422,7 +422,7 @@ function listHtml() {
   let shown = db.reels.filter((r) => !filter.tag || ((r.notes || {}).tags || []).includes(filter.tag));
   if (q) {  // ranked like a search engine: best match first, typos and similar words allowed
     const plain = q.toLowerCase();
-    const hits = Notes.search(shown, q, 200);
+    const hits = Lib.find(shown, q, 200);
     const seen = new Set(hits.map((h) => h.reel));
     // a name or link typed exactly also counts
     const exact = shown.filter((r) => !seen.has(r) && [r.author, r.url, r.code].join(" ").toLowerCase().includes(plain));
@@ -521,7 +521,35 @@ function reelScreen(code) {
 
 function relatedHtml(r) {
   const rel = Notes.related(db.reels, r, 4);
-  return rel.length ? `<div class="stack"><h2>Related reels</h2>${rel.map((x) => reelRow(x.reel)).join("")}</div>` : "";
+  const t = Lib.topics(db.reels).find((x) => x.reels.includes(r));
+  const topicLink = t ? `<a class="chip" href="#/topic/${enc(t.key)}">Topic: ${esc(t.label)} (${t.reels.length})</a>` : "";
+  return rel.length || t ? `<div class="stack"><h2>Related reels</h2>${topicLink ? `<div class="chips">${topicLink}</div>` : ""}${rel.map((x) => reelRow(x.reel)).join("")}</div>` : "";
+}
+
+// ------------------------------------------------------------------ topics: reels grouped by what they are about (no AI)
+
+function titleOf(r) { const n = r.notes || {}; return n.topic || r.title || (r.caption || "").split("\n")[0].slice(0, 90) || r.code; }
+
+function libraryOverview() {
+  const groups = Lib.topics(db.reels).slice(0, 12);
+  const tl = Lib.tools(db.reels).filter((t) => t.count > 1).slice(0, 16);
+  return `${groups.length ? `<div class="stack"><h2>Topics you learned</h2>${groups.map((g) => `<a class="list-item" href="#/topic/${enc(g.key)}"><span class="grow stack" style="gap:4px">
+      <span class="title">${esc(g.label)}</span><span class="small muted clamp">${esc(g.reels.slice(0, 3).map(titleOf).join(" · "))}</span></span>
+      <span class="tag">${g.reels.length}</span></a>`).join("")}</div>` : ""}
+    ${tl.length ? `<div class="stack"><h2>Tools you saw most</h2><div class="chips wrap">${tl.map((t) => `<a class="chip" href="#/ask?q=${enc('"' + t.name + '"')}">${esc(t.name)} ${t.count}</a>`).join("")}</div></div>` : ""}`;
+}
+
+function topicScreen(key) {
+  const g = Lib.topic(db.reels, key);
+  if (!g) { $app.innerHTML = `${header("Topic", "#/ask")}<div class="empty">This topic changed as your library grew. <a href="#/ask">See all topics</a>.</div>`; return; }
+  const takeaways = g.reels.filter((r) => (r.notes || {}).takeaway);
+  const tl = Lib.tools(g.reels).slice(0, 12);
+  $app.innerHTML = `${header(g.label, "#/ask")}
+    <p class="hint">${plural(g.reels.length, "reel")} about the same thing, grouped by the words they share. No AI.</p>
+    <div class="chips wrap">${g.words.map((w) => `<a class="chip" href="#/ask?q=${enc(w)}">${esc(w)}</a>`).join("")}</div>
+    ${takeaways.length ? `<div class="card stack" style="gap:8px"><span class="label">What you learned</span><ul style="margin:0;padding-left:18px;line-height:1.5">${takeaways.map((r) => `<li><a href="#/r/${enc(r.code)}">${esc(r.notes.takeaway)}</a></li>`).join("")}</ul></div>` : ""}
+    ${tl.length ? `<div class="card stack" style="gap:8px"><span class="label">Tools</span><p style="margin:0">${esc(tl.map((t) => t.name + (t.count > 1 ? ` (${t.count})` : "")).join(", "))}</p></div>` : ""}
+    <div class="stack">${g.reels.map(reelRow).join("")}</div>`;
 }
 
 // ------------------------------------------------------------------ Ask: your library answers
@@ -533,12 +561,14 @@ function askScreen() {
   if (fromUrl !== undefined) { const q = decodeURIComponent(fromUrl); if (q !== lastAsk.q) lastAsk = { q, answer: null, results: [] }; }
   const ready = !!modelInfo().ready;
   const q = lastAsk.q;
-  const results = q ? Notes.search(db.reels, q, 8) : [];
+  const results = q ? Lib.find(db.reels, q, 8) : [];
+  const fix = q && results.length < 3 ? Lib.didYouMean(db.reels, q) : null;
   lastAsk.results = results;
-  const mark = (s) => esc(s);
+  const mark = (s) => Lib.highlight(s, q);
   $app.innerHTML = `${header("Ask your library", "")}
     <form class="stack" id="askf"><label class="search">${ICON.search}<input id="aq" type="search" enterkeyhint="search" placeholder="e.g. how do I keep API keys safe?" value="${esc(q)}" aria-label="Question"></label></form>
-    ${!q ? `<p class="hint">Search everything you saved, like a search engine for what you learned. It works without any AI: it ranks your notes by the words you type, allows typos and similar words (phone, mobile, android), and shows the lines that answer it.</p>` : ""}
+    ${!q ? `<p class="hint">Search everything you saved, like a search engine for what you learned. It works without any AI: it ranks your notes by the words you type, allows typos and similar words (phone, mobile, android), and shows the lines that answer it. Use "exact words", -word to leave a word out, and #tag to keep one tag.</p>${libraryOverview()}` : ""}
+    ${fix ? `<p class="small">Did you mean <a href="#/ask?q=${enc(fix)}" id="fix">${esc(fix)}</a>?</p>` : ""}
     ${q && !results.length ? `<div class="empty">Nothing in your library about that yet.</div>` : ""}
     ${lastAsk.answer ? `<div class="card stack"><span class="label">Answer from your notes${lastAsk.answer.by ? ` (${esc(lastAsk.answer.by)})` : ""}</span><p class="pre">${esc(lastAsk.answer.text).replace(/\[(\d{1,2})\]/g, (m, i) => results[i - 1] ? `<a href="#/r/${enc(results[i - 1].reel.code)}">[${i}]</a>` : m)}</p></div>` : ""}
     ${results.length ? `<div class="grid2">${ready ? `<button class="btn primary" id="aiAns">Answer with phone AI</button>` : ""}<button class="btn" id="copyAsk">Ask any AI with these notes</button></div>` : ""}
@@ -797,7 +827,7 @@ function settingsScreen() {
 
 const ROUTES = [
   [/^#?\/?$/, homeScreen, "home"], [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "home"], [/^#\/inbox$/, inboxScreen, "home"],
-  [/^#\/ask(\?.*)?$/, askScreen, "ask"],
+  [/^#\/ask(\?.*)?$/, askScreen, "ask"], [/^#\/topic\/(.+)$/, (m) => topicScreen(decodeURIComponent(m[1])), "ask"],
   [/^#\/watch$/, watchScreen, "watch"], [/^#\/m\/(.+)$/, (m) => titleScreen(decodeURIComponent(m[1])), "watch"],
   [/^#\/add$/, addScreen, "add"], [/^#\/run$/, runScreen, "run"],
   [/^#\/shots$/, () => Shots.screen(), "run"], [/^#\/shots\/review$/, () => Shots.review(), "run"], [/^#\/settings$/, settingsScreen, "settings"],
