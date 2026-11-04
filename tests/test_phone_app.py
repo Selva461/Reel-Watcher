@@ -49,6 +49,11 @@ FAKE_RN = r"""
     downloadModel: (id, url, name) => { st.calls.push(["download", url, name]); keep();
       later(() => rnProgress("download", 800e6, 1.6e9)); later(() => { st.model.ready = true; keep(); rnDone(id, true, "ready"); }); },
     pickModel: (id) => later(() => rnDone(id, false, "cancelled")),
+    postJson: (id, url, body) => { st.calls.push(["postJson", url, JSON.parse(body)]); keep(); later(() => {
+      st.player ? rnDone(id, true, JSON.stringify(st.player)) : rnDone(id, false, "YouTube answered 403"); }); },
+    openInstagram: () => { st.opened.push("instagram-export"); keep(); },
+    takeInstagramExport: () => { const s = st.igExport ? JSON.stringify(st.igExport) : ""; st.igExport = null; keep(); return s; },
+    signOutInstagram: () => { st.opened.push("ig-signout"); keep(); },
     saveFile: (id, name, mime, text) => { st.saved.push({ name, mime, text }); keep(); later(() => rnDone(id, true, "Downloads/ReelShelf/" + name)); },
   };
 })();
@@ -139,9 +144,12 @@ def test_parse_meta_ai_answer_and_links(phone):
     assert again == n  # format and parse round-trip
     got = phone.evaluate("""Notes.links('look https://www.instagram.com/reel/ABC123xyz/?igsh=q and instagram.com/p/POST_99-x/ '
                            + 'https://www.instagram.com/reel/ABC123xyz/ again, https://www.instagram.com/someone/reel/DEF4567/')""")
-    assert got == [{"code": "ABC123xyz", "url": "https://www.instagram.com/reel/ABC123xyz/"},
-                   {"code": "POST_99-x", "url": "https://www.instagram.com/p/POST_99-x/"},
-                   {"code": "DEF4567", "url": "https://www.instagram.com/reel/DEF4567/"}]
+    assert got == [{"code": "ABC123xyz", "url": "https://www.instagram.com/reel/ABC123xyz/", "source": "instagram"},
+                   {"code": "POST_99-x", "url": "https://www.instagram.com/p/POST_99-x/", "source": "instagram"},
+                   {"code": "DEF4567", "url": "https://www.instagram.com/reel/DEF4567/", "source": "instagram"}]
+    yt = phone.evaluate("""Notes.links('https://youtu.be/dQw4w9WgXcQ https://www.youtube.com/watch?feature=x&v=abcdefghijk '
+                          + 'https://m.youtube.com/shorts/dQw4w9WgXcQ')""")
+    assert [x["code"] for x in yt] == ["yt-dQw4w9WgXcQ", "yt-abcdefghijk"] and yt[0]["url"] == "https://www.youtube.com/shorts/dQw4w9WgXcQ"
     two = phone.evaluate("t => Notes.splitAnswers(t).map(p => p.notes.topic)", ANSWER + "\n\nTOPIC: Second one\nPOINTS:\n- a\nTAGS: x")
     assert two == ["Hardcoded secrets in mobile apps", "Second one"]
 
@@ -186,7 +194,10 @@ def test_without_the_model_start_reads_captions_and_ask_meta_ai_files_the_answer
     phone.get_by_role("button", name="Start: 1 reel").click()
     phone.get_by_role("heading", name="Done").wait_for()
     assert not any(c[0] == "generate" for c in phone.rn()["calls"])
-    assert db_of(phone)["reels"][0]["status"] == "ready"
+    r = db_of(phone)["reels"][0]
+    # no AI on the phone: quick notes are made from the caption with plain maths, so the reel is already searchable
+    assert r["status"] == "done" and r["notes_by"] == "auto"
+    assert "Obsidian" in " ".join(r["notes"]["points"]) and r["notes"]["tags"]
     phone.goto(phone.url.split("#")[0] + "#/r/BBB222")
     phone.get_by_role("button", name="Ask Meta AI").click()
     st = phone.rn()
@@ -306,3 +317,112 @@ def test_same_look_as_the_old_app():
     assert (LOCAL / "app.css").read_text(encoding="utf-8") == old.read_text(encoding="utf-8")
     for f in LOCAL.iterdir():
         assert chr(0x2014) not in f.read_text(encoding="utf-8"), f"em dash in {f.name}"
+
+
+# ---------------------------------------------------------------- YouTube, batch Meta AI, the library, Instagram export
+
+WATCH = '<html><script>ytcfg.set({"INNERTUBE_API_KEY": "AIzaTestKey_123"});</script></html>'
+PLAYER = {
+    "playabilityStatus": {"status": "OK"},
+    "videoDetails": {"title": "3 ways to keep API keys out of your app", "author": "Dev Tips", "shortDescription": "Secrets belong on the server."},
+    "captions": {"playerCaptionsTracklistRenderer": {"captionTracks": [
+        {"baseUrl": "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en&fmt=srv3", "languageCode": "en", "kind": "asr"}]}},
+}
+TIMED = """<?xml version="1.0" encoding="utf-8" ?><transcript>
+<text start="0" dur="2">First, never put the key in the app &amp;amp; rotate it.</text>
+<text start="2" dur="3">Second, use a server proxy &lt;b&gt;always&lt;/b&gt;.</text>
+<text start="5" dur="2">Third, scan with gitleaks.</text></transcript>"""
+
+
+def test_youtube_short_reads_the_spoken_words_and_writes_notes(phone):
+    phone.open_with({"shared": ["look https://youtube.com/shorts/dQw4w9WgXcQ?si=abc"], "model": {"ready": True, "partial": 0, "installed": []},
+                     "pages": {"youtube.com/watch": WATCH, "api/timedtext": TIMED}, "player": PLAYER, "answers": [ANSWER]})
+    phone.get_by_role("button", name="Start: 1 reel").click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    st = phone.rn()
+    post = next(c for c in st["calls"] if c[0] == "postJson")
+    assert post[1] == "https://www.youtube.com/youtubei/v1/player?key=AIzaTestKey_123" and post[2]["videoId"] == "dQw4w9WgXcQ"
+    assert any(c[0] == "fetchPage" and "fmt=srv3" not in c[1] and "timedtext" in c[1] for c in st["calls"])
+    prompt = next(c for c in st["calls"] if c[0] == "generate")[1]
+    assert "never put the key in the app & rotate it" in prompt and "Second, use a server proxy always." in prompt
+    assert "3 ways to keep API keys" in prompt
+    r = db_of(phone)["reels"][0]
+    assert r["code"] == "yt-dQw4w9WgXcQ" and r["notes_by"] == "phone" and r["author"] == "Dev Tips"
+    phone.goto(phone.url.split("#")[0] + "#/r/yt-dQw4w9WgXcQ")
+    phone.get_by_role("button", name="Open in YouTube").wait_for()
+    phone.get_by_text("What is said (from YouTube's captions)").wait_for()
+
+
+def test_ask_meta_ai_about_several_reels_in_one_message(phone):
+    codes = ["AAA111", "BBB222", "CCC333"]
+    db = {"reels": [{"code": c, "url": f"https://www.instagram.com/reel/{c}/", "status": "new", "added_at": 1} for c in codes], "inbox": []}
+    phone.open_with({"db": json.dumps(db)})
+    phone.get_by_role("button", name="Ask Meta AI about 3 reels at once").click()
+    title, text = phone.rn()["sharedOut"][0]
+    assert title == "Ask Meta AI" and all(f"https://www.instagram.com/reel/{c}/" in text for c in codes) and "REEL:" in text
+    # Meta AI answers all three in one message; sharing it back files each part under its own reel
+    one = lambda c, topic: f"REEL: https://www.instagram.com/reel/{c}/\nTOPIC: {topic}\nPOINTS:\n1. point about {topic}\nTAGS: x, y\n"
+    answer = one("AAA111", "Alpha") + "\n" + one("BBB222", "Bravo") + "\n" + one("CCC333", "Charlie")
+    phone.evaluate("a => { const s = window.__rn; s.shared.push(a); sessionStorage.setItem('rn', JSON.stringify(s)); onAppResume(); }", answer)
+    phone.get_by_text("3 Meta AI answers filed").wait_for()
+    topics = {r["code"]: r["notes"]["topic"] for r in db_of(phone)["reels"]}
+    assert topics == {"AAA111": "Alpha", "BBB222": "Bravo", "CCC333": "Charlie"}
+
+
+def _library():
+    mk = lambda c, topic, pts, tags, tools=(): {"code": c, "url": f"https://www.instagram.com/reel/{c}/", "status": "done", "added_at": 1,
+                                                 "notes_by": "meta", "notes": {"topic": topic, "points": pts, "tags": tags, "tools": list(tools)}}
+    return {"reels": [
+        mk("GYM001", "Chest workout at the gym", ["Bench press 3 sets of 8", "Rest 90 seconds"], ["fitness", "gym"]),
+        mk("SEC001", "Hardcoded passwords leak user data", ["Never hardcode secrets in the app", "Rotate any leaked credential"], ["cybersecurity"], ["gitleaks"]),
+        mk("SEC002", "Keep API keys on a server", ["The app calls your server, the server holds the key"], ["security", "apikeys"]),
+        mk("FOOD01", "High protein breakfast", ["Eggs and oats, 40g protein"], ["diet"]),
+    ], "inbox": []}
+
+
+def test_library_search_ranks_allows_typos_and_similar_words(phone):
+    phone.open_with({"db": json.dumps(_library())})
+    order = lambda q: phone.evaluate("q => Notes.search(JSON.parse(window.__rn.db).reels, q).map(x => x.reel.code)", q)
+    assert order("hardcoded passwords")[0] == "SEC001"
+    assert order("pasword")[0] == "SEC001"            # a typo
+    assert order("credential")[0] == "SEC001"         # in a point
+    assert "SEC002" in order("secret")                # a similar word (key)
+    assert order("exercise") == ["GYM001"]            # a synonym, not in the notes
+    assert order("nutrition") == ["FOOD01"]
+    related = phone.evaluate("() => { const rs = JSON.parse(window.__rn.db).reels; return Notes.related(rs, rs[1]).map(x => x.reel.code); }")
+    assert related[:1] == ["SEC002"]
+    # the shelf search box uses the same ranking
+    phone.fill("#q", "pasword")
+    assert phone.locator("#list .list-item").count() == 1
+    phone.goto(phone.url.split("#")[0] + "#/r/SEC001")
+    phone.get_by_role("heading", name="Related reels").wait_for()
+
+
+def test_ask_your_library_answers_from_your_notes(phone):
+    phone.open_with({"db": json.dumps(_library()), "model": {"ready": True, "partial": 0, "installed": []},
+                     "answers": ["Never hardcode secrets [1] and keep keys on a server [2]."]}, "#/ask")
+    phone.fill("#aq", "how do I keep api keys safe")
+    phone.press("#aq", "Enter")
+    phone.get_by_text("[1] Keep API keys on a server").wait_for()
+    phone.get_by_role("button", name="Ask any AI with these notes").click()
+    assert "Question: how do I keep api keys safe" in phone.rn()["copied"]
+    phone.get_by_role("button", name="Answer with phone AI").click()
+    phone.get_by_text("Answer from your notes").wait_for()
+    prompt = next(c for c in phone.rn()["calls"] if c[0] == "generate")[1]
+    assert "The app calls your server, the server holds the key" in prompt
+    assert phone.locator('.pre a[href="#/r/SEC002"]', has_text="[1]").count() == 1
+
+
+def test_saved_reels_come_back_from_the_in_app_instagram_page(phone):
+    phone.open_with(hash_="#/add")
+    phone.get_by_role("button", name="Get my saved reels from Instagram").click()
+    assert phone.rn()["opened"] == ["instagram-export"]
+    saved = {"saved_saved_media": [{"title": "creator_a", "string_map_data": {"Saved on": {"href": "https://www.instagram.com/reel/IGX001/", "timestamp": 1}}}]}
+    colls = {"saved_saved_collections": [{"title": "Collection", "string_map_data": {"Name": {"value": "Tech"}}},
+                                         {"title": "creator_a", "string_map_data": {"Name": {"value": "creator_a", "href": "https://www.instagram.com/reel/IGX001/"}}}]}
+    parts = [{"name": "saved_collections.json", "text": json.dumps(colls)}, {"name": "saved_posts.json", "text": json.dumps(saved)}]
+    phone.evaluate("p => { const s = window.__rn; s.igExport = p; sessionStorage.setItem('rn', JSON.stringify(s)); onAppResume(); }", parts)
+    phone.get_by_text("From Instagram: 1 new reel saved").wait_for()
+    r = db_of(phone)["reels"][0]
+    assert r["code"] == "IGX001" and r["added_by"] == "export" and r["collections"] == ["Tech"]
+    assert not any(c[0] in ("fetchPage", "generate") for c in phone.rn()["calls"])  # importing does no other work

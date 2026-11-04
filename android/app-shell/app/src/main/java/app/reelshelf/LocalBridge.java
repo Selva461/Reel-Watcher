@@ -223,28 +223,60 @@ final class LocalBridge {
 
     // ------------------------------------------------------------------ reading a reel's public page
 
+    private static boolean readable(String url) {
+        return url != null && (url.startsWith("https://www.instagram.com/") || url.startsWith("https://www.youtube.com/")
+                || url.startsWith("https://m.youtube.com/"));
+    }
+
     /**
-     * Fetches an Instagram page (the reel's public embed page) so the page can read the caption and creator.
-     * Only https://www.instagram.com addresses; no login, no cookies.
+     * Fetches a public page: a reel's embed page (caption, creator) or a YouTube page / caption file (title,
+     * description, what is said). Only Instagram and YouTube addresses; no login, no account cookies.
      */
     @JavascriptInterface
     public void fetchPage(int id, String url) {
         if (!ok()) return;
-        if (url == null || !url.startsWith("https://www.instagram.com/")) {
-            done(id, false, "Only Instagram pages can be read");
+        if (!readable(url)) {
+            done(id, false, "Only Instagram and YouTube pages can be read");
             return;
         }
+        request(id, url, null);
+    }
+
+    /** The YouTube player request (title, description and the list of caption files of a video). */
+    @JavascriptInterface
+    public void postJson(int id, String url, String body) {
+        if (!ok()) return;
+        if (url == null || !url.startsWith("https://www.youtube.com/youtubei/v1/player")) {
+            done(id, false, "Not allowed");
+            return;
+        }
+        request(id, url, body == null ? "{}" : body);
+    }
+
+    private void request(int id, String url, String body) {
         net.execute(() -> {
             HttpURLConnection c = null;
             try {
                 c = (HttpURLConnection) new URL(url).openConnection();
                 c.setConnectTimeout(15000);
                 c.setReadTimeout(20000);
-                c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36");
+                c.setInstanceFollowRedirects(true);
+                boolean yt = url.contains("youtube.com/");
+                c.setRequestProperty("User-Agent", body != null ? "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
+                        : "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36");
                 c.setRequestProperty("Accept-Language", "en-US,en;q=0.8");
+                if (yt) c.setRequestProperty("Cookie", "CONSENT=YES+cb");  // skips the cookie banner page, no account
+                if (body != null) {
+                    c.setRequestMethod("POST");
+                    c.setDoOutput(true);
+                    c.setRequestProperty("Content-Type", "application/json");
+                    try (OutputStream out = c.getOutputStream()) {
+                        out.write(body.getBytes(StandardCharsets.UTF_8));
+                    }
+                }
                 int code = c.getResponseCode();
                 if (code != 200) {
-                    done(id, false, "Instagram answered " + code);
+                    done(id, false, (yt ? "YouTube" : "Instagram") + " answered " + code);
                     return;
                 }
                 try (InputStream in = c.getInputStream()) {
@@ -255,7 +287,7 @@ final class LocalBridge {
                     done(id, true, b.toString("UTF-8"));
                 }
             } catch (Exception e) {
-                done(id, false, "No internet or Instagram did not answer (" + e.getClass().getSimpleName() + ")");
+                done(id, false, "No internet, or the site did not answer (" + e.getClass().getSimpleName() + ")");
             } finally {
                 if (c != null) c.disconnect();
             }
@@ -408,5 +440,27 @@ final class LocalBridge {
     public void allowWork() {
         if (!ok()) return;
         model.allow();
+    }
+
+    /** Opens Instagram's own "Download your information" page inside Reel Shelf (you sign in and tap yourself). */
+    @JavascriptInterface
+    public void openInstagram() {
+        if (!ok()) return;
+        act.runOnUiThread(() -> act.startActivity(new android.content.Intent(act, InstagramActivity.class)));
+    }
+
+    /** The saved-posts files brought back by the last in-app export download, as [{name, text}] JSON, or "". */
+    @JavascriptInterface
+    public String takeInstagramExport() {
+        if (!ok()) return "";
+        String r = InstagramActivity.takeResult(act);
+        return r == null ? "" : r;
+    }
+
+    /** Signs Reel Shelf's own web pages out of Instagram (clears the app's web cookies). */
+    @JavascriptInterface
+    public void signOutInstagram() {
+        if (!ok()) return;
+        act.runOnUiThread(InstagramActivity::signOut);
     }
 }

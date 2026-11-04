@@ -163,19 +163,57 @@ function takeShared() {
   return items.length;
 }
 
+/** Saved-posts files from Instagram's data download ([{name, text}]): every reel, with collections as labels. */
+function importParts(parts) {
+  parts = parts.slice().sort((a, b) => /collection/i.test(a.name) - /collection/i.test(b.name));  // labels last
+  let rows = [];
+  for (const p of parts) rows = rows.concat(Notes.exportFile(p.name, p.text));
+  return { found: rows.length, added: addReels(rows, "export") };
+}
+
+/** The export the in-app Instagram page downloaded, if it just came back. */
+function takeInstagramExport() {
+  let parts = [];
+  try { parts = JSON.parse(sync("takeInstagramExport") || "[]"); } catch (e) { parts = []; }
+  if (!Array.isArray(parts) || !parts.length) return false;
+  const r = importParts(parts.filter((p) => p && typeof p.name === "string" && typeof p.text === "string"));
+  toast(`From Instagram: ${plural(r.added, "new reel")} saved (${r.found} in your saved posts). Tap Start when you want notes.`);
+  return true;
+}
+
 // ------------------------------------------------------------------ Start: work only while the app is open
 
 let run = null;  // {codes, i, step, stop, done, failed, current}
 
 function needsWork(r, ready) {
-  if (r.notes) return false;
+  if (r.notes && !(r.notes_by === "auto" && ready)) return false;
   if (!r.url) return false;
   if (!r.caption_read) return true;
   return ready && Notes.material(r) >= 30 && r.status !== "ready_no_text";
 }
 
+/** A YouTube Short or video: title, description and the spoken words (its captions), with no key and no login. */
+async function readYoutube(r) {
+  const key = Notes.ytKey(await phone("fetchPage", Notes.ytWatchUrl(r)));
+  const got = Notes.ytPick(JSON.parse(await phone("postJson", Notes.ytPlayerUrl(key), Notes.ytPlayerBody(r)) || "{}"));
+  if (got.title) r.title = got.title.slice(0, 300);
+  if (got.author) r.author = got.author;
+  if (got.description) r.caption = got.description.slice(0, 8000);
+  if (got.track && !got.blocked) {
+    const said = Notes.ytCaptions(await phone("fetchPage", got.track));
+    if (said) r.transcript = said.slice(0, 40000);
+  }
+  if (!r.transcript) r.error = got.why || "YouTube did not give the spoken words for this video.";
+}
+
 async function readCaption(r) {
   if (!r.url) return;
+  if (Notes.isYoutube(r)) {
+    try { await readYoutube(r); } catch (e) { r.error = e.message; }
+    r.caption_read = Date.now();
+    r.keywords = Notes.keywords([r.title, r.caption, r.transcript].join("\n"), 10);
+    return;
+  }
   try {
     const html = await phone("fetchPage", Notes.embedUrl(r.code));
     const got = Notes.readPage(html);
@@ -192,6 +230,15 @@ async function readCaption(r) {
     } catch (e) { /* offline or refused: keep going */ }
   }
   r.caption_read = Date.now();
+  r.keywords = Notes.keywords(r.caption || "", 10);
+}
+
+/** Notes without any AI (the best sentences, keywords as tags), so every reel can be found in the library. */
+function writeWithoutAi(r) {
+  const n = Notes.autoNotes(r, db.reels);
+  if (!n) return false;
+  setNotes(r, n, "auto");
+  return true;
 }
 
 async function writeWithPhoneAi(r) {
@@ -225,7 +272,7 @@ async function startRun(codes) {
         saveDb();
       }
       if (run.stop) { r.status = r.notes ? "done" : "new"; break; }
-      if (run.ready && !r.notes) {
+      if (run.ready && (!r.notes || r.notes_by === "auto")) {
         if (Notes.material(r) < 30) {
           r.status = "ready_no_text";
           r.error = "Instagram did not give enough text to work from. Ask Meta AI, or type what the reel says.";
@@ -236,7 +283,8 @@ async function startRun(codes) {
           run.done++;
         }
       } else if (!r.notes) {
-        r.status = "ready";
+        if (Notes.material(r) >= 30) writeWithoutAi(r);
+        else r.status = Notes.isYoutube(r) ? "ready_no_text" : "ready";
       }
       if (r.notes) r.status = "done";
     } catch (e) {
@@ -266,7 +314,8 @@ window.onAppPause = () => {  // the app left the screen: nothing keeps running
   if (run && !run.finished) { run.paused = true; stopRun(); }
 };
 window.onAppResume = () => {
-  if (takeShared()) render();
+  const fromIg = takeInstagramExport();
+  if (takeShared() || fromIg) render();
   else if (location.hash === "#/settings") render();
 };
 
@@ -276,7 +325,8 @@ const STATUS = {
   new: ["Not read yet", ""], working: ["Working...", "warn"], ready: ["Ready for Meta AI", "warn"], ready_no_text: ["Needs Meta AI", "warn"],
   failed: ["Could not finish", "warn"], done: ["Notes", "ok"],
 };
-const BY = { meta: "Notes by Meta AI", phone: "Notes by the on-phone AI (from the caption)", you: "Your notes" };
+const BY = { meta: "Notes by Meta AI", phone: "Notes by the on-phone AI (from the caption)", you: "Your notes",
+  auto: "Quick notes without AI: the key sentences of the caption or transcript" };
 let filter = { q: "", tag: "" };
 
 function homeScreen() {
@@ -294,24 +344,45 @@ function homeScreen() {
     ${running ? `<a class="card accent" href="#/run"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="grow"><strong>Working: ${run.i + 1} of ${run.codes.length}</strong><br><span>Keep the app open</span></span></a>`
       : todo.length ? `<button class="card accent" id="start"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="stack grow" style="gap:2px">
         <strong style="font-size:17px">Start: ${plural(todo.length, "reel")}</strong><span>${ready ? "Reads each caption and writes the notes on this phone" : "Reads each caption. Download the AI model in Settings to write notes too"}</span></span></button>` : ""}
+    ${forMeta().length > 1 && !running ? `<button class="card" id="batch"><span class="grow stack" style="gap:2px"><strong>Ask Meta AI about ${Math.min(BATCH, forMeta().length)} reels at once</strong><span class="small muted">One message instead of ${Math.min(BATCH, forMeta().length)}. Share its answer back and each part is filed.</span></span>${ICON.chev}</button>` : ""}
     ${top.length ? `<div class="chips"><button class="chip" data-tag="" aria-pressed="${!filter.tag}">All</button>${top.map((t) => `<button class="chip" data-tag="${esc(t)}" aria-pressed="${filter.tag === t}">#${esc(t)}</button>`).join("")}</div>` : ""}
     <div class="stack" id="list">${listHtml()}</div>`;
   bind("#q", "input", (e, el) => { filter.q = el.value; document.getElementById("list").innerHTML = listHtml(); });
   bind("[data-tag]", "click", (e, b) => { filter.tag = b.dataset.tag; homeScreen(); });
   bind("#start", "click", () => startRun());
+  bind("#batch", "click", askMetaBatch);
 }
 
 
 function listHtml() {
-  const q = filter.q.trim().toLowerCase();
-  const shown = db.reels.filter((r) => {
-    if (filter.tag && !((r.notes || {}).tags || []).includes(filter.tag)) return false;
-    if (!q) return true;
-    const n = r.notes || {};
-    return [n.topic, n.meaning, n.takeaway, (n.points || []).join(" "), (n.tools || []).join(" "), (n.tags || []).join(" "), r.author, r.caption, (r.collections || []).join(" ")]
-      .join(" ").toLowerCase().includes(q);
-  });
-  return db.reels.length ? (shown.length ? shown.map(reelRow).join("") : `<div class="empty">Nothing matches.</div>`) : emptyShelf();
+  const q = filter.q.trim();
+  let shown = db.reels.filter((r) => !filter.tag || ((r.notes || {}).tags || []).includes(filter.tag));
+  if (q) {  // ranked like a search engine: best match first, typos and similar words allowed
+    const plain = q.toLowerCase();
+    const hits = Notes.search(shown, q, 200);
+    const seen = new Set(hits.map((h) => h.reel));
+    // a name or link typed exactly also counts
+    const exact = shown.filter((r) => !seen.has(r) && [r.author, r.url, r.code].join(" ").toLowerCase().includes(plain));
+    shown = [...hits.map((h) => h.reel), ...exact];
+  }
+  return db.reels.length ? (shown.length ? shown.map(reelRow).join("") : `<div class="empty">Nothing matches. Try other words, or <a href="#/ask?q=${enc(q)}">ask your library</a>.</div>`) : emptyShelf();
+}
+
+/** Instagram reels Meta AI has not done yet (YouTube is read on the phone instead). */
+function forMeta() {
+  return db.reels.filter((r) => r.url && !Notes.isYoutube(r) && (!r.notes || r.notes_by === "auto") && !(r.asked_at && Date.now() - r.asked_at < 86400e3));
+}
+const BATCH = 5;
+function askMetaBatch() {
+  const list = forMeta().slice(0, BATCH);
+  if (!list.length) return;
+  if (list.length === 1) { askMeta(list[0]); return; }
+  const text = Notes.batchPrompt(list);
+  sync("copy", text);
+  for (const r of list) r.asked_at = Date.now();
+  saveDb();
+  sync("shareText", text, "Ask Meta AI");
+  toast(`Asked about ${list.length} reels in one message. Share Meta AI's whole answer back to Reel Shelf: each part is filed under its reel.`);
 }
 
 function emptyShelf() {
@@ -357,14 +428,16 @@ function reelScreen(code) {
     ${r.error && !n ? `<div class="card small">${esc(r.error)}</div>` : ""}
     ${n ? notesHtml(n) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">Ask Meta AI (best: it watches the whole reel), or ${ready ? "let the on-phone AI write them from the caption" : "download the on-phone AI in Settings"}.</span></div>`}
     <div class="grid2">
-      ${r.url ? `<button class="btn ${n ? "" : "primary"}" id="meta">Ask Meta AI</button>` : ""}
+      ${r.url ? `<button class="btn ${n && r.notes_by !== "auto" ? "" : "primary"}" id="meta">Ask Meta AI</button>` : ""}
       <button class="btn" id="paste">Paste an answer</button>
-      ${r.url ? `<button class="btn" id="open">Open in Instagram</button>` : ""}
+      ${r.url ? `<button class="btn" id="open">Open in ${Notes.isYoutube(r) ? "YouTube" : "Instagram"}</button>` : ""}
       ${n ? `<button class="btn" id="copy">Copy notes</button>` : ""}
       ${ready && r.url ? `<button class="btn" id="phoneai">${n ? "Redo with phone AI" : "Write with phone AI"}</button>` : ""}
     </div>
     ${r.asked_at && !(n && r.notes_by === "meta") ? `<p class="hint">When Meta AI answers, tap Share on its answer and choose Reel Shelf. It will be filed here.</p>` : ""}
-    ${r.caption ? `<details class="card"><summary><strong>Caption</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.caption)}</p></details>` : ""}
+    ${r.caption ? `<details class="card"><summary><strong>${Notes.isYoutube(r) ? "Description" : "Caption"}</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.caption)}</p></details>` : ""}
+    ${r.transcript ? `<details class="card"><summary><strong>What is said (from YouTube's captions)</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.transcript)}</p></details>` : ""}
+    ${relatedHtml(r)}
     <details class="card" ${r.extra ? "open" : ""}><summary><strong>What the reel says (optional)</strong></summary>
       <div class="stack" style="margin-top:8px"><p class="hint">The phone's AI cannot watch the video. Type or paste what is said or shown, and it will use it.</p>
       <textarea class="input" id="extra" placeholder="e.g. the steps shown on screen">${esc(r.extra || "")}</textarea>
@@ -377,6 +450,54 @@ function reelScreen(code) {
   bind("#saveExtra", "click", () => { r.extra = document.getElementById("extra").value.slice(0, 10000); if (!r.notes && r.status === "ready_no_text") r.status = "ready"; saveDb(); toast("Saved"); reelScreen(code); });
   bind("#phoneai", "click", () => startRun([r.code]).then(() => {}));
   bind("#del", "click", () => { if (confirm("Remove this reel and its notes from Reel Shelf?")) { db.reels = db.reels.filter((x) => x !== r); saveDb(); location.hash = "#/"; } });
+}
+
+function relatedHtml(r) {
+  const rel = Notes.related(db.reels, r, 4);
+  return rel.length ? `<div class="stack"><h2>Related reels</h2>${rel.map((x) => reelRow(x.reel)).join("")}</div>` : "";
+}
+
+// ------------------------------------------------------------------ Ask: your library answers
+
+let lastAsk = { q: "", answer: null, results: [] };
+
+function askScreen() {
+  const fromUrl = (location.hash.match(/[?&]q=([^&]*)/) || [])[1];
+  if (fromUrl !== undefined) { const q = decodeURIComponent(fromUrl); if (q !== lastAsk.q) lastAsk = { q, answer: null, results: [] }; }
+  const ready = !!modelInfo().ready;
+  const q = lastAsk.q;
+  const results = q ? Notes.search(db.reels, q, 8) : [];
+  lastAsk.results = results;
+  const mark = (s) => esc(s);
+  $app.innerHTML = `${header("Ask your library", "")}
+    <form class="stack" id="askf"><label class="search">${ICON.search}<input id="aq" type="search" enterkeyhint="search" placeholder="e.g. how do I keep API keys safe?" value="${esc(q)}" aria-label="Question"></label></form>
+    ${!q ? `<p class="hint">Search everything you saved, like a search engine for what you learned. It works without any AI: it ranks your notes by the words you type, allows typos and similar words (phone, mobile, android), and shows the lines that answer it.</p>` : ""}
+    ${q && !results.length ? `<div class="empty">Nothing in your library about that yet.</div>` : ""}
+    ${lastAsk.answer ? `<div class="card stack"><span class="label">Answer from your notes${lastAsk.answer.by ? ` (${esc(lastAsk.answer.by)})` : ""}</span><p class="pre">${esc(lastAsk.answer.text).replace(/\[(\d{1,2})\]/g, (m, i) => results[i - 1] ? `<a href="#/r/${enc(results[i - 1].reel.code)}">[${i}]</a>` : m)}</p></div>` : ""}
+    ${results.length ? `<div class="grid2">${ready ? `<button class="btn primary" id="aiAns">Answer with phone AI</button>` : ""}<button class="btn" id="copyAsk">Ask any AI with these notes</button></div>` : ""}
+    <div class="stack">${results.map((x, i) => {
+      const r = x.reel;
+      const n = r.notes || {};
+      const title = n.topic || r.title || (r.caption || "").split("\n")[0].slice(0, 90) || r.code;
+      return `<a class="card stack" href="#/r/${enc(r.code)}" style="gap:6px"><span class="row between"><strong class="clamp">[${i + 1}] ${esc(title)}</strong>${ICON.chev}</span>
+        ${x.lines.length ? `<ul class="small" style="margin:0;padding-left:18px">${x.lines.map((l) => `<li>${mark(l)}</li>`).join("")}</ul>` : ""}
+        <span class="small muted">${esc([r.author ? "@" + r.author : "", (n.tags || []).slice(0, 3).map((t) => "#" + t).join(" ")].filter(Boolean).join(" · "))}</span></a>`;
+    }).join("")}</div>`;
+  const input = document.getElementById("aq");
+  document.getElementById("askf").addEventListener("submit", (e) => { e.preventDefault(); const nq = input.value.trim(); lastAsk = { q: nq, answer: null, results: [] }; if (location.hash === `#/ask?q=${enc(nq)}`) askScreen(); else location.hash = `#/ask?q=${enc(nq)}`; });
+  bind("#copyAsk", "click", () => { const t = Notes.answerPrompt(q, results.slice(0, 6)); sync("copy", t); sync("shareText", t, "Ask an AI"); toast("Question and your notes copied"); });
+  bind("#aiAns", "click", async (e, b) => {
+    b.disabled = true;
+    b.textContent = "Thinking... keep the app open";
+    sync("allowWork");
+    try {
+      const out = JSON.parse(await phone("generate", Notes.answerPrompt(q, results.slice(0, 5)),
+        JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: "You answer only from the notes you are given, briefly, citing them like [1].", maxTokens: settings.maxTokens, temperature: 0.1 })));
+      lastAsk.answer = { text: out.text, by: "on-phone AI" };
+    } catch (err) { toast(err.message === "stopped" ? "Stopped" : err.message); }
+    sync("stopModel");
+    if (location.hash.startsWith("#/ask")) askScreen();
+  });
 }
 
 function askMeta(r) {
@@ -411,7 +532,11 @@ function addScreen() {
       <p class="hint">Reel links (one or many, any text around them is fine), or Meta AI answers in the notes format. Several answers at once are split up.</p>
       <textarea class="input tall" id="paste" placeholder="https://www.instagram.com/reel/..."></textarea>
       <button class="btn primary block" id="add">Save to shelf</button></div>
-    <div class="card stack"><strong>All your saved reels from Instagram</strong>
+    <div class="card stack"><strong>All your saved reels, straight from Instagram</strong>
+      <p class="hint">Opens Instagram's own "Download your information" page inside Reel Shelf. You sign in and tap the buttons yourself, like in a browser, so it is safe for your account. Tick <strong>Saved</strong>, format <strong>JSON</strong>. When Meta says the file is ready (it emails you), open this again and tap Download: your reels and collections come straight in.</p>
+      <button class="btn primary block" id="ig">Get my saved reels from Instagram</button>
+      ${RN && RN.openInstagram ? "" : `<p class="hint">Only in the Android app.</p>`}</div>
+    <div class="card stack"><strong>Or choose an export you already downloaded</strong>
       <ol class="hint" style="padding-left:18px">
         <li>Instagram: Settings, Accounts Center, Your information and permissions, Download your information.</li>
         <li>Some of your information, tick <strong>Saved</strong>, format <strong>JSON</strong>, export to device.</li>
@@ -436,24 +561,23 @@ function addScreen() {
     toast(msg);
     location.hash = "#/";
   });
+  bind("#ig", "click", () => sync("openInstagram"));
   bind("#zip", "change", async (e, el) => {
     const out = document.getElementById("result");
     const files = [...el.files];
     if (!files.length) return;
-    let rows = [];
+    let parts = [];
     const skipped = [];
     for (const f of files) {
       out.innerHTML = `<p class="hint">Reading ${esc(f.name)}...</p>`;
       try {
-        const parts = /\.zip$/i.test(f.name) ? await Notes.readZip(f) : [{ name: f.name, text: await f.text() }];
-        // the collections file goes last so its labels are added to reels already found
-        parts.sort((a, b) => /collection/i.test(a.name) - /collection/i.test(b.name));
-        for (const p of parts) rows = rows.concat(Notes.exportFile(p.name, p.text));
-        if (!parts.length) skipped.push(`${f.name}: no saved posts inside`);
+        const got = /\.zip$/i.test(f.name) ? await Notes.readZip(f) : [{ name: f.name, text: await f.text() }];
+        if (!got.length) skipped.push(`${f.name}: no saved posts inside`);
+        parts = parts.concat(got);
       } catch (err) { skipped.push(`${f.name}: ${err.message}`); }
     }
-    const added = addReels(rows, "export");
-    out.innerHTML = `<div class="stack"><strong>${plural(added, "new reel")} saved</strong><span class="hint">${rows.length} found in the export${skipped.length ? `; ${esc(skipped.join("; "))}` : ""}</span>
+    const { found, added } = importParts(parts);
+    out.innerHTML = `<div class="stack"><strong>${plural(added, "new reel")} saved</strong><span class="hint">${found} found in the export${skipped.length ? `; ${esc(skipped.join("; "))}` : ""}</span>
       ${added ? `<button class="btn primary block" id="go">Start now</button>` : ""}</div>`;
     const go = document.getElementById("go");
     if (go) go.addEventListener("click", () => startRun());
@@ -483,7 +607,7 @@ function inboxScreen() {
   bind("#drop", "click", done);
 }
 
-const RUN_STEPS = [["caption", "Reading the caption from Instagram"], ["ai", "Writing the notes with the on-phone AI"]];
+const RUN_STEPS = [["caption", "Reading the caption (and, for YouTube, the spoken words)"], ["ai", "Writing the notes with the on-phone AI"]];
 
 function runScreen() {
   if (!run) {
@@ -553,6 +677,9 @@ function settingsScreen() {
       <div class="grid2"><button class="btn" id="exshare">Share notes</button><button class="btn" id="excopy">Copy all</button></div>
       <p class="hint">Files go to Downloads/ReelShelf. Send the JSON to Claude to analyze all your reels together.</p>
     </div>
+    <div class="stack"><h2>Instagram</h2>
+      <button class="btn block" id="igsignout">Sign Reel Shelf out of Instagram</button>
+      <p class="hint">Only signs out the page Reel Shelf opens for your saved-reels export. Your Instagram app stays signed in.</p></div>
     <p class="hint">Reel Shelf does nothing in the background. Sharing a reel only saves it; leaving the app stops the AI and any download.</p>
     <button class="btn block link" id="old">Use the old Reel Shelf on a PC or Termux</button>
     <button class="btn block danger" id="wipe">Delete all reels and notes</button>`;
@@ -586,6 +713,7 @@ function settingsScreen() {
   bind("#exshare", "click", () => sync("shareText", Notes.exportMarkdown(db.reels), "Share your reel notes"));
   bind("#excopy", "click", () => { sync("copy", Notes.exportMarkdown(db.reels)); toast("All notes copied"); });
   bind("#old", "click", () => sync("openServerMode"));
+  bind("#igsignout", "click", () => { if (confirm("Sign Reel Shelf's Instagram page out?")) { sync("signOutInstagram"); toast("Signed out"); } });
   bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes? This cannot be undone.`)) { db = { reels: [], inbox: [] }; saveDb(); toast("Deleted"); settingsScreen(); } });
 }
 
@@ -593,6 +721,7 @@ function settingsScreen() {
 
 const ROUTES = [
   [/^#?\/?$/, homeScreen, "home"], [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "home"], [/^#\/inbox$/, inboxScreen, "home"],
+  [/^#\/ask(\?.*)?$/, askScreen, "ask"],
   [/^#\/add$/, addScreen, "add"], [/^#\/run$/, runScreen, "run"], [/^#\/settings$/, settingsScreen, "settings"],
 ];
 

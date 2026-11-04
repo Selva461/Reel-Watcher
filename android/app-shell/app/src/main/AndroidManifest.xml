@@ -30,6 +30,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Instagram's own "Download your information" page inside the app, to bring the saved-reels export back -->
+        <activity
+            android:name=".InstagramActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize" />
         <!-- "Share" from Instagram (a reel) or from Meta AI (its answer): saves it and closes at once -->
         <activity
             android:name=".ShareActivity"

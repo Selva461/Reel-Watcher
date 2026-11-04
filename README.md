@@ -27,16 +27,26 @@ The Android app now works on its own: no Termux, no PC, no account. It turns the
 this format: **TOPIC, POINTS, MEANING, USE IT FOR, TOOLS, TAKEAWAY, TAGS**.
 
 1. Install `ReelShelf.apk` (see below) and open it once.
-2. In Instagram, tap the share arrow on a reel and pick **Reel Shelf**. It is only saved (you stay in Instagram).
+2. In Instagram (or YouTube, for Shorts), tap the share arrow on a reel and pick **Reel Shelf**. It is only saved (you stay in the app).
 3. When you want the notes, open Reel Shelf and tap **Start**. Two ways to get them:
    - **On-phone AI**: Settings, **Download model** (Qwen2.5 1.5B, about 1.6 GB, free, Apache 2.0). Start then reads
      each reel's public caption and the model writes the notes on the phone (GPU, falls back to CPU).
      Answer length, style, extra instructions and your own `.litertlm` model file can be set in Settings.
    - **Ask Meta AI** on a reel: your prompt plus the reel link go to Meta AI in one tap. Share Meta AI's answer
      back to Reel Shelf and it is filed under that reel. Best quality, because Meta AI watches the whole reel.
-4. **Add** takes many reel links at once, pasted Meta AI answers (several are split up), or Instagram's
-   "Download your information" ZIP (collections become labels).
-5. **Settings, Export** saves everything to Downloads/ReelShelf as JSON (to analyze with Claude) or Markdown.
+   - **Without any AI**: Start still makes quick notes from the caption (the key sentences, keywords as tags), so
+     every reel can be found in the library. The AI can redo them later.
+   - **Ask Meta AI about 5 reels at once** (on the Shelf): one message, and its one answer is split back per reel.
+   - **YouTube Shorts**: Start reads the title, description and the spoken words (YouTube's captions), with no key
+     and no login, and the notes are written from what is actually said.
+4. **Ask** is a search engine over what you learned: ranked results (BM25), typos and similar words allowed,
+   the lines that answer you, related reels, and optionally a short answer from the on-phone AI that cites the reels.
+   None of it needs AI except that last button.
+5. **Add** takes many reel links at once, pasted Meta AI answers (several are split up), or Instagram's
+   "Download your information" export (collections become labels). **Get my saved reels from Instagram** opens
+   Instagram's own export page inside the app: you sign in and tap the buttons yourself (the app never clicks,
+   scrolls or reads your password), and when the file is ready, tapping Download brings the saved reels straight in.
+6. **Settings, Export** saves everything to Downloads/ReelShelf as JSON (to analyze with Claude) or Markdown.
 
 Battery: nothing runs in the background. Sharing only saves; the work and the model download run only while
 the app is open, and leaving the app stops them (the download continues from where it stopped).

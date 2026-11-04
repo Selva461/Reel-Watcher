@@ -24,7 +24,7 @@ public class ShareActivity extends Activity {
             Toast.makeText(this, "Nothing to save: share a reel link or a text", Toast.LENGTH_SHORT).show();
         } else {
             LocalBridge.queueShared(this, text);
-            boolean link = text.matches("(?s).*instagram\\.com/(reels?|p|tv)/.*");
+            boolean link = text.matches("(?s).*(instagram\\.com/(reels?|p|tv)/|youtube\\.com/(shorts/|watch)|youtu\\.be/).*");
             Toast.makeText(this, link ? "Saved to Reel Shelf. Open it and tap Start when you want the notes."
                     : "Saved to Reel Shelf. Open it to file this answer.", Toast.LENGTH_LONG).show();
         }
