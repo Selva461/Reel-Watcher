@@ -76,7 +76,7 @@ public class InstagramActivity extends Activity {
         bar = new TextView(this);
         bar.setTextColor(Color.WHITE);
         bar.setTextSize(13);
-        bar.setText("Sign in, then: Some of your information > tick Saved > Download to device > format JSON > Create files. "
+        bar.setText("Sign in, then: Some of your information > tick only Saved > Download to device > All time, format JSON, media quality Low > Create files. "
                 + "Meta emails you when it is ready (minutes to hours). Then open this screen again and tap Download.");
         top.addView(bar, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         // If Meta will not sign you in here, do the same steps in Chrome and choose the downloaded ZIP in Add
@@ -158,15 +158,44 @@ public class InstagramActivity extends Activity {
                             Toast.LENGTH_LONG).show();
                     finish();
                 });
+            } catch (NotZip e) {
+                // Meta answered with a web page instead of the file (its download link wants a full browser).
+                // Do what the Instagram app does: hand the same link to the phone's browser, which saves the ZIP
+                // to Downloads; then it is chosen in Add.
+                if (!stop) ui.post(() -> openInBrowser(url));
             } catch (Exception e) {
-                if (!stop) say("The download did not finish (" + e.getMessage() + "). Tap Download again.");
+                if (!stop) say("The download did not finish (" + e.getMessage() + "). Tap Download again, or tap Chrome.");
             } finally {
                 download = null;
+                WorkService.STOP_HOOKS.remove(stopHook);
+                WorkService.end(this);
             }
         }, "ig-export");
         download = t;
-        say("Downloading your export. Keep this screen open...");
+        // the download keeps going if you leave the app, with a notification that has Stop
+        WorkService.STOP_HOOKS.add(stopHook);
+        WorkService.show(this, "Downloading your Instagram export", "Your saved reels come in when it is done", 0, 0);
+        say("Downloading your export. You can leave the app; the notification shows it.");
         t.start();
+    }
+
+    /** The answer was not a ZIP file (a web page, a sign-in check...). */
+    private static final class NotZip extends Exception {
+        NotZip(String what) {
+            super(what);
+        }
+    }
+
+    /** Opens the export download in the phone's browser (Chrome), which saves it to Downloads. */
+    private void openInBrowser(String url) {
+        say("Chrome is downloading your export. When it is done, come back to Reel Shelf, tap Add, then "
+                + "Choose the export and pick the ZIP from Downloads.");
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE));
+            Toast.makeText(this, "Opening Chrome to download your export. Then choose it in Add.", Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            say("No browser found. Open Instagram, download the export there, then choose it in Add.");
+        }
     }
 
     /** Streams the export ZIP and keeps only the saved-posts files. Returns [{name, text}] as JSON. */
@@ -180,6 +209,7 @@ public class InstagramActivity extends Activity {
             c.setConnectTimeout(20000);
             c.setReadTimeout(60000);
             if (userAgent != null) c.setRequestProperty("User-Agent", userAgent);
+            c.setRequestProperty("Accept", "application/zip,application/octet-stream,*/*");
             String ck = CookieManager.getInstance().getCookie(url);
             if (ck == null) ck = cookies;
             if (ck != null) c.setRequestProperty("Cookie", ck);
@@ -211,6 +241,15 @@ public class InstagramActivity extends Activity {
                 byte[] buf = new byte[65536];
                 int n;
                 int lastPct = -1;
+                // every ZIP starts with "PK"; anything else is a page, not the export
+                byte[] head = new byte[4];
+                int got = 0;
+                while (got < 4 && (n = in.read(head, got, 4 - got)) > 0) got += n;
+                if (got < 4 || head[0] != 'P' || head[1] != 'K') {
+                    throw new NotZip(String.valueOf(c.getContentType()));
+                }
+                out.write(head, 0, got);
+                seen = got;
                 while ((n = in.read(buf)) > 0) {
                     if (stop) throw new Exception("stopped");
                     seen += n;
@@ -225,6 +264,7 @@ public class InstagramActivity extends Activity {
             } finally {
                 c.disconnect();
             }
+            if (len > 0 && seen < len) throw new Exception("the download was cut off; check the internet and tap Download again");
             say("Reading your saved reels...");
             for (ExportReader.Part part : ExportReader.readSaved(zipFile)) {
                 parts.put(new JSONObject().put("name", part.name).put("text", part.text));
@@ -243,18 +283,22 @@ public class InstagramActivity extends Activity {
         else super.onBackPressed();
     }
 
-    /** Leaving this screen stops the download: nothing runs in the background. */
-    @Override
-    protected void onStop() {
+    private final Runnable stopHook = () -> {
         stop = true;
         Thread t = download;
         if (t != null) t.interrupt();
+    };
+
+    /** Leaving this screen: a running download keeps going (its notification has Stop); nothing else runs. */
+    @Override
+    protected void onStop() {
         CookieManager.getInstance().flush();
         super.onStop();
     }
 
     @Override
     protected void onDestroy() {
+        if (download != null) stopHook.run();
         if (web != null) web.destroy();
         super.onDestroy();
     }

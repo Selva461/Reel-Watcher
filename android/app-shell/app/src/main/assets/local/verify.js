@@ -138,7 +138,7 @@ const Verify = (() => {
         <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.review + c.notFound}</strong><span class="small muted">need you</span></div>
       </div>
       ${running ? `<div class="card stack"><strong>Checking ${Math.min(job.done + 1, job.total)} of ${job.total}</strong><span class="bar"><span style="width:${pct}%"></span></span>
-          <span class="small muted">Keep the app open. Leaving it pauses the check; it continues next time.</span><button class="btn block" id="vstop">Stop</button></div>`
+          <span class="small muted">You can leave the app: it keeps checking, with a notification to stop it.</span><button class="btn block" id="vstop">Stop</button></div>`
         : `<button class="btn primary block" id="vgo" ${c.waiting ? "" : "disabled"}>${c.waiting ? `Process: check ${plural(c.waiting, "title")} online` : "Nothing new to check"}</button>`}
       ${job && job.finished ? `<div class="card stack"><strong>${job.error ? esc(job.error) : job.sum && job.sum.offline ? "No internet: try again on Wi-Fi or mobile data" : job.sum && job.sum.stopped ? "Paused" : "Done"}</strong>
           ${job.applied ? `<span class="small muted">${job.applied.verified} verified, ${job.applied.review} to pick, ${job.applied.notFound} not found</span>` : ""}</div>` : ""}
@@ -182,7 +182,7 @@ const Verify = (() => {
     bind("#nightly", "click", (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; sync("setNightly", on); toast(on ? "Nightly check on" : "Nightly check off"); redraw(); });
   }
 
-  return { cardHtml, apply, choose, keep, reject, retitle, counts, onOpen, screen, settingsHtml, bindSettings, start };
+  return { cardHtml, apply, choose, keep, reject, retitle, counts, onOpen, screen, settingsHtml, bindSettings, start, get job() { return job; } };
 })();
 
 if (typeof module !== "undefined") module.exports = Verify;

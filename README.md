@@ -55,8 +55,9 @@ this format: **TOPIC, POINTS, MEANING, USE IT FOR, TOOLS, TAKEAWAY, TAGS**.
    downloaded ZIP in Add (big and ZIP64 exports are fine).
 6. **Settings, Export** saves everything to Downloads/ReelShelf as JSON (to analyze with Claude) or Markdown.
 
-Battery: nothing runs in the background. Sharing only saves; the work and the model download run only while
-the app is open, and leaving the app stops them (the download continues from where it stopped).
+Battery: nothing starts by itself. Sharing only saves. A job you start (Start, screenshots, online check, the
+Instagram export download) keeps going if you leave the app, always with a notification showing its progress and a
+Stop button, and the notification goes away as soon as the job ends. With no job running, leaving the app stops everything.
 Limit: without a server the app can read a reel's link and caption, not its speech or on-screen text, so the
 on-phone AI works from the caption plus anything you type under "What the reel says". Meta AI has no such limit.
 The older engine below (Termux or PC) is still reachable from Settings.

@@ -50,6 +50,7 @@ uv run reel-watcher study --input urls.tsv --out-root .\out --run --limit 3    #
 | `.../assets/local/watch.js` | Watch tab: filters, title page, add/edit dialog, `Watch.addCandidate` |
 | `.../assets/local/verify.js` + `TitleVerifier.java`, `TitleMatch.java`, `VerifyJob.java`, `NightlyCheck.java` | Online check of watchlist titles: TMDB (user's own key in Settings, never hardcoded), Wikidata, AniList, Jikan, MangaDex; fuzzy matching without AI; "verified" needs a second agreeing source or an exact unique name, else "conflict" with choices. Process runs only with the app open; the nightly JobScheduler check (Wi-Fi + charging + idle) is off by default. Java writes `verify-results.json` only; the page applies it with `Catalog.verify`. JUnit tests in `app/src/test` (fake network) |
 | `android/app-shell/app/src/main/assets/local/` | The built-in phone app (no Termux): `notes.js` (notes format, links, exports, export ZIP), `local.js` (screens), library search without AI (BM25, stems, synonyms, typos, related reels, quick notes) in `notes.js`; `InstagramActivity.java` is Instagram's own export page (no bridge, Meta hosts only, downloads the ZIP to the app cache, keeps only saved*.json/html via `ExportReader.java` (ZipFile, ZIP64 safe) and deletes it), `app.css` is a copy of `webapp/app.css` (a test keeps them equal) |
+| `android/app-shell/.../WorkService.java` | Foreground service with a Stop notification, only while a user-started job runs (page reports jobs via `RN.workUpdate`/`workEnd`; `overnightRun()` in `local.js` chains them) |
 | `android/app-shell/.../LocalBridge.java`, `LocalModel.java`, `ShareActivity.java` | `window.RN` bridge (storage file, caption fetch, saving files), on-phone model (LiteRT-LM, download with resume), share target that only saves |
 
 Tests live in `tests/`; they use no network and no models (Ollama, OCR and whisper are faked). `tests/test_app.py` drives the UI in Chromium at phone size.
@@ -61,8 +62,16 @@ Tests live in `tests/`; they use no network and no models (Ollama, OCR and whisp
 - New input source: add a parser that yields Instagram URLs, write a TSV (`url<TAB>collection`).
 - Add a test for every pure function you change (`dedupe_frames`, `parse_giveaway`, `map_tiles`, parsers).
 - Do not publish or push anything without the owner's approval.
-- Phone app: never add background services, workers or alarms. Work runs only while the app is open; `onStop` stops it.
+- Phone app: nothing starts on its own (no alarms or workers besides the opt-in NightlyCheck). A job the user starts may keep running after they leave the app only through `WorkService` (foreground service, progress notification with Stop, ended as soon as no job runs). With no job, `onStop` stops everything.
   Meta AI is used only by the user's own tap (share sheet), never called by the app. The model download host is huggingface.co only.
   Never automate Instagram (no scripted clicks, scrolling or scraping of a signed-in session): the user taps in InstagramActivity themselves. The app never reads the Instagram cookies except to fetch the export file the user tapped. Fetches: instagram.com, youtube.com (watch page, youtubei/v1/player, timedtext), huggingface.co.
   Library features must work without AI first; AI is an optional extra.
 - `tests/test_phone_app.py` drives the built-in phone app in Chromium with a fake `window.RN`.
+
+## Release (phone app)
+
+- Every change: `versionCode` +1 and a new `versionName` in `android/app-shell/app/build.gradle`, plus a `## <versionName>`
+  section in `CHANGELOG.md`. Merging to `ccr-d0c0b070-bdpssy` builds once and publishes release `v<versionName>` and `apk-latest`.
+- Updates install over the old app only when signed with the stable key: secrets `ANDROID_KEYSTORE_BASE64`
+  (PKCS12, alias `reelshelf`) and `ANDROID_KEYSTORE_PASSWORD`. Never commit the keystore.
+- To save Actions minutes, the APK is built only on the install branch; test locally with `uv run pytest tests/test_phone_app.py`.

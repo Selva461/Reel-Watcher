@@ -717,4 +717,22 @@ final class LocalBridge {
         }
         return o.toString();
     }
+
+    // ------------------------------------------------------------------ jobs that keep going after you leave the app
+
+    /** A job you started is running: show (or update) its notification, so it keeps going if you leave the app. */
+    @JavascriptInterface
+    public void workUpdate(String title, String text, int done, int total) {
+        if (!ok()) return;
+        act.setWorking(true);
+        WorkService.show(act, title, text, done, total);
+    }
+
+    /** No job is running any more: the notification goes and nothing keeps the phone busy. */
+    @JavascriptInterface
+    public void workEnd() {
+        if (!ok()) return;
+        act.setWorking(false);
+        WorkService.end(act);
+    }
 }

@@ -143,7 +143,7 @@ const Shots = (() => {
         <span class="small">${n.found + n.several} with names, ${n.unsure} unsure, ${n.none + n.no_text} with no name in the text${n.error ? `, ${n.error} could not be opened` : ""}</span>
         ${n.unsure + n.none + n.no_text ? `<a class="btn block" href="#/shots/review">Look at the ones without a sure name</a>` : ""}</div>` : ""}
       <button class="btn primary block" id="go">Process${fs.length ? "" : " reel captions"}</button>
-      <p class="hint">Only new screenshots are read each time. Keep the app open; leaving it pauses, and Process carries on.
+      <p class="hint">Only new screenshots are read each time. You can leave the app while it runs (a notification shows it, with Stop).
         ${b.level >= 0 ? ` Battery ${b.level}%${b.charging ? ", charging" : ""}. A big first run is best done on the charger.` : ""}</p>
       ${job && job.finished ? doneHtml() : ""}`;
     bind("#addf", "click", () => phone("addShotFolder").then(() => { toast("Folder added"); screen(); }).catch((e) => { if (e.message !== "cancelled") toast(e.message); }));
@@ -170,7 +170,7 @@ const Shots = (() => {
         <span class="bar"><span style="width:${pct}%"></span></span>
         <span class="small">${plural(job.found, "name")} found, ${plural(job.added, "new title")}${rate ? ` · about ${Math.round(rate)} a minute${left ? `, ${left < 90 ? left + " min" : Math.round(left / 60) + " h"} left` : ""}` : ""}</span></div>
       ${job.recent.length ? `<div class="card small muted">${job.recent.map(esc).join(" · ")}</div>` : ""}
-      <p class="hint">Keep the app open; the screen stays on while this runs. Leaving pauses it.</p>
+      <p class="hint">You can leave the app: it keeps going, with a notification to stop it.</p>
       <button class="btn block" id="stop">Stop</button>`;
     bind("#stop", "click", () => stop());
   }
