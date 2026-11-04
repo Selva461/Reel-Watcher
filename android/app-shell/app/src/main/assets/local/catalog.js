@@ -50,7 +50,7 @@ const Catalog = (() => {
     for (const t of types(db)) {
       if (t.id === w.replace(/ /g, "_") || t.label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() === w) return t.id;
       if (t.plural && t.plural.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() === w) return t.id;
-      if ((t.aliases || []).includes(w)) return t.id;
+      if ((t.aliases || []).some((x) => x.replace(/[^a-z0-9]+/g, " ").trim() === w)) return t.id;
     }
     return w.replace(/ /g, "_").slice(0, 40);
   }

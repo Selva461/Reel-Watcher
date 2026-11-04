@@ -131,7 +131,7 @@ const Verify = (() => {
     const pct = running && job.total ? Math.round((job.done / job.total) * 100) : 0;
     const todo = (db.media || []).filter((m) => m.verified === "conflict" || ((!m.verified || m.verified === "unverified") && m.checked_at));
     const night = (() => { try { return JSON.parse(sync("nightlyInfo") || "{}"); } catch (e) { return {}; } })();
-    $app.innerHTML = `${header("Check titles online", "#/")}
+    $app.innerHTML = `${header("Check titles online", "#/watch")}
       <div class="grid3">
         <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.waiting}</strong><span class="small muted">to check</span></div>
         <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.verified}</strong><span class="small muted">verified</span></div>
@@ -154,6 +154,14 @@ const Verify = (() => {
     bind("[data-retitle]", "submit", (e, f) => { e.preventDefault(); if (retitle(db, f.dataset.retitle, f.t.value)) { saveDb(); toast("It will be looked up on the next Process"); screen(); } });
   }
 
+  /** The card on the Watchlist screen that leads to the check. */
+  function cardHtml() {
+    const v = counts(db);
+    if (!v.waiting && !v.review) return "";
+    const bits = [v.waiting && `${v.waiting} new`, v.review && `${v.review} for you to pick`].filter(Boolean).join(" · ");
+    return `<a class="card" href="#/check"><span class="grow stack" style="gap:2px"><strong>Look up online</strong><span class="small muted">${bits}</span></span>${ICON.chev}</a>`;
+  }
+
   function paint() { if (location.hash === "#/check") screen(); }
 
   /** The Settings section: your own TMDB key (stays on this phone) and the nightly switch. */
@@ -174,7 +182,7 @@ const Verify = (() => {
     bind("#nightly", "click", (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; sync("setNightly", on); toast(on ? "Nightly check on" : "Nightly check off"); redraw(); });
   }
 
-  return { apply, choose, keep, reject, retitle, counts, onOpen, screen, settingsHtml, bindSettings, start };
+  return { cardHtml, apply, choose, keep, reject, retitle, counts, onOpen, screen, settingsHtml, bindSettings, start };
 })();
 
 if (typeof module !== "undefined") module.exports = Verify;

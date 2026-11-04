@@ -64,13 +64,13 @@ function sync(method, ...args) {
 
 // ------------------------------------------------------------------ library and settings
 
-let db = { reels: [], inbox: [] };
+let db = { reels: [], inbox: [], media: [], mediaTypes: [] };
 function loadDb() {
   const t = sync("load");
   if (t) {
     try {
       const d = JSON.parse(t);
-      db = { ...d, reels: d.reels || [], inbox: d.inbox || [] };  // keeps the watchlist (media) too
+      db = { reels: d.reels || [], inbox: d.inbox || [], media: d.media || [], mediaTypes: d.mediaTypes || [] };
       for (const r of db.reels) if (r.status === "working") r.status = r.notes ? "done" : "new";  // the app was closed mid-way
     } catch (e) { toast("Your library file could not be read"); } }
 }
@@ -345,7 +345,6 @@ function homeScreen() {
     ${running ? `<a class="card accent" href="#/run"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="grow"><strong>Working: ${run.i + 1} of ${run.codes.length}</strong><br><span>Keep the app open</span></span></a>`
       : todo.length ? `<button class="card accent" id="start"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="stack grow" style="gap:2px">
         <strong style="font-size:17px">Start: ${plural(todo.length, "reel")}</strong><span>${ready ? "Reads each caption and writes the notes on this phone" : "Reads each caption. Download the AI model in Settings to write notes too"}</span></span></button>` : ""}
-    ${(() => { const v = Verify.counts(db); return v.waiting || v.review ? `<a class="card" href="#/check"><span class="grow stack" style="gap:2px"><strong>Check ${plural(v.waiting + v.review, "watchlist title")} online</strong><span class="small muted">${v.waiting ? `${v.waiting} new` : ""}${v.waiting && v.review ? " · " : ""}${v.review ? `${v.review} for you to pick` : ""}</span></span>${ICON.chev}</a>` : ""; })()}
     ${forMeta().length > 1 && !running ? `<button class="card" id="batch"><span class="grow stack" style="gap:2px"><strong>Ask Meta AI about ${Math.min(BATCH, forMeta().length)} reels at once</strong><span class="small muted">One message instead of ${Math.min(BATCH, forMeta().length)}. Share its answer back and each part is filed.</span></span>${ICON.chev}</button>` : ""}
     ${top.length ? `<div class="chips"><button class="chip" data-tag="" aria-pressed="${!filter.tag}">All</button>${top.map((t) => `<button class="chip" data-tag="${esc(t)}" aria-pressed="${filter.tag === t}">#${esc(t)}</button>`).join("")}</div>` : ""}
     <div class="stack" id="list">${listHtml()}</div>`;
@@ -439,6 +438,7 @@ function reelScreen(code) {
     ${r.asked_at && !(n && r.notes_by === "meta") ? `<p class="hint">When Meta AI answers, tap Share on its answer and choose Reel Shelf. It will be filed here.</p>` : ""}
     ${r.caption ? `<details class="card"><summary><strong>${Notes.isYoutube(r) ? "Description" : "Caption"}</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.caption)}</p></details>` : ""}
     ${r.transcript ? `<details class="card"><summary><strong>What is said (from YouTube's captions)</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.transcript)}</p></details>` : ""}
+    ${reelTitlesHtml(r)}
     ${relatedHtml(r)}
     <details class="card" ${r.extra ? "open" : ""}><summary><strong>What the reel says (optional)</strong></summary>
       <div class="stack" style="margin-top:8px"><p class="hint">The phone's AI cannot watch the video. Type or paste what is said or shown, and it will use it.</p>
@@ -451,6 +451,7 @@ function reelScreen(code) {
   bind("#paste", "click", () => pasteDialog(r));
   bind("#saveExtra", "click", () => { r.extra = document.getElementById("extra").value.slice(0, 10000); if (!r.notes && r.status === "ready_no_text") r.status = "ready"; saveDb(); toast("Saved"); reelScreen(code); });
   bind("#phoneai", "click", () => startRun([r.code]).then(() => {}));
+  bind("#addrt", "click", () => titleDialog(null, r.code));
   bind("#del", "click", () => { if (confirm("Remove this reel and its notes from Reel Shelf?")) { db.reels = db.reels.filter((x) => x !== r); saveDb(); location.hash = "#/"; } });
 }
 
@@ -678,6 +679,7 @@ function settingsScreen() {
     <div class="stack"><h2>Export (${plural(db.reels.length, "reel")})</h2>
       <div class="grid2"><button class="btn" id="exjson">Save JSON</button><button class="btn" id="exmd">Save Markdown</button></div>
       <div class="grid2"><button class="btn" id="exshare">Share notes</button><button class="btn" id="excopy">Copy all</button></div>
+      <button class="btn block" id="excsv">Save watchlist (${plural((db.media || []).length, "title")}, CSV)</button>
       <p class="hint">Files go to Downloads/ReelShelf. Send the JSON to Claude to analyze all your reels together.</p>
     </div>
     <div class="stack"><h2>Instagram</h2>
@@ -714,11 +716,12 @@ function settingsScreen() {
   const stamp = () => new Date().toISOString().slice(0, 10);
   bind("#exjson", "click", () => phone("saveFile", `reel-notes-${stamp()}.json`, "application/json", Notes.exportJson(db.reels)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#exmd", "click", () => phone("saveFile", `reel-notes-${stamp()}.md`, "text/markdown", Notes.exportMarkdown(db.reels)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
+  bind("#excsv", "click", () => phone("saveFile", `watchlist-${stamp()}.csv`, "text/csv", Catalog.exportCsv(db)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#exshare", "click", () => sync("shareText", Notes.exportMarkdown(db.reels), "Share your reel notes"));
   bind("#excopy", "click", () => { sync("copy", Notes.exportMarkdown(db.reels)); toast("All notes copied"); });
   bind("#old", "click", () => sync("openServerMode"));
   bind("#igsignout", "click", () => { if (confirm("Sign Reel Shelf's Instagram page out?")) { sync("signOutInstagram"); toast("Signed out"); } });
-  bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes? This cannot be undone.`)) { db = { reels: [], inbox: [] }; saveDb(); toast("Deleted"); settingsScreen(); } });
+  bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes? This cannot be undone.`)) { db.reels = []; db.inbox = []; saveDb(); toast("Deleted (your watchlist is kept)"); settingsScreen(); } });
 }
 
 // ------------------------------------------------------------------ router
@@ -726,8 +729,9 @@ function settingsScreen() {
 const ROUTES = [
   [/^#?\/?$/, homeScreen, "home"], [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "home"], [/^#\/inbox$/, inboxScreen, "home"],
   [/^#\/ask(\?.*)?$/, askScreen, "ask"],
+  [/^#\/watch$/, watchScreen, "watch"], [/^#\/m\/(.+)$/, (m) => titleScreen(decodeURIComponent(m[1])), "watch"],
   [/^#\/add$/, addScreen, "add"], [/^#\/run$/, runScreen, "run"], [/^#\/settings$/, settingsScreen, "settings"],
-  [/^#\/check$/, () => Verify.screen(), "home"],
+  [/^#\/check$/, () => Verify.screen(), "watch"],
 ];
 
 function render() {
