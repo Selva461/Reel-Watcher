@@ -5,6 +5,18 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.3
+- Titles from screenshots are checked by the app alone: nothing waits for you to pick. Each title is looked up in
+  TMDB (or Wikidata), AniList, MyAnimeList and MangaDex, and when none of them finds it, in Wikipedia's search, which
+  forgives misspelt or half-read names. The best match is picked and the title takes its official name ("DUNE" and
+  "Intersteller" become "Dune" and "Interstellar"); the name read from the screenshot is kept as another name.
+- Remakes and look-alikes (a film and its remake, an anime and its manga) go to the one more sources agree on; the
+  note says which one it was picked over.
+- A title is renamed only when a second source agrees, or one source matches it closely. Anything weaker keeps its
+  name and is tried again in 30 days; nothing is renamed on a guess.
+- New screenshot titles are checked online right after they are read (no Process tap needed).
+- Titles that were waiting for you to pick, or were not found before, are checked again under the new rules.
+
 ## 1.3.2
 - Look things up online (Settings, off by default): when your notes do not answer a question, Reel Shelf searches
   Wikipedia and DuckDuckGo (free, no key, no account, not AI). Only your question is sent, never your notes. With the

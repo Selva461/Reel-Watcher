@@ -198,7 +198,10 @@ const Catalog = (() => {
     const m = get(db, id);
     if (!m) return null;
     const oldTitle = m.title;
-    if (facts.title && normTitle(facts.title) !== normTitle(m.title)) { m.aka = uniq([...(m.aka || []), m.title]); m.title = clean(facts.title, 200); }
+    if (facts.title && clean(facts.title, 200) !== m.title) {  // the official spelling, even when only the capitals differ ("DUNE")
+      if (normTitle(facts.title) !== normTitle(m.title)) m.aka = uniq([...(m.aka || []), m.title]);
+      m.title = clean(facts.title, 200);
+    }
     if (facts.type) m.type = typeId(db, facts.type);
     if (facts.year) m.year = toYear(facts.year);
     if (facts.language) m.language = langCode(facts.language);

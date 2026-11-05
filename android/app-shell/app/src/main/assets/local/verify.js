@@ -2,7 +2,8 @@
    TMDB (movies and series, with your own free key) or Wikidata (no key), AniList and Jikan (anime), MangaDex (manga).
    Answers wait in a file until this page applies them with Catalog.verify, so nothing is ever overwritten.
    Runs when you tap Process (app open), or at night if you switch that on (Wi-Fi + charging + phone not in use).
-   Unsure titles (remakes, two close names) are shown to you with posters to pick; nothing is guessed silently. */
+   Nothing waits for you: the phone picks the best match itself and its official name replaces the one read from the
+   screenshot. Titles no source matches closely enough keep their name and are tried again later. */
 "use strict";
 
 const Verify = (() => {
@@ -28,45 +29,33 @@ const Verify = (() => {
         const kept = Catalog.verify(db, id, r.facts, "verified", r.by || "online");
         if (kept) { kept.check = check; delete kept.review; }
         n.verified++;
-      } else if (r.verdict === "conflict") {
-        const kept = Catalog.verify(db, id, {}, "conflict", r.by || "online");  // your reading stays until you pick
-        if (kept) { kept.check = check; kept.review = { choices: (r.choices || []).slice(0, 4), note: check.note }; }
-        n.review++;
+      } else if (r.verdict === "conflict") {  // an answer from before 1.3.3: asked again under the automatic rules
+        delete m.checked_at;
+        n.skipped++;
       } else {
         m.checked_at = check.at;  // stays "unverified"; tried again in 30 days or when it is seen again
         m.check = check;
-        if ((r.choices || []).length) m.review = { choices: r.choices.slice(0, 3), note: check.note };
         n.notFound++;
       }
     }
     return n;
   }
 
-  /** You picked one of the choices: it becomes the verified title. */
-  function choose(db, id, i) {
-    const m = Catalog.get(db, id);
-    const c = m && m.review && m.review.choices[i];
-    if (!c) return null;
-    const kept = Catalog.verify(db, id, c.facts || {}, "verified", "you");
-    if (kept) { delete kept.review; kept.check = { ...(kept.check || {}), verdict: "verified", by: "you", note: `You picked it (${c.source})`, at: Date.now() }; }
-    return kept;
-  }
-  /** It is right as it was read, even if no database has it. */
-  function keep(db, id) { const m = Catalog.verify(db, id, {}, "verified", "you"); if (m) delete m.review; return m; }
-  /** Not a title (a random screenshot): hidden from the watchlist, not deleted. */
-  function reject(db, id) { const m = Catalog.verify(db, id, {}, "rejected", "you"); if (m) delete m.review; return m; }
-  /** You typed the right name: it is looked up again on the next Process. */
-  function retitle(db, id, title) {
-    const m = Catalog.get(db, id);
-    if (!m || !String(title || "").trim()) return null;
-    if (Catalog.normTitle(title) !== Catalog.normTitle(m.title)) m.aka = [...new Set([...(m.aka || []), m.title])];
-    Catalog.update(db, id, { title });
-    m.verified = "unverified";
-    delete m.checked_at;
-    delete m.review;
-    delete m.check;
-    m.updated_at = Date.now();
-    return m;
+  /** Once, on the update to 1.3.3: titles that waited for you to pick, or were not found under the old rules, are
+      checked again (now with Wikipedia and automatic picking). Returns how many. Does not save. */
+  function migrate(db) {
+    if ((db.verify_rules || 0) >= 2) return 0;
+    let n = 0;
+    for (const m of db.media || []) {
+      if (m.verified === "conflict" || ((!m.verified || m.verified === "unverified") && m.checked_at)) {
+        m.verified = "unverified";
+        delete m.checked_at;
+        delete m.review;
+        n++;
+      }
+    }
+    db.verify_rules = 2;
+    return n;
   }
 
   function counts(db, now = Date.now()) {
@@ -74,7 +63,6 @@ const Verify = (() => {
     const waiting = list.filter((m) => (!m.verified || m.verified === "unverified") && !(m.checked_at && (m.updated_at || 0) <= m.checked_at && now - m.checked_at < NOT_FOUND_RETRY));
     return {
       waiting: waiting.length,
-      review: list.filter((m) => m.verified === "conflict").length,
       notFound: list.filter((m) => (!m.verified || m.verified === "unverified") && m.checked_at).length,
       verified: list.filter((m) => m.verified === "verified").length,
       // checked before lengths were kept: the next Process looks up how long they are (for "under 1.5 hours")
@@ -91,13 +79,15 @@ const Verify = (() => {
 
   /** Called when the page opens or comes back: applies answers from Process or the night. */
   function onOpen(quiet) {
+    const rules = db.verify_rules;
+    if (migrate(db) || rules !== db.verify_rules) saveDb();
     let got = {};
     try { got = JSON.parse(sync("takeVerified") || "{}"); } catch (e) { got = {}; }
     if (!Object.keys(got).length) return null;
     const n = apply(db, got);
     saveDb();
     if (!quiet) {
-      const parts = [n.verified && `${n.verified} verified`, n.review && `${n.review} to pick`, n.notFound && `${n.notFound} not found`].filter(Boolean);
+      const parts = [n.verified && `${n.verified} verified`, n.notFound && `${n.notFound} not found`].filter(Boolean);
       if (parts.length) toast(`Titles checked online: ${parts.join(", ")}`);
     }
     return n;
@@ -115,62 +105,35 @@ const Verify = (() => {
     paint();
   }
 
-  function choiceHtml(m, c, i) {
-    return `<button class="list-item" data-pick="${esc(m.id)}" data-i="${i}">
-      ${c.poster ? `<img class="thumb sm" src="${esc(c.poster)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<span class="thumb sm"></span>`}
-      <span class="grow stack" style="gap:2px"><strong class="clamp">${esc(c.title)}</strong>
-      <span class="small muted">${esc([c.year || "", TYPE(c.type), LANG(c.language)].filter(Boolean).join(" · "))}</span>
-      <span class="small muted">${esc(c.source)} · match ${Math.round((Number(c.score) || 0) * 100)}%</span></span>${ICON.chev}</button>`;
-  }
-
-  function reviewHtml(m) {
-    const ch = (m.review && m.review.choices) || [];
-    const seen = (m.sources || [])[0];
-    return `<div class="card stack" data-entry="${esc(m.id)}">
-      <div class="row between"><strong class="clamp">${esc(m.title)}${m.year ? ` (${m.year})` : ""}</strong><span class="tag warn">${m.verified === "conflict" ? "Pick one" : "Not found"}</span></div>
-      ${seen && seen.text ? `<span class="small muted clamp">Seen as: ${esc(seen.text)}</span>` : ""}
-      ${m.review && m.review.note ? `<span class="small muted">${esc(m.review.note)}</span>` : ""}
-      ${ch.map((c, i) => choiceHtml(m, c, i)).join("")}
-      <form class="row" data-retitle="${esc(m.id)}" style="gap:8px"><input class="input grow" name="t" placeholder="Type the right name" aria-label="Right name for ${esc(m.title)}"><button class="btn">Search again</button></form>
-      <div class="grid2"><button class="btn" data-keep="${esc(m.id)}">It is right as read</button><button class="btn danger" data-reject="${esc(m.id)}">Not a title</button></div>
-    </div>`;
-  }
-
   function screen() {
     const c = counts(db);
     const running = job && !job.finished;
     const pct = running && job.total ? Math.round((job.done / job.total) * 100) : 0;
-    const todo = (db.media || []).filter((m) => m.verified === "conflict" || ((!m.verified || m.verified === "unverified") && m.checked_at));
     const night = (() => { try { return JSON.parse(sync("nightlyInfo") || "{}"); } catch (e) { return {}; } })();
     $app.innerHTML = `${header("Check titles online", "#/inbox")}
       <div class="grid3">
         <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.waiting}</strong><span class="small muted">to check</span></div>
         <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.verified}</strong><span class="small muted">verified</span></div>
-        <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.review + c.notFound}</strong><span class="small muted">need you</span></div>
+        <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.notFound}</strong><span class="small muted">not found yet</span></div>
       </div>
       ${running ? `<div class="card stack"><strong>Checking ${Math.min(job.done + 1, job.total)} of ${job.total}</strong><span class="bar"><span style="width:${pct}%"></span></span>
           <span class="small muted">You can leave the app: it keeps checking, with a notification to stop it.</span><button class="btn block" id="vstop">Stop</button></div>`
         : `<button class="btn primary block" id="vgo" ${c.waiting || c.lengths ? "" : "disabled"}>${c.waiting ? `Process: check ${plural(c.waiting, "title")} online` : c.lengths ? `Process: find how long ${plural(c.lengths, "title")} run` : "Nothing new to check"}</button>`}
       ${job && job.finished ? `<div class="card stack"><strong>${job.error ? esc(job.error) : job.sum && job.sum.offline ? "No internet: try again on Wi-Fi or mobile data" : job.sum && job.sum.stopped ? "Paused" : "Done"}</strong>
-          ${job.applied ? `<span class="small muted">${job.applied.verified} verified, ${job.applied.review} to pick, ${job.applied.notFound} not found</span>` : ""}</div>` : ""}
-      <p class="hint">Movies and series: ${settings.tmdbKey ? "TMDB (your key) and Wikidata" : "Wikidata (add a free TMDB key in Settings for posters and genres)"}. Anime: AniList and MyAnimeList. Manga: AniList and MangaDex.
-        A title is marked verified only when the name matches and a second source agrees, or the name is an exact, unique match.</p>
+          ${job.applied ? `<span class="small muted">${job.applied.verified} verified and renamed, ${job.applied.notFound} not found</span>` : ""}</div>` : ""}
+      <p class="hint">Movies and series: ${settings.tmdbKey ? "TMDB (your key) and Wikidata" : "Wikidata (add a free TMDB key in Settings for posters and genres)"}. Anime: AniList and MyAnimeList. Manga: AniList and MangaDex. Names none of them find are searched on Wikipedia.
+        The best match is picked for you and the title takes its official name. It is verified when a second source agrees, or the name is a close match on its own; anything less keeps the name read and is tried again in 30 days.</p>
       <p class="hint">Nightly check: ${night.on ? "on (Wi-Fi, charging, phone not in use)" : "off"}${night.last ? ` · last night: ${night.last.checked || 0} checked` : ""}. Change it in <a href="#/settings">Settings</a>.</p>
-      ${todo.length ? `<h2>Need you (${todo.length})</h2><div class="stack">${todo.slice(0, 60).map(reviewHtml).join("")}</div>` : ""}`;
+`;
     bind("#vgo", "click", start);
     bind("#vstop", "click", () => sync("stopVerify"));
-    bind("[data-pick]", "click", (e, b) => { choose(db, b.dataset.pick, Number(b.dataset.i)); saveDb(); toast("Saved"); screen(); });
-    bind("[data-keep]", "click", (e, b) => { keep(db, b.dataset.keep); saveDb(); screen(); });
-    bind("[data-reject]", "click", (e, b) => { reject(db, b.dataset.reject); saveDb(); toast("Hidden from the watchlist"); screen(); });
-    bind("[data-retitle]", "submit", (e, f) => { e.preventDefault(); if (retitle(db, f.dataset.retitle, f.t.value)) { saveDb(); toast("It will be looked up on the next Process"); screen(); } });
   }
 
   /** The card on the Watchlist screen that leads to the check. */
   function cardHtml() {
     const v = counts(db);
-    if (!v.waiting && !v.review) return "";
-    const bits = [v.waiting && `${v.waiting} new`, v.review && `${v.review} for you to pick`].filter(Boolean).join(" · ");
-    return `<a class="card" href="#/check"><span class="grow stack" style="gap:2px"><strong>Look up online</strong><span class="small muted">${bits}</span></span>${ICON.chev}</a>`;
+    if (!v.waiting) return "";
+    return `<a class="card" href="#/check"><span class="grow stack" style="gap:2px"><strong>Look up online</strong><span class="small muted">${v.waiting} new</span></span>${ICON.chev}</a>`;
   }
 
   function paint() { if (location.hash === "#/check") screen(); }
@@ -193,7 +156,7 @@ const Verify = (() => {
     bind("#nightly", "click", (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; sync("setNightly", on); toast(on ? "Nightly check on" : "Nightly check off"); redraw(); });
   }
 
-  return { cardHtml, apply, choose, keep, reject, retitle, counts, onOpen, screen, settingsHtml, bindSettings, start, get job() { return job; } };
+  return { cardHtml, apply, migrate, counts, onOpen, screen, settingsHtml, bindSettings, start, get job() { return job; } };
 })();
 
 if (typeof module !== "undefined") module.exports = Verify;

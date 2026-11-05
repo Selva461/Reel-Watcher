@@ -101,6 +101,7 @@ def test_process_reads_new_screenshots_into_the_watchlist_and_resumes(phone):
     assert got["Mushishi"]["type"] == "anime" and got["Interstellar"]["sources"][0]["method"] == "labelled"
     assert all(m["verified"] == "unverified" for m in media)
     st = phone.rn()
+    assert ["verifyNow"] in st["calls"]  # the new titles go to the online check by themselves, no tap
     assert st["awake"] == [True, False]
     seen = json.loads(st["shotsDb"])["seen"]
     assert seen[pics[1]["k"]]["st"] == "none" and seen[pics[0]["k"]]["st"] == "found"

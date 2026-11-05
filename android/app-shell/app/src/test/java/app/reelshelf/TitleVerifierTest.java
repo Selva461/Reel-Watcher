@@ -181,14 +181,26 @@ public class TitleVerifierTest {
     }
 
     @Test
-    public void aRemakeWithoutAYearIsAskedNotGuessed() throws Exception {
-        FakeNet net = new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(438631, "Dune", "2021-09-15", "en", "/d21.jpg", 878),
+    public void aRemakeWithoutAYearGoesToTheOneMoreSourcesAgreeOn() throws Exception {
+        // TMDB alone cannot tell the two Dunes apart: its own ranking decides, and the note names the other one
+        FakeNet net0 = new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(438631, "Dune", "2021-09-15", "en", "/d21.jpg", 878),
                 tmdbMovie(841, "Dune", "1984-12-14", "en", "/d84.jpg", 878)));
+        JSONObject r0 = new TitleVerifier(net0, new FakeClock(), "k", null).verify(cand("DUNE", "movie", 0));
+        assertEquals("verified", r0.getString("verdict"));
+        assertEquals(2021, r0.getJSONObject("facts").getInt("year"));
+        assertTrue(r0.getString("note"), r0.getString("note").contains("picked over Dune (1984)"));
+
+        // Wikidata knows only the 1984 film by that name: two sources agree, so that one is picked, with no question
+        FakeNet net = new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(438631, "Dune", "2021-09-15", "en", "/d21.jpg", 878),
+                tmdbMovie(841, "Dune", "1984-12-14", "en", "/d84.jpg", 878)))
+                .on("wbsearchentities", wdSearch("Q114819"))
+                .on("wbgetentities", new JSONObject().put("entities", new JSONObject().put("Q114819",
+                        wdEntity("Dune", "Q11424", "1984", "Q1860", "841"))).toString());
         JSONObject r = new TitleVerifier(net, new FakeClock(), "k", null).verify(cand("DUNE", "movie", 0));
-        assertEquals("conflict", r.getString("verdict"));
-        JSONArray ch = r.getJSONArray("choices");
-        assertTrue(ch.length() >= 2);
-        assertTrue(ch.toString().contains("1984") && ch.toString().contains("2021"));
+        assertEquals("verified", r.getString("verdict"));
+        assertEquals(1984, r.getJSONObject("facts").getInt("year"));
+        assertEquals("Dune", r.getJSONObject("facts").getString("title"));  // the official name, not "DUNE"
+        assertTrue(r.getString("by").contains("wikidata"));
 
         // with the year seen on the screenshot it is clear
         FakeNet net2 = new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(438631, "Dune", "2021-09-15", "en", "/d21.jpg", 878),
@@ -394,5 +406,49 @@ public class TitleVerifierTest {
         JSONObject taken = new JSONObject(VerifyJob.take(dir));
         assertEquals("details", taken.getJSONObject("m-old").getString("verdict"));
         assertEquals(148, taken.getJSONObject("m-old").getInt("runtime"));
+    }
+
+    @Test
+    public void aMisspeltNameIsFoundThroughWikipediaAndTakesItsOfficialName() throws Exception {
+        String page = new JSONObject().put("query", new JSONObject().put("pages", new JSONObject()
+                .put("41", new JSONObject().put("index", 2).put("title", "Christopher Nolan").put("fullurl", "https://en.wikipedia.org/wiki/Christopher_Nolan")
+                        .put("pageprops", new JSONObject().put("wikibase_item", "Q25191")))
+                .put("40", new JSONObject().put("index", 1).put("title", "Interstellar (film)").put("fullurl", "https://en.wikipedia.org/wiki/Interstellar_(film)")
+                        .put("pageprops", new JSONObject().put("wikibase_item", "Q13417189"))))).toString();
+        JSONObject person = new JSONObject().put("labels", new JSONObject().put("en", new JSONObject().put("value", "Christopher Nolan")))
+                .put("claims", new JSONObject().put("P31", claim("P31", new JSONObject().put("id", "Q5")).getJSONArray("P31")));
+        FakeNet net = new FakeNet()  // Wikidata's label search does not know the misspelling
+                .on("en.wikipedia.org", page)
+                .on("wbgetentities", new JSONObject().put("entities", new JSONObject()
+                        .put("Q13417189", wdEntity("Interstellar", "Q11424", "2014", "Q1860", "157336")).put("Q25191", person)).toString());
+        JSONObject r = new TitleVerifier(net, new FakeClock(), "", null).verify(cand("Intersteller", "movie", 0));
+        assertEquals("verified", r.getString("verdict"));
+        JSONObject f = r.getJSONObject("facts");
+        assertEquals("Interstellar", f.getString("title"));
+        assertEquals(2014, f.getInt("year"));
+        assertEquals("movie/157336", f.getJSONObject("ext").getString("tmdb"));
+        assertEquals("https://en.wikipedia.org/wiki/Interstellar_(film)", f.getJSONObject("ext").getString("wikipedia"));
+        assertEquals("wikipedia", r.getString("by"));
+        assertEquals(1, net.count("en.wikipedia.org"));  // asked once, only after the others found nothing
+    }
+
+    @Test
+    public void aWeakMatchOnOneSourceIsNotRenamed() throws Exception {
+        FakeNet net = new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(5, "The Garden of Words", "2013-05-31", "ja", "/g.jpg", 16)));
+        JSONObject r = new TitleVerifier(net, new FakeClock(), "k", null).verify(cand("Garden Wars", "movie", 0));
+        assertEquals("not_found", r.getString("verdict"));
+        assertFalse(r.has("facts"));  // nothing to rename it with
+    }
+
+    @Test
+    public void wikipediaIsNotAskedWhenTheDatabasesAlreadyAgree() throws Exception {
+        FakeNet net = new FakeNet()
+                .on("themoviedb.org/3/search/multi", tmdb(tmdbMovie(27205, "Inception", "2010-07-15", "en", "/inc.jpg", 28, 878)))
+                .on("wbsearchentities", wdSearch("Q25188"))
+                .on("wbgetentities", new JSONObject().put("entities", new JSONObject().put("Q25188",
+                        wdEntity("Inception", "Q11424", "2010", "Q1860", "27205"))).toString());
+        JSONObject r = new TitleVerifier(net, new FakeClock(), "k", null).verify(cand("Inception", "movie", 2010));
+        assertEquals("verified", r.getString("verdict"));
+        assertEquals(0, net.count("en.wikipedia.org"));
     }
 }

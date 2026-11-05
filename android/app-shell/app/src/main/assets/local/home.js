@@ -273,7 +273,7 @@ function filterSheet() {
 
 function inboxCount() {
   const since = Date.now() - 86400e3;
-  return db.reels.filter((r) => (r.added_at || 0) > since).length + (db.inbox || []).length + Verify.counts(db).review;
+  return db.reels.filter((r) => (r.added_at || 0) > since).length + (db.inbox || []).length;
 }
 
 function inboxScreen() {
