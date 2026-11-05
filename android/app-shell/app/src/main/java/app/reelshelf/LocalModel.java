@@ -3,6 +3,7 @@ package app.reelshelf;
 import android.content.Context;
 
 import com.google.ai.edge.litertlm.Backend;
+import com.google.ai.edge.litertlm.Content;
 import com.google.ai.edge.litertlm.Contents;
 import com.google.ai.edge.litertlm.Conversation;
 import com.google.ai.edge.litertlm.ConversationConfig;
@@ -160,11 +161,26 @@ final class LocalModel {
      * Returns the text; the engine stays loaded for the next reel until stopAll().
      */
     String generate(File model, boolean gpu, String system, String prompt, int maxTokens, double temperature) throws Exception {
+        return generate(model, gpu, system, prompt, maxTokens, temperature, null, null);
+    }
+
+    /** Models that can look at pictures and listen to sound (Gemma 4 E2B/E4B, Gemma 3n). */
+    static boolean multimodal(File model) {
+        String n = model.getName().toLowerCase(java.util.Locale.ROOT);
+        return n.startsWith("gemma-4-e") || n.startsWith("gemma-3n");
+    }
+
+    /**
+     * One answer; with a multimodal model, key frames (JPEG files) and a sound clip (WAV file) of the reel are given
+     * too, so the model sees and hears it. Other models get the text only.
+     */
+    String generate(File model, boolean gpu, String system, String prompt, int maxTokens, double temperature,
+                    java.util.List<File> frames, File sound) throws Exception {
         if (!model.isFile()) throw new IOException("The AI model is not downloaded yet (Settings, Download model).");
         stop = false;
         Conversation conv;
         synchronized (this) {
-            ensureEngine(model, gpu);
+            ensureEngine(model, gpu, multimodal(model) && ((frames != null && !frames.isEmpty()) || sound != null));
             ConversationConfig cc = new ConversationConfig(
                     system == null || system.isEmpty() ? null : Contents.Companion.of(system),
                     Collections.emptyList(), Collections.emptyList(),
@@ -174,8 +190,18 @@ final class LocalModel {
         current = conv;
         try {
             if (stop) throw new InterruptedIOException("stopped");
-            Message m = conv.sendMessage(prompt, Collections.emptyMap(), null, null, null,
-                    Math.max(64, Math.min(maxTokens, 3000)));
+            Message m;
+            if (engineMulti && ((frames != null && !frames.isEmpty()) || sound != null)) {
+                java.util.List<Content> parts = new java.util.ArrayList<>();
+                if (frames != null) for (File f : frames) parts.add(new Content.ImageFile(f.getPath()));
+                if (sound != null) parts.add(new Content.AudioFile(sound.getPath()));
+                parts.add(new Content.Text(prompt));
+                m = conv.sendMessage(Contents.Companion.of(parts.toArray(new Content[0])), Collections.emptyMap(), null, null, null,
+                        Math.max(64, Math.min(maxTokens, 3000)));
+            } else {
+                m = conv.sendMessage(prompt, Collections.emptyMap(), null, null, null,
+                        Math.max(64, Math.min(maxTokens, 3000)));
+            }
             if (stop) throw new InterruptedIOException("stopped");
             return m.toString();
         } finally {
@@ -198,11 +224,42 @@ final class LocalModel {
         return engine == null ? "" : engineBackend;
     }
 
-    private void ensureEngine(File model, boolean gpu) throws Exception {
+    private boolean engineMulti;
+
+    private void ensureEngine(File model, boolean gpu, boolean multi) throws Exception {
         String want = gpu ? "gpu" : "cpu";
-        if (engine != null && enginePath.equals(model.getPath()) && (engineBackend.equals(want) || engineBackend.equals("cpu") && gpu)) return;
+        if (engine != null && enginePath.equals(model.getPath()) && (engineBackend.equals(want) || engineBackend.equals("cpu") && gpu)
+                && (engineMulti || !multi)) return;
         closeEngine();
         String cache = ctx.getCacheDir().getPath();
+        if (multi) {  // sight and sound on the CPU (works on every phone), the text part on the GPU when it can
+            try {
+                Engine e = new Engine(new EngineConfig(model.getPath(), gpu ? new Backend.GPU() : new Backend.CPU((Integer) null, (Integer) null),
+                        new Backend.CPU((Integer) null, (Integer) null), new Backend.CPU((Integer) null, (Integer) null), null, 4, cache));
+                e.initialize();
+                engine = e;
+                enginePath = model.getPath();
+                engineBackend = want;
+                engineMulti = true;
+                return;
+            } catch (Throwable t) {
+                if (gpu) {
+                    try {
+                        Engine e = new Engine(new EngineConfig(model.getPath(), new Backend.CPU((Integer) null, (Integer) null),
+                                new Backend.CPU((Integer) null, (Integer) null), new Backend.CPU((Integer) null, (Integer) null), null, 4, cache));
+                        e.initialize();
+                        engine = e;
+                        enginePath = model.getPath();
+                        engineBackend = "cpu";
+                        engineMulti = true;
+                        return;
+                    } catch (Throwable ignored) {
+                        // fall back to text only below
+                    }
+                }
+            }
+        }
+        engineMulti = false;
         if (gpu) {
             try {
                 Engine e = new Engine(new EngineConfig(model.getPath(), new Backend.GPU(), null, null, null, null, cache));
@@ -231,6 +288,7 @@ final class LocalModel {
             }
         }
         engine = null;
+        engineMulti = false;
         enginePath = "";
         engineBackend = "";
     }

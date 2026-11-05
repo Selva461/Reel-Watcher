@@ -51,7 +51,7 @@ const Shots = (() => {
     paint();
     try {
       fromReels();
-      if (folders().length) await fromScreenshots();
+      await fromScreenshots();  // picked folders and pictures you chose or shared
     } catch (e) {
       if (!job.stop) job.why = e.message;
     }
@@ -105,6 +105,8 @@ const Shots = (() => {
         const kept = keep(res);
         for (const c of kept) { job.found++; job.added += toCatalog(c, "screenshot", p.k); job.recent.unshift(c.title); }
         job.quotes = (job.quotes || 0) + Quotes.addFrom(db, res, p.k);  // lines worth keeping go to Quotes
+        const texts = (g.lines || []).map((l) => l.t || "");
+        if (Notes.isCommentScreen(texts) && window.fileCommentScreen && fileCommentScreen(texts, p.m)) job.comments = (job.comments || 0) + 1;  // a reel's comments
         state.seen[p.k] = { m: p.m, st: kept.length ? st : (st === "found" || st === "several" ? "unsure" : st), n: p.n, f: p.f,
           c: res.candidates.slice(0, 5).map((c) => c.title), x: res.text.slice(0, 300) };
       }
@@ -136,17 +138,21 @@ const Shots = (() => {
     const b = battery();
     $app.innerHTML = `${header("Screenshots to watchlist", "#/run")}
       <p class="soft" style="margin:0">Reads the text in your screenshots on the phone (nothing is uploaded), finds the movie, series, anime and manga names, and puts them in your watchlist to be checked online.</p>
-      <div class="stack"><h2>Folders</h2>
+      <div class="card stack"><strong>Choose screenshots</strong>
+        <span class="hint">Pick one or many pictures, or share them from your Gallery to Reel Shelf. They are read right away.</span>
+        <button class="btn primary block" id="addp">Choose screenshots</button></div>
+      <div class="stack"><h2>Folders read every time</h2>
         ${fs.length ? fs.map((f) => `<div class="card row between"><span class="grow small">${esc(f.name || f.uri)}</span><button class="btn" data-rm="${esc(f.uri)}">Remove</button></div>`).join("")
-          : `<div class="empty small">Pick your Screenshots folder (and folders like Movies, Anime or Manga: the folder name tells the kind).</div>`}
+          : `<div class="empty small">Add your Screenshots folder so new screenshots are read every night (folders like Movies, Anime or Manga: the folder name tells the kind).</div>`}
         <button class="btn block" id="addf">Add a folder</button></div>
       ${n.all ? `<div class="card stack"><strong>${plural(n.all, "picture")} read</strong>
         <span class="small">${n.found + n.several} with names, ${n.unsure} unsure, ${n.none + n.no_text} with no name in the text${n.error ? `, ${n.error} could not be opened` : ""}</span>
         ${n.unsure + n.none + n.no_text ? `<a class="btn block" href="#/shots/review">Look at the ones without a sure name</a>` : ""}</div>` : ""}
-      <button class="btn primary block" id="go">Process${fs.length ? "" : " reel captions"}</button>
+      <button class="btn block" id="go">Read new screenshots now</button>
       <p class="hint">Only new screenshots are read each time. You can leave the app while it runs (a notification shows it, with Stop).
         ${b.level >= 0 ? ` Battery ${b.level}%${b.charging ? ", charging" : ""}. A big first run is best done on the charger.` : ""}</p>
       ${job && job.finished ? doneHtml() : ""}`;
+    bind("#addp", "click", () => phone("addShotPictures").then((n) => { toast(`${plural(Number(n) || 0, "picture")} added`); process(); }).catch((e) => { if (e.message !== "cancelled") toast(e.message); }));
     bind("#addf", "click", () => phone("addShotFolder").then(() => { toast("Folder added"); screen(); }).catch((e) => { if (e.message !== "cancelled") toast(e.message); }));
     bind("[data-rm]", "click", (e, el) => { if (confirm("Stop reading this folder? Names already found stay in the watchlist.")) { sync("removeShotFolder", el.dataset.rm); screen(); } });
     bind("#go", "click", () => process());

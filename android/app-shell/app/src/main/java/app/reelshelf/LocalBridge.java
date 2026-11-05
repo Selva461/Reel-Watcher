@@ -515,8 +515,24 @@ final class LocalBridge {
             try {
                 JSONObject o = new JSONObject(opts == null || opts.isEmpty() ? "{}" : opts);
                 long t0 = System.currentTimeMillis();
-                String out = model.generate(model.file(o.optString("file", "")), o.optBoolean("gpu", true), o.optString("system", ""),
-                        prompt == null ? "" : prompt, o.optInt("maxTokens", 800), o.optDouble("temperature", 0.3));
+                java.util.List<File> frames = new java.util.ArrayList<>();
+                File sound = null;
+                if (o.optBoolean("media", false)) {  // the current reel's key frames and sound, made by readReelVideo
+                    File dir = ReelVideo.mediaDir(act.ctx());
+                    for (int i = 0; i < 4; i++) {
+                        File f = new File(dir, "frame" + i + ".jpg");
+                        if (f.isFile()) frames.add(f);
+                    }
+                    File w = new File(dir, "sound.wav");
+                    if (w.isFile()) sound = w;
+                }
+                String out;
+                try {
+                    out = model.generate(model.file(o.optString("file", "")), o.optBoolean("gpu", true), o.optString("system", ""),
+                            prompt == null ? "" : prompt, o.optInt("maxTokens", 800), o.optDouble("temperature", 0.3), frames, sound);
+                } finally {
+                    if (o.optBoolean("media", false)) ReelVideo.clearMedia(act.ctx());
+                }
                 JSONObject r = new JSONObject();
                 r.put("text", out);
                 r.put("backend", model.backendInUse());
@@ -585,6 +601,146 @@ final class LocalBridge {
             } catch (Exception e) {
                 done(id, false, "Could not keep access to that folder: " + e.getMessage());
             }
+        }));
+    }
+
+    // ------------------------------------------------------------------ what a reel shows and says (its video)
+
+    private volatile boolean speechDownloading;
+
+    /** {ready, downloading, size} for the offline speech model. */
+    @JavascriptInterface
+    public String speechInfo() {
+        if (!ok()) return "{}";
+        JSONObject o = new JSONObject();
+        try {
+            o.put("ready", SpeechModel.dir(act.ctx()) != null);
+            o.put("downloading", speechDownloading);
+            o.put("size", SpeechModel.SIZE);
+        } catch (JSONException ignored) {
+        }
+        return o.toString();
+    }
+
+    /** Downloads (resuming) and unpacks the offline speech model. Progress as "speech". */
+    @JavascriptInterface
+    public void downloadSpeech(int id) {
+        if (!ok()) return;
+        if (speechDownloading) {
+            done(id, false, "Already downloading");
+            return;
+        }
+        speechDownloading = true;
+        net.execute(() -> {
+            File zip = new File(act.ctx().getCacheDir(), SpeechModel.NAME + ".zip");
+            try {
+                model.download(SpeechModel.URL, zip, (d, t) -> progress("speech", d, t));
+                File root = SpeechModel.root(act.ctx());
+                root.mkdirs();
+                SpeechModel.unpack(zip, root);
+                if (SpeechModel.dir(act.ctx()) == null) throw new IOException("The speech model did not unpack");
+                done(id, true, "ready");
+            } catch (InterruptedIOException e) {
+                done(id, false, "paused");
+            } catch (Exception e) {
+                done(id, false, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            } finally {
+                zip.delete();
+                speechDownloading = false;
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public void deleteSpeech() {
+        if (!ok()) return;
+        SpeechModel.delete(SpeechModel.root(act.ctx()));
+    }
+
+    /**
+     * Reads a reel's video (from Instagram's video servers, no account): text on screen from frames and, when the
+     * speech model is there, the spoken words. Returns {screen, speech, seconds, speechModel}.
+     */
+    @JavascriptInterface
+    public void readReelVideo(int id, String url) {
+        if (!ok()) return;
+        if (!ReelVideo.videoHost(url)) {
+            done(id, false, "Only Instagram videos can be read");
+            return;
+        }
+        shots.allow();
+        ocr.execute(() -> {
+            try {
+                done(id, true, ReelVideo.read(act.ctx(), shots, SpeechModel.dir(act.ctx()), url, shots::stopped).toString());
+            } catch (Throwable e) {
+                done(id, false, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            }
+        });
+    }
+
+    /** Pick pictures (for example a reel's comments) and get their text back, read on the phone. Nothing is kept. */
+    @JavascriptInterface
+    public void readPictures(int id) {
+        if (!ok()) return;
+        act.runOnUiThread(() -> act.pickImages(uris -> {
+            if (uris == null || uris.isEmpty()) {
+                done(id, false, "cancelled");
+                return;
+            }
+            shots.allow();
+            ocr.execute(() -> {
+                StringBuilder out = new StringBuilder();
+                for (Uri u : uris) {
+                    try (InputStream in = act.ctx().getContentResolver().openInputStream(u)) {
+                        if (in == null) continue;
+                        ByteArrayOutputStream b = new ByteArrayOutputStream();
+                        byte[] buf = new byte[65536];
+                        int n;
+                        while ((n = in.read(buf)) > 0 && b.size() < 30_000_000) b.write(buf, 0, n);
+                        out.append(shots.readBytes(b.toByteArray())).append('\n');
+                    } catch (Exception ignored) {
+                        // one picture that cannot be read
+                    }
+                }
+                done(id, true, out.toString());
+            });
+        }));
+    }
+
+    // ------------------------------------------------------------------ "Read while I scroll" (comments, opt-in)
+
+    /** Whether the comment reader is switched on in Android's Accessibility settings. */
+    @JavascriptInterface
+    public boolean commentReaderOn() {
+        if (!ok()) return false;
+        return CommentReader.enabled(act.ctx());
+    }
+
+    /** Opens Android's Accessibility settings, where you switch the comment reader on or off yourself. */
+    @JavascriptInterface
+    public void openAccessibilitySettings() {
+        if (!ok()) return;
+        act.runOnUiThread(() -> act.startActivity(new android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)));
+    }
+
+    /** Comment screens read while you scrolled Instagram, as [{at, lines}] JSON; the queue is emptied. */
+    @JavascriptInterface
+    public String takeScrollComments() {
+        if (!ok()) return "[]";
+        return CommentReader.take(act.ctx());
+    }
+
+    /** Opens Android's picture picker (choose one or many screenshots). Calls back with how many were added. */
+    @JavascriptInterface
+    public void addShotPictures(int id) {
+        if (!ok()) return;
+        act.runOnUiThread(() -> act.pickImages(uris -> {
+            if (uris == null || uris.isEmpty()) {
+                done(id, false, "cancelled");
+                return;
+            }
+            ocr.execute(() -> done(id, true, String.valueOf(ScreenshotReader.addPictures(act.ctx(), uris))));
         }));
     }
 
@@ -797,11 +953,17 @@ final class LocalBridge {
         try {
             Context c = act.ctx();
             android.app.AlarmManager am = (android.app.AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
-            return new JSONObject().put("on", NightRun.on(c)).put("hour", NightRun.hour(c)).put("minBattery", NightRun.minBattery(c))
+            return new JSONObject().put("on", NightRun.on(c)).put("hour", NightRun.hour(c)).put("minBattery", NightRun.minBattery(c)).put("chargingOnly", NightRun.chargingOnly(c))
                     .put("exact", Build.VERSION.SDK_INT < 31 || (am != null && am.canScheduleExactAlarms())).toString();
         } catch (JSONException e) {
             return "{}";
         }
+    }
+
+    @JavascriptInterface
+    public void setNightCharging(boolean only) {
+        if (!ok()) return;
+        NightRun.prefs(act.ctx()).edit().putBoolean(NightRun.CHARGING_ONLY, only).apply();
     }
 
     @JavascriptInterface

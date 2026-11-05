@@ -31,6 +31,7 @@ public class MainActivity extends Activity implements Host {
     static final String LOCAL_PAGE = "file:///android_asset/local/index.html";
     private static final int MODEL_REQUEST = 3;
     private static final int FOLDER_REQUEST = 4;
+    private static final int IMAGES_REQUEST = 5;
     private static final int FILE_REQUEST = 1;
 
     private WebView web;
@@ -40,6 +41,7 @@ public class MainActivity extends Activity implements Host {
     private LocalBridge local;
     private java.util.function.Consumer<Uri> modelCallback;
     private java.util.function.Consumer<Uri> folderCallback;
+    private java.util.function.Consumer<java.util.List<Uri>> imagesCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -115,6 +117,21 @@ public class MainActivity extends Activity implements Host {
     }
 
     /** Android's folder picker, opening at DCIM/Screenshots. Only the folder you choose can be read. */
+    /** Android's picker for pictures (several at once). Only the pictures you choose can be read. */
+    public void pickImages(java.util.function.Consumer<java.util.List<Uri>> cb) {
+        imagesCallback = cb;
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("image/*");
+        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        try {
+            startActivityForResult(i, IMAGES_REQUEST);
+        } catch (Exception e) {
+            imagesCallback = null;
+            cb.accept(null);
+        }
+    }
+
     public void pickFolder(java.util.function.Consumer<Uri> cb) {
         folderCallback = cb;
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
@@ -196,6 +213,18 @@ public class MainActivity extends Activity implements Host {
             java.util.function.Consumer<Uri> cb = modelCallback;
             modelCallback = null;
             cb.accept(resultCode == RESULT_OK && data != null ? data.getData() : null);
+            return;
+        }
+        if (requestCode == IMAGES_REQUEST && imagesCallback != null) {
+            java.util.function.Consumer<java.util.List<Uri>> cb = imagesCallback;
+            imagesCallback = null;
+            java.util.List<Uri> got = new java.util.ArrayList<>();
+            if (resultCode == RESULT_OK && data != null) {
+                ClipData clip = data.getClipData();
+                if (clip != null) for (int k = 0; k < clip.getItemCount(); k++) got.add(clip.getItemAt(k).getUri());
+                else if (data.getData() != null) got.add(data.getData());
+            }
+            cb.accept(got);
             return;
         }
         if (requestCode == FOLDER_REQUEST && folderCallback != null) {

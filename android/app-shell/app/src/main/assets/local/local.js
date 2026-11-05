@@ -81,9 +81,12 @@ const MODELS = [
   { id: "qwen", name: "Qwen2.5 1.5B", file: "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
     url: "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
     size: 1.6e9, note: "Free, about 1.6 GB, good for English notes. Needs a phone with 6 GB of RAM or more." },
-  { id: "gemma4", name: "Gemma 4 E2B (better notes)", file: "gemma-4-E2B-it.litertlm",
+  { id: "gemma4", name: "Gemma 4 E2B (watches the reel)", file: "gemma-4-E2B-it.litertlm",
     url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
-    size: 2.58e9, note: "Free, about 2.6 GB. Google's on-phone model, tuned for summarizing and rewriting; follows the notes format better. Slower to download, uses more battery per reel." },
+    size: 2.59e9, note: "Recommended. Free, about 2.6 GB. Looks at key frames and listens to the sound of each reel, plus the text on screen and what is said, then writes the intent, tone and points. About a minute per reel: best at night on the charger." },
+  { id: "gemma4e4", name: "Gemma 4 E4B (best quality, slower)", file: "gemma-4-E4B-it.litertlm",
+    url: "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm",
+    size: 3.66e9, note: "Free, about 3.7 GB. Same as E2B but more accurate, about twice as slow. Needs 8 GB of RAM or more." },
 ];
 const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en", tmdbKey: "", metaAi: false };
 let settings = { ...DEFAULTS };
@@ -195,9 +198,10 @@ function bindIgWaiting() {
 let run = null;  // {codes, i, step, stop, done, failed, current}
 
 function needsWork(r, ready) {
-  if (r.notes && !(r.notes_by === "auto" && ready)) return false;
+  if (r.notes && !(r.notes_by === "auto" && (ready || (!Notes.isYoutube(r) && !r.video_tried)))) return false;
   if (!r.url) return false;
   if (!r.caption_read) return true;
+  if (!Notes.isYoutube(r) && !r.video_tried) return true;  // read before videos were read: read what it shows and says
   return ready && Notes.material(r) >= 30 && r.status !== "ready_no_text";
 }
 
@@ -300,6 +304,7 @@ async function readCaption(r) {
     if (got.caption) r.caption = got.caption.slice(0, 8000);
     if (got.author) r.author = got.author;
     await readOnScreen(r, got);
+    await readVideo(r, got);
   } catch (e) {
     r.error = e.message;
     if (/slow down|stopped/.test(e.message)) throw e;
@@ -312,7 +317,25 @@ async function readCaption(r) {
     } catch (e) { if (/slow down|stopped/.test(e.message)) throw e; /* offline or refused: keep going */ }
   }
   r.caption_read = Date.now();
-  r.keywords = Notes.keywords([r.caption, r.onscreen].filter(Boolean).join("\n"), 10);
+  r.keywords = Notes.keywords([r.caption, r.onscreen, r.transcript].filter(Boolean).join("\n"), 10);
+}
+
+/** What the reel shows and says: its video, read on the phone (frames for the text on screen, speech to text). */
+async function readVideo(r, got) {
+  r.video_tried = Date.now();
+  if (!got.video || !(RN && RN.readReelVideo)) { r.content = "caption"; return; }
+  try {
+    const v = JSON.parse(await phone("readReelVideo", got.video) || "{}");
+    const screen = String(v.screen || "").trim();
+    if (screen) r.onscreen = [r.onscreen, screen].filter(Boolean).join("\n").slice(0, 6000);
+    if (v.speech) r.transcript = String(v.speech).slice(0, 40000);
+    r.content = v.speech ? "video+speech" : "video";
+    if (v.media && run) run.media = r.code;
+    r.seconds = v.seconds || 0;
+  } catch (e) {
+    if (e.message === "stopped") throw e;
+    r.content = "caption";
+  }
 }
 
 /** The text written on the reel's cover picture (read on the phone) and Instagram's own description of the picture. */
@@ -338,18 +361,26 @@ function writeWithoutAi(r) {
 }
 
 async function writeWithPhoneAi(r) {
-  const out = JSON.parse(await phone("generate", Notes.localPrompt(r, settings.localExtra),
-    JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.LOCAL_SYSTEM, maxTokens: settings.maxTokens, temperature: settings.temperature })));
+  const media = run && run.media === r.code;  // key frames and sound of this reel are ready for the AI
+  if (run) run.media = "";
+  const out = JSON.parse(await phone("generate", Notes.localPrompt(r, settings.localExtra, { media }),
+    JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.LOCAL_SYSTEM, maxTokens: settings.maxTokens, temperature: settings.temperature, media })));
   const notes = Notes.parse(out.text);
   if (!notes) throw new Error("The on-phone AI's answer was not in the notes format. Try again, or Ask Meta AI.");
   setNotes(r, notes, "phone", out.text);
   return out;
 }
 
+/** Useful reels first, then jokes, memes and music; newest first within each. */
+function byUsefulThenNewest(a, b) {
+  const ka = Notes.reelKind(a) === "fun" ? 1 : 0, kb = Notes.reelKind(b) === "fun" ? 1 : 0;
+  return ka - kb || (b.added_at || 0) - (a.added_at || 0);
+}
+
 async function startRun(codes) {
   if (run && !run.finished) { location.hash = "#/run"; return; }
   const ready = !!modelInfo().ready;
-  const list = (codes || db.reels.filter((r) => needsWork(r, ready)).map((r) => r.code)).filter((c) => reel(c));
+  const list = (codes || db.reels.filter((r) => needsWork(r, ready)).sort(byUsefulThenNewest).map((r) => r.code)).filter((c) => reel(c));
   run = { codes: list, i: 0, step: "", stop: false, done: 0, failed: 0, current: "", finished: false, log: [], ready };
   sync("allowWork");
   workTick();  // the notification appears now, while the app is on screen
@@ -362,17 +393,19 @@ async function startRun(codes) {
     r.status = "working";
     r.error = "";
     try {
-      if (!r.caption_read) {
+      if (!r.caption_read || (!Notes.isYoutube(r) && !r.video_tried)) {
         run.step = "caption";
         paintRun();
+        const before = Notes.material(r);
         await readCaption(r);
+        if (r.notes_by === "auto" && Notes.material(r) > before) { r.notes = null; r.notes_by = ""; }  // more to go on: write again
         saveDb();
       }
       if (run.stop) { r.status = r.notes ? "done" : "new"; break; }
       if (run.ready && (!r.notes || r.notes_by === "auto")) {
         if (Notes.material(r) < 30) {
           r.status = "ready_no_text";
-          r.error = "Instagram did not give enough text to work from. Ask Meta AI, or type what the reel says.";
+          r.error = "Instagram gave too little to work from (no video, little caption). Type what the reel says, or open it in Instagram.";
         } else {
           run.step = "ai";
           paintRun();
@@ -443,7 +476,10 @@ async function overnightRun(auto) {
     } else say("AI model ready");
     if (!night.stop) {
       night.step = "notes";
-      await startRun();
+      // reels read before videos were read are read again only after you tried it yourself (Try on 5 or Start)
+      const ready = !!modelInfo().ready;
+      await startRun(db.reels.filter((x) => needsWork(x, ready) && (settings.rereadOk || !x.caption_read || Notes.isYoutube(x)))
+        .sort(byUsefulThenNewest).slice(0, settings.nightMax || 200).map((x) => x.code));  // useful first, then memes; capped per night
       say(`Reel notes: ${run ? run.done : 0} written, ${run ? run.failed : 0} failed`);
     }
     if (!night.stop && typeof Shots !== "undefined") {
@@ -485,7 +521,9 @@ function nightSettingsHtml() {
     <label class="row" style="gap:10px"><input type="checkbox" id="nrOn" ${n.on ? "checked" : ""}><span>Every night: file what you shared and imported, write notes for new reels, read new screenshots, check titles</span></label>
     <div class="grid2"><label class="field">Time<select class="input" id="nrHour">${hours}</select></label>
       <label class="field">Battery<select class="input" id="nrBat">${levels}</select></label></div>
-    <p class="hint">Reels already on your shelf or done are skipped. Below the battery level (and not charging) that night is skipped. A notification shows it, with Stop.</p></div>`;
+    <label class="row" style="gap:10px"><input type="checkbox" id="nrCharge" ${n.chargingOnly !== false ? "checked" : ""}><span>Only while charging (stops when unplugged)</span></label>
+    <label class="field">Reels per night<select class="input" id="nrMax">${[50, 100, 200, 400, 1000].map((x) => `<option value="${x}" ${x === (settings.nightMax || 200) ? "selected" : ""}>${x}</option>`).join("")}</select></label>
+    <p class="hint">Easy on the battery: it pauses when the phone gets warm (40°C), stops when unplugged, and reads at most this many reels a night. The rest wait for the next night. Reels already done are skipped.</p></div>`;
 }
 function bindNightSettings() {
   const save = () => {
@@ -493,6 +531,8 @@ function bindNightSettings() {
     toast("Nightly run saved");
   };
   bind("#nrOn", "change", save); bind("#nrHour", "change", save); bind("#nrBat", "change", save);
+  bind("#nrCharge", "change", (e, el) => { sync("setNightCharging", el.checked); toast("Nightly run saved"); });
+  bind("#nrMax", "change", (e, el) => { settings.nightMax = Number(el.value); saveSettings(); toast("Nightly run saved"); });
 }
 
 // ------------------------------------------------------------------ jobs that keep going after you leave the app
@@ -507,6 +547,7 @@ function workNow() {
   if (s && !s.finished && !s.paused && !s.stop) return ["Reading screenshots", s.total ? `${s.i} of ${s.total}` : "Listing pictures", s.i, s.total];
   const v = typeof Verify !== "undefined" && Verify.job;
   if (v && !v.finished) return ["Checking titles online", `${v.done} of ${v.total}`, v.done, v.total];
+  if (speechDl) return ["Downloading speech to text", `${mb(speechDl.d)} of ${mb(speechDl.t)}`, Math.round(speechDl.d / 1e6), Math.round(speechDl.t / 1e6)];
   if (modelDl) return ["Downloading the AI model", `${mb(modelDl.d)} of ${mb(modelDl.t)}`, Math.round(modelDl.d / 1e6), Math.round(modelDl.t / 1e6)];
   return null;
 }
@@ -531,7 +572,41 @@ window.onAppPause = () => {  // the app left the screen: nothing keeps running
   if (run && !run.finished) { run.paused = true; stopRun(); }
   Shots.pause();
 };
+// ------------------------------------------------------------------ comments: from screenshots or "Read while I scroll"
+/** Files one Instagram comment screen under its reel: the creator's name on the screen (the caption sits on top of the
+    comments), else the reel you opened from Reel Shelf in the 20 minutes before. Returns true when it was filed. */
+window.fileCommentScreen = (lines, at) => {
+  const text = lines.join("\n").toLowerCase();
+  const by = db.reels.filter((r) => r.author && new RegExp(`(^|[^a-z0-9_.])@?${r.author.toLowerCase().replace(/[.]/g, "\\.")}([^a-z0-9_.]|$)`).test(text));
+  let r = by.length === 1 ? by[0] : by.find((x) => x.caption && text.includes(x.caption.slice(0, 40).toLowerCase()));
+  if (!r) r = db.reels.filter((x) => x.opened_at && at >= x.opened_at && at - x.opened_at < 20 * 60000).sort((a, b) => b.opened_at - a.opened_at)[0];
+  if (!r) return false;
+  const got = Notes.commentLines(lines).filter((l) => !(r.caption || "").includes(l));
+  if (!got.length) return false;
+  r.comments = [...new Set([...(r.comments || "").split("\n").filter(Boolean), ...got])].join("\n").slice(0, 6000);
+  if (r.notes_by === "auto") r.video_tried = 0;  // read again with the comments
+  return true;
+};
+function takeScrollComments() {
+  let screens = [];
+  try { screens = JSON.parse(sync("takeScrollComments") || "[]"); } catch (e) { screens = []; }
+  let n = 0;
+  for (const s of screens) if (Array.isArray(s.lines) && fileCommentScreen(s.lines.map(String), s.at || Date.now())) n++;
+  if (n) { saveDb(); toast(`Comments added to ${plural(n, "reel")} from your scrolling`); }
+  return n > 0;
+}
+
+let backFrom = "";  // the reel you just looked at in Instagram
 window.onAppResume = () => {
+  const filed = takeScrollComments();
+  const seen = db.reels.filter((x) => x.opened_at && Date.now() - x.opened_at < 20 * 60000).sort((a, b) => b.opened_at - a.opened_at)[0];
+  if (seen && backFrom !== seen.code) {  // back from Instagram: offer the next step on that reel
+    backFrom = seen.code;
+    if (location.hash !== "#/r/" + seen.code) { location.hash = "#/r/" + seen.code; return; }
+    reelScreen(seen.code);
+    return;
+  }
+  if (filed && location.hash.startsWith("#/r/")) render();
   const checked = Verify.onOpen();  // titles checked online overnight
   if (takeShared() || checked) render();
   else if (location.hash === "#/settings") render();
@@ -559,6 +634,7 @@ function homeScreen() {
     <h1>Your reel notes</h1>
     <label class="search">${ICON.search}<input id="q" type="search" placeholder="Search topics, points, tools, tags" value="${esc(filter.q)}" aria-label="Search"></label>
     ${igWaitingCard()}
+    <a class="card" href="#/shots"><span class="grow"><strong>Read my screenshots</strong><br><span class="small muted">Movie, series, anime and manga names go to Watch, good lines to Quotes</span></span>${ICON.chev}</a>
     ${(db.quotes || []).length ? `<a class="card" href="#/quotes"><span class="grow"><strong>Quotes (${db.quotes.length})</strong><br><span class="small muted">Lines kept from your screenshots, searchable</span></span>${ICON.chev}</a>` : ""}
     ${db.inbox.length ? `<a class="card accent" href="#/inbox"><span class="grow"><strong>${plural(db.inbox.length, "Meta AI answer")} to file</strong><br><span>Pick the reel each one belongs to</span></span></a>` : ""}
     ${running ? `<a class="card accent" href="#/run"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="grow"><strong>Working: ${run.i + 1} of ${run.codes.length}</strong><br><span>Keeps going if you leave the app</span></span></a>`
@@ -629,6 +705,8 @@ function notesHtml(n) {
   const ul = (a) => a && a.length ? (a.length === 1 ? `<p>${esc(a[0])}</p>` : `<ul>${a.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`) : "";
   return `<div class="card stack" style="gap:14px">
     ${sec("Topic", n.topic ? `<p><strong>${esc(n.topic)}</strong></p>` : "")}
+    ${sec("What they really mean", n.intent ? `<p>${esc(n.intent)}</p>` : "")}
+    ${sec("Tone", n.tone ? `<p>${esc(n.tone)}</p>` : "")}
     ${sec("Points", ol(n.points))}
     ${sec("Meaning", n.meaning ? `<p>${esc(n.meaning)}</p>` : "")}
     ${sec("Use it for", ul(n.use))}
@@ -646,20 +724,24 @@ function reelScreen(code) {
   $app.innerHTML = `${header(n && n.topic ? "Reel notes" : "Reel", "#/")}
     <div class="stack" style="gap:6px"><span class="row wrap" style="gap:8px"><span class="tag ${kind}">${esc(label)}</span>${n ? `<span class="small muted">${esc(BY[r.notes_by] || "")}</span>` : ""}</span>
       <span class="small muted">${esc([r.author ? "@" + r.author : "", "saved " + day(r.added_at), ...(r.collections || [])].filter(Boolean).join(" · "))}</span></div>
+    ${backFrom === r.code ? `<div class="card stack"><strong>Back from Instagram</strong><span class="small muted">${r.comments ? "Comments are here. " : "Took screenshots of the comments? Tap Add comments. "}Then tap Read this reel properly: one note from the video, what is said, the text on screen and the comments.</span></div>` : ""}
     ${r.error && !n ? `<div class="card small">${esc(r.error)}</div>` : ""}
-    ${n ? notesHtml(n) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">Ask Meta AI (best: it watches the whole reel), or ${ready ? "let the on-phone AI write them from the caption" : "download the on-phone AI in Settings"}.</span></div>`}
+    ${n ? notesHtml(n) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">${r.video_tried ? "Instagram gave too little to work from. Type what the reel says below." : "Tap Start: Reel Shelf reads what the reel shows and says, then writes the notes."}</span></div>`}
+    ${r.content ? `<span class="small muted">Read from: ${esc({ caption: "the caption only (Instagram gave no video)", video: "caption and the text on screen", "video+speech": "caption, the text on screen and what is said" }[r.content] || r.content)}</span>` : ""}
     <div class="grid2">
-      ${r.url ? `<button class="btn ${!settings.metaAi || (n && r.notes_by !== "auto") ? "" : "primary"}" id="meta">Ask Meta AI</button>` : ""}
-      <button class="btn" id="paste">Paste an answer</button>
+      ${r.url && settings.metaAi ? `<button class="btn" id="meta">Ask Meta AI</button><button class="btn" id="paste">Paste an answer</button>` : ""}
       ${r.url ? `<button class="btn" id="open">Open in ${Notes.isYoutube(r) ? "YouTube" : "Instagram"}</button>` : ""}
       ${n ? `<button class="btn" id="copy">Copy notes</button>` : ""}
       ${Notes.isYoutube(r) && r.caption_read && !r.transcript ? `<button class="btn" id="ytagain">Read from YouTube again</button>` : ""}
+      ${r.url && !Notes.isYoutube(r) ? `<button class="btn primary" id="deep">Read this reel properly</button>` : ""}
+      ${r.url ? `<button class="btn" id="addcom">Add comments</button>` : ""}
       ${ready && r.url ? `<button class="btn" id="phoneai">${n ? "Redo with phone AI" : "Write with phone AI"}</button>` : ""}
     </div>
     ${r.asked_at && !(n && r.notes_by === "meta") ? `<p class="hint">When Meta AI answers, tap Share on its answer and choose Reel Shelf. It will be filed here.</p>` : ""}
     ${r.caption ? `<details class="card"><summary><strong>${Notes.isYoutube(r) ? "Description" : "Caption"}</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.caption)}</p></details>` : ""}
-    ${r.onscreen ? `<details class="card"><summary><strong>Text shown in the reel (cover picture)</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.onscreen)}</p></details>` : ""}
-    ${r.transcript ? `<details class="card"><summary><strong>What is said (from YouTube's captions)</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.transcript)}</p></details>` : ""}
+    ${r.comments ? `<details class="card"><summary><strong>Comments</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.comments)}</p></details>` : ""}
+    ${r.onscreen ? `<details class="card"><summary><strong>Text shown in the reel</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.onscreen)}</p></details>` : ""}
+    ${r.transcript ? `<details class="card"><summary><strong>What is said (${Notes.isYoutube(r) ? "from YouTube's captions" : "speech to text, on the phone"})</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.transcript)}</p></details>` : ""}
     ${reelTitlesHtml(r)}
     ${relatedHtml(r)}
     <details class="card" ${r.extra ? "open" : ""}><summary><strong>What the reel says (optional)</strong></summary>
@@ -668,11 +750,28 @@ function reelScreen(code) {
       <button class="btn" id="saveExtra">Save</button></div></details>
     <button class="btn block danger" id="del">Remove from shelf</button>`;
   bind("#meta", "click", () => askMeta(r));
-  bind("#open", "click", () => sync("openUrl", r.url));
+  bind("#open", "click", () => { r.opened_at = Date.now(); saveDb(); sync("openUrl", r.url); });
   bind("#copy", "click", () => { sync("copy", Notes.format(n) + (r.url ? `\n\nReel: ${r.url}` : "")); toast("Notes copied"); });
   bind("#paste", "click", () => pasteDialog(r));
   bind("#saveExtra", "click", () => { r.extra = document.getElementById("extra").value.slice(0, 10000); if (!r.notes && r.status === "ready_no_text") r.status = "ready"; saveDb(); toast("Saved"); reelScreen(code); });
   bind("#phoneai", "click", () => startRun([r.code]).then(() => {}));
+  bind("#addcom", "click", () => {
+    toast("Pick screenshots of this reel's comments");
+    phone("readPictures").then((t) => {
+      const got = Notes.commentLines(String(t || "").split("\n"));
+      if (!got.length) { toast("No comments found in those pictures"); return; }
+      r.comments = [...new Set([...(r.comments || "").split("\n").filter(Boolean), ...got])].join("\n").slice(0, 6000);
+      saveDb();
+      toast(`${plural(got.length, "comment line")} added. Tap Read this reel properly to use them in the notes.`);
+      reelScreen(r.code);
+    }).catch((e) => { if (e.message !== "cancelled") toast(e.message); });
+  });
+  bind("#deep", "click", () => {  // video, text on screen, speech, then notes with intent and tone
+    r.deep = true; r.video_tried = 0; r.caption_read = 0;
+    if (r.notes_by === "auto") { r.notes = null; r.notes_by = ""; }
+    saveDb();
+    startRun([r.code]);
+  });
   bind("#addrt", "click", () => titleDialog(null, r.code));
   bind("#ytagain", "click", () => { r.caption_read = 0; if (r.notes_by === "auto") { r.notes = null; r.status = "new"; } saveDb(); startRun([r.code]); });
   bind("#del", "click", () => { if (confirm("Remove this reel and its notes from Reel Shelf?")) { db.reels = db.reels.filter((x) => x !== r); saveDb(); location.hash = "#/"; } });
@@ -877,7 +976,12 @@ function runScreen() {
     const todo = db.reels.filter((r) => needsWork(r, ready));
     $app.innerHTML = `${header("Start", "")}
       <p class="soft" style="margin:0">You can leave the app while it works: a notification shows the progress, with Stop. It ends by itself when done.</p>
-      ${todo.length ? `<button class="btn primary block" id="start">Start: ${plural(todo.length, "reel")}</button>` : `<div class="empty">Nothing waiting. Share a reel to Reel Shelf first.</div>`}
+      ${(() => { const old = db.reels.filter((r) => r.caption_read && !r.video_tried && !Notes.isYoutube(r)); if (!old.length) return "";
+        const fun = old.filter((r) => Notes.reelKind(r) === "fun").length;
+        return `<p class="hint">${plural(old.length - fun, "useful reel")} will be read properly first (video, text on screen, speech), newest first, then ${plural(fun, "meme or fun reel")} (the note explains the joke).</p>`; })()}
+      ${todo.length > 5 ? `<button class="btn primary block" id="try5">Try on 5 reels first</button>` : ""}
+      ${todo.length ? `<button class="btn ${todo.length > 5 ? "" : "primary"} block" id="start">Start: ${plural(todo.length, "reel")}</button>` : `<div class="empty">Nothing waiting. Share a reel to Reel Shelf first.</div>`}
+      <p class="hint">Start reads each reel: its caption, the text shown on screen and${speechInfo().ready ? "" : " (after you download the speech model in Settings)"} what is said. Instagram is asked gently, one reel every few seconds, with no account.</p>
       <a class="btn block" href="#/shots" id="shotsbtn">${ICON.search} Read my screenshots</a>
       <div class="card stack"><strong>Overnight run</strong>
         <span class="hint">Plug in the charger, tap this and leave the phone. In one go: downloads the on-phone AI if needed, writes notes for every reel waiting, reads your screenshots, checks titles online and saves a backup to Downloads/ReelShelf. A notification shows it, with Stop.</span>
@@ -887,7 +991,8 @@ function runScreen() {
         ${(!night || night.finished) && db.lastNight ? `<span class="small muted">Last nightly run, ${esc(new Date(db.lastNight.at).toLocaleString())}:<br>${db.lastNight.log.map(esc).join("<br>")}</span>` : ""}</div>
       <a class="card" href="#/shots" id="shotslink"><span class="grow"><strong>Screenshots to watchlist</strong><br><span class="small muted">Find the movie, series, anime and manga names in your screenshots and reel captions</span></span>${ICON.chev}</a>
       ${ready ? "" : `<a class="card" href="#/settings"><span class="grow"><strong>Download the on-phone AI</strong><br><span class="small muted">Without it, Start only reads the captions; use Ask Meta AI for the notes</span></span>${ICON.chev}</a>`}`;
-    bind("#start", "click", () => startRun());
+    bind("#start", "click", () => { settings.rereadOk = true; saveSettings(); startRun(); });
+    bind("#try5", "click", () => startRun(todo.slice().sort(byUsefulThenNewest).slice(0, 5).map((r) => r.code)));
     bind("#night", "click", () => overnightRun());
     return;
   }
@@ -915,6 +1020,30 @@ function paintRun(force) {
   bind("#again", "click", () => { const p = run.paused; run = null; if (p) startRun(); else location.hash = "#/"; });
 }
 
+// ------------------------------------------------------------------ speech to text (offline, Vosk)
+let speechDl = null;
+function speechInfo() { try { return JSON.parse(sync("speechInfo") || "{}"); } catch (e) { return {}; } }
+function speechHtml() {
+  const si = speechInfo();
+  if (!RN || !RN.speechInfo) return "";
+  return `<div class="stack"><h2>What reels say</h2><div class="card stack">
+    <div class="row between"><strong>Speech to text (English)</strong><span class="tag ${si.ready ? "ok" : "warn"}">${si.ready ? "Ready" : speechDl ? "Downloading" : "Not downloaded"}</span></div>
+    <span class="small muted">Turns what is said in a reel into text, on the phone, with no internet after the download. About 40 MB.</span>
+    ${si.ready ? `<button class="btn block danger" id="delsp">Delete the speech model</button>` : speechDl ? `<span class="small muted" id="sptext">${mb(speechDl.d)} of ${mb(speechDl.t)}</span>` : `<button class="btn primary block" id="dlsp">Download speech to text</button>`}
+    <p class="hint">Start (and the nightly run) then reads each reel's video: the text on screen and the spoken words. Reels Instagram gives no video for stay caption only.</p></div></div>`;
+}
+function bindSpeech() {
+  bind("#dlsp", "click", () => {
+    speechDl = { d: 0, t: 40e6 };
+    onProgress.speech = (d, t) => { speechDl = { d, t: t > 0 ? t : 40e6 }; const x = document.getElementById("sptext"); if (x) x.textContent = `${mb(d)} of ${mb(speechDl.t)}`; };
+    workTick();
+    phone("downloadSpeech").then(() => { speechDl = null; toast("Speech to text is ready"); if (location.hash === "#/settings") settingsScreen(); })
+      .catch((e) => { speechDl = null; if (e.message !== "paused") toast(e.message); if (location.hash === "#/settings") settingsScreen(); });
+    settingsScreen();
+  });
+  bind("#delsp", "click", () => { if (confirm("Delete the speech model? Reels will then be read without their spoken words.")) { sync("deleteSpeech"); settingsScreen(); } });
+}
+
 function settingsScreen() {
   const info = modelInfo();
   const m = MODELS.find((x) => x.file === settings.modelFile);
@@ -923,6 +1052,12 @@ function settingsScreen() {
   const pct = m && info.partial ? Math.round((info.partial / m.size) * 100) : 0;
   const seg = (key, opts) => `<div class="seg">${opts.map(([v, l]) => `<button data-set="${key}" data-val="${esc(JSON.stringify(v))}" aria-pressed="${settings[key] === v}">${l}</button>`).join("")}</div>`;
   $app.innerHTML = `${header("Settings", "")}
+    ${speechHtml()}
+    ${RN && RN.commentReaderOn ? `<div class="stack"><h2>Comments</h2><div class="card stack">
+      <div class="row between"><strong>Read while I scroll</strong><span class="tag ${sync("commentReaderOn") ? "ok" : "warn"}">${sync("commentReaderOn") ? "On" : "Off"}</span></div>
+      <span class="small muted">While you scroll Instagram yourself, comment sections on screen are kept and added to that reel's notes. It never taps or scrolls, reads only Instagram, and uses almost no battery.</span>
+      <button class="btn block" id="a11y">${sync("commentReaderOn") ? "Switch it off" : "Switch it on"} (Android settings)</button>
+      <p class="hint">In Accessibility, open "Reel Shelf: read comments while I scroll". If Android says it is a restricted setting: Settings, Apps, Reel Shelf, the three dots, Allow restricted settings, then try again. Or simply: open a reel's comments in Instagram, take screenshots, and tap Add comments on that reel.</p></div></div>` : ""}
     <div class="stack"><h2>On-phone AI</h2>
       <div class="card stack">
         <div class="row between"><strong>${esc(m ? m.name : settings.modelFile)}</strong><span class="tag ${info.ready ? "ok" : "warn"}" id="mstate">${info.ready ? "Ready" : dl ? "Downloading" : info.partial ? "Paused" : "Not downloaded"}</span></div>
@@ -961,6 +1096,8 @@ function settingsScreen() {
     <p class="hint">Sharing a reel only saves it. Work starts only when you tap Start (or Process); it can keep going after you leave the app, always with a notification and a Stop button, and ends when done.</p>
     <button class="btn block danger" id="wipe">Delete all reels and notes</button>`;
   Verify.bindSettings(settingsScreen);
+  bindSpeech();
+  bind("#a11y", "click", () => sync("openAccessibilitySettings"));
   bind("[data-set]", "click", (e, b) => { settings[b.dataset.set] = JSON.parse(b.dataset.val); saveSettings(); settingsScreen(); });
   bind("#dl", "click", () => {
     onProgress.download = (d, t) => {
@@ -1028,4 +1165,5 @@ loadDb();
 takeShared();
 Verify.onOpen();
 render();
+takeScrollComments();
 if (sync("isNight")) overnightRun(true);  // the nightly run (no screen): see NightRun.java

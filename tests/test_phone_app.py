@@ -52,6 +52,15 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
     postJson: (id, url, body) => { st.calls.push(["postJson", url, JSON.parse(body)]); keep(); later(() => {
       st.player ? rnDone(id, true, JSON.stringify(st.player)) : rnDone(id, false, "YouTube answered 403"); }); },
     openInstagram: () => { st.opened.push("instagram-export"); keep(); },
+    readReelVideo: (id, url) => { st.calls.push(["video", url]); keep(); later(() => st.video ? rnDone(id, true, JSON.stringify(st.video)) : rnDone(id, false, "Instagram answered 403 for the video")); },
+    speechInfo: () => JSON.stringify({ ready: !!st.speech, downloading: false, size: 40e6 }),
+    downloadSpeech: (id) => { st.calls.push(["speechDownload"]); keep(); later(() => rnProgress("speech", 20e6, 40e6)); later(() => { st.speech = true; keep(); rnDone(id, true, "ready"); }); },
+    deleteSpeech: () => { st.speech = false; keep(); },
+    addShotPictures: (id) => later(() => rnDone(id, false, "cancelled")),
+    readPictures: (id) => later(() => st.pictureText ? rnDone(id, true, st.pictureText) : rnDone(id, false, "cancelled")),
+    commentReaderOn: () => !!st.a11y,
+    openAccessibilitySettings: () => { st.opened.push("a11y"); keep(); },
+    takeScrollComments: () => { const s = JSON.stringify(st.scroll || []); st.scroll = []; keep(); return s; },
     readCoverText: (id, url) => { st.calls.push(["cover", url]); keep(); later(() => rnDone(id, true, st.coverText || "")); },
     workUpdate: (title, text, d, t) => { st.work = (st.work || []).concat([["update", title]]); keep(); },
     workEnd: () => { st.work = (st.work || []).concat([["end"]]); keep(); },
@@ -211,7 +220,7 @@ def test_shared_reel_is_only_saved_then_start_reads_and_writes_notes(phone):
 
 
 def test_without_the_model_start_reads_captions_and_ask_meta_ai_files_the_answer(phone):
-    phone.open_with({"shared": ["https://www.instagram.com/reel/BBB222/"], "pages": {"BBB222/embed": EMBED}})
+    phone.open_with({"shared": ["https://www.instagram.com/reel/BBB222/"], "pages": {"BBB222/embed": EMBED}, "settings": json.dumps({"metaAi": True})})
     phone.get_by_role("button", name="Start: 1 reel").click()
     phone.get_by_role("heading", name="Done").wait_for()
     assert not any(c[0] == "generate" for c in phone.rn()["calls"])
@@ -235,6 +244,7 @@ def test_custom_prompt_and_model_settings_are_used(phone):
     phone.open_with(hash_="#/settings")
     phone.locator("#prompt").fill("My master prompt for {link} please")
     phone.get_by_role("button", name="Save prompt").click()
+    phone.locator("#metaon").check()  # Ask Meta AI is hidden on reels unless switched on
     phone.get_by_role("button", name="CPU").click()
     phone.get_by_role("button", name="Long").click()
     s = json.loads(phone.rn()["settings"])
@@ -565,6 +575,77 @@ def test_text_on_the_cover_picture_and_its_description_count_for_notes(phone):
     assert ["cover", "https://scontent-a.cdninstagram.com/v/cover.jpg"] in phone.rn()["calls"]
     assert r["onscreen"].startswith("Stop hardcoding passwords\nKeep secrets on the server")
     assert r["status"] == "done" and r["notes_by"] == "auto"  # enough text for quick notes now, not just "Part 2"
+
+
+VIDEO_EMBED = ('<html><body><script>window.__additionalDataLoaded("x", {"shortcode_media": {"video_url": '
+               '"https:\\/\\/scontent-b.cdninstagram.com\\/v\\/reel.mp4?a=1\\u0026b=2"}})</script>'
+               '<div class="Caption"><a class="CaptionUsername" href="#">creator_c</a>Wait for it</div></body></html>')
+
+
+def test_reel_video_gives_screen_text_and_speech_and_old_reels_are_read_again(phone):
+    old = {"code": "VID001", "url": "https://www.instagram.com/reel/VID001/", "status": "done", "added_at": 1, "caption": "Wait for it",
+           "caption_read": 1, "notes": {"topic": "Wait for it"}, "notes_by": "auto", "collections": []}
+    phone.open_with({"db": json.dumps({"reels": [old], "inbox": []}), "pages": {"VID001/embed": VIDEO_EMBED}, "speech": True,
+                     "video": {"screen": "3 habits that changed my mornings", "seconds": 31,
+                               "speech": "first drink water as soon as you wake up then walk for ten minutes and write down one goal for the day"}}, "#/run")
+    phone.get_by_role("button", name="Start: 1 reel").click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    r = db_of(phone)["reels"][0]
+    assert ["video", "https://scontent-b.cdninstagram.com/v/reel.mp4?a=1&b=2"] in phone.rn()["calls"]
+    assert r["content"] == "video+speech" and r["transcript"].startswith("first drink water") and "3 habits" in r["onscreen"]
+    assert r["notes_by"] == "auto" and r["notes"]["topic"] != "Wait for it"  # written again from what the reel says
+    phone.goto(phone.url.split("#")[0] + "#/r/VID001")
+    phone.get_by_text("Read from: caption, the text on screen and what is said").wait_for()
+    assert phone.locator("#meta").count() == 0  # Ask Meta AI only when switched on in Settings
+
+
+def test_try_on_five_reels_and_speech_model_download(phone):
+    links = [f"https://www.instagram.com/reel/TRY00{i}/" for i in range(7)]
+    phone.open_with({"shared": links}, "#/run")
+    phone.get_by_role("button", name="Try on 5 reels first").click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    assert len([r for r in db_of(phone)["reels"] if r.get("caption_read")]) == 5
+    phone.goto(phone.url.split("#")[0] + "#/settings")
+    phone.get_by_role("button", name="Download speech to text").click()
+    phone.get_by_text("Speech to text is ready").wait_for()
+    assert ["speechDownload"] in phone.rn()["calls"]
+
+
+def test_useful_reels_go_first_then_memes(phone):
+    mk = lambda code, cap, at: {"code": code, "url": f"https://www.instagram.com/reel/{code}/", "status": "ready", "added_at": at,
+                                "caption": cap, "caption_read": 1, "collections": []}
+    reels = [mk("FUN001", "POV when your bestie roasts you 😂😂 lol #meme #funny", 3),
+             mk("USE001", "5 free AI tools that save hours: how to use each one, save this", 1),
+             mk("USE002", "3 habits and tips to fix your sleep, avoid these mistakes", 2)]
+    phone.open_with({"db": json.dumps({"reels": reels, "inbox": []})}, "#/run")
+    phone.get_by_text("2 useful reels will be read properly first").wait_for()
+    phone.get_by_role("button", name="Start: 3 reels").click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    fetched = [c[1] for c in phone.rn()["calls"] if c[0] == "fetchPage"]
+    order = [next(c for c in ("USE001", "USE002", "FUN001") if c in u) for u in fetched if "/embed" in u]
+    assert order == ["USE002", "USE001", "FUN001"]  # useful first (newest first), then memes
+
+
+def test_comments_from_screenshots_and_from_scrolling_go_to_the_right_reel(phone):
+    mk = lambda code, author, cap: {"code": code, "url": f"https://www.instagram.com/reel/{code}/", "status": "done", "added_at": 1,
+                                    "author": author, "caption": cap, "caption_read": 1, "video_tried": 1, "collections": [],
+                                    "notes": {"topic": cap}, "notes_by": "auto"}
+    reels = [mk("CMT001", "chef_anna", "Pasta in 10 minutes"), mk("CMT002", "dev_raj", "Stop using var in JavaScript")]
+    screen = ["Comments", "dev_raj", "Stop using var in JavaScript", "maria.k", "He means use let and const, var leaks out of blocks",
+              "2d", "Reply", "tom_99", "This is sarcasm right? lol", "1d", "Reply", "Add a comment..."]
+    phone.open_with({"db": json.dumps({"reels": reels, "inbox": []}), "scroll": [{"at": 5, "lines": screen}],
+                     "pictureText": "Comments\nchef_anna\nPasta in 10 minutes\nlee\nAdd garlic at the end, not the start\nReply\nbo\nworks!\nReply"})
+    phone.get_by_text("Comments added to 1 reel from your scrolling").wait_for()
+    got = {r["code"]: r for r in db_of(phone)["reels"]}
+    assert "He means use let and const, var leaks out of blocks" in got["CMT002"]["comments"] and "Reply" not in got["CMT002"]["comments"]
+    assert not got["CMT001"].get("comments") and got["CMT002"]["video_tried"] == 0  # read again with the comments
+    phone.goto(phone.url.split("#")[0] + "#/r/CMT001")
+    phone.get_by_role("button", name="Add comments").click()
+    phone.get_by_text("comment lines added").wait_for()
+    assert "Add garlic at the end, not the start" in db_of(phone)["reels"][0]["comments"]
+    phone.goto(phone.url.split("#")[0] + "#/settings")
+    phone.get_by_role("button", name="Switch it on (Android settings)").click()
+    assert "a11y" in phone.rn()["opened"]
 
 
 def test_instagram_slow_down_waits_then_stops_and_keeps_the_rest(phone):

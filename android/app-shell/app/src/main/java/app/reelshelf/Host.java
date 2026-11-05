@@ -30,6 +30,9 @@ interface Host {
 
     void pickFolder(Consumer<Uri> cb);
 
+    /** Android's picture picker, several at once; null or empty when cancelled. */
+    void pickImages(Consumer<java.util.List<Uri>> cb);
+
     void sendToLens(Uri uri);
 
     void keepScreenOn(boolean on);
