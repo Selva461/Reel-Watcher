@@ -800,6 +800,19 @@ final class LocalBridge {
         });
     }
 
+    /** A product name (from a label, a store page or a reel's notes) to the open product databases. {results: [...]} */
+    @JavascriptInterface
+    public void productCheck(int id, String name) {
+        if (!ok()) return;
+        net.execute(() -> {
+            try {
+                done(id, true, new WebLookup(TitleVerifier.NET).product(name).toString());
+            } catch (Exception e) {
+                done(id, false, e.getMessage() == null ? "The product check did not work" : e.getMessage());
+            }
+        });
+    }
+
     /** The search mic: what you said, as text. Android's own recognizer listens, not this app (no microphone permission). */
     @JavascriptInterface
     public void listen(int id) {

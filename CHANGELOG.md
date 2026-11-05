@@ -5,6 +5,16 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.6
+- Products: a new Products chip in Library. Screenshots of a label ("Clinic Plus / Strong & Long Shampoo") or a store
+  page (Amazon, Flipkart, Nykaa...) add the product, with the store link and price when the screenshot shows them.
+  Reels add the products their notes name, with a store link from the caption. Process looks each one up in Open
+  Beauty Facts, Open Food Facts and Open Products Facts (free, no key, only the name is sent): "Confirmed" only when
+  the brand and name there match the label; then "Details" opens its page (size, picture). "Find in stores" opens a
+  shopping search in your browser. A product with no readable name is not guessed.
+- Recipes: notes of cooking reels get Ingredients (with amounts only when the reel says them) and Steps. Like points,
+  any ingredient or step the reel's own words do not back up is left out.
+
 ## 1.3.5
 - Two sources for everything: a title is verified only when two independent services agree on its name, year and
   kind (Wikipedia and Wikidata count as one). Titles verified by a single source before are checked again. Without a

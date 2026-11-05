@@ -13,6 +13,9 @@ const Notes = (() => {
     "MEANING: what it means, in simple words",
     "USE IT FOR: when and how I can use this",
     "TOOLS: every tool, app, website or product named, separated by commas (or none)",
+    "PRODUCTS: every physical product shown or named, as brand and name (like CeraVe Foaming Cleanser), separated by commas (or none)",
+    "INGREDIENTS: only for a cooking reel, one per line starting with -, with the amount only if it is said (leave this out for other reels)",
+    "STEPS: only for a cooking reel, each cooking step in order, numbered (leave this out for other reels)",
     "TAKEAWAY: the one thing to remember",
     "TAGS: 5 to 8 short tags, separated by commas",
   ].join("\n");
@@ -61,7 +64,8 @@ const Notes = (() => {
     tone: "tone", points: "points", point: "points", "key points": "points", "main points": "points",
     meaning: "meaning", "what it means": "meaning", "use it for": "use", "use for": "use", "uses": "use", "use cases": "use",
     tools: "tools", tool: "tools", "tools mentioned": "tools", takeaway: "takeaway", takeaways: "takeaway", "key takeaway": "takeaway",
-    tags: "tags", tag: "tags", hashtags: "tags" };
+    tags: "tags", tag: "tags", hashtags: "tags", products: "products", product: "products", "products shown": "products",
+    ingredients: "ingredients", ingredient: "ingredients", steps: "steps", method: "steps", instructions: "steps", "recipe steps": "steps" };
   // a heading starts the line (markdown # > * _ allowed, a list dash is not, so "- Tools: x" inside POINTS stays a point)
   const HEAD = new RegExp("^[\\s>#*_]*(" + Object.keys(ALIASES).sort((a, b) => b.length - a.length).map((k) => k.replace(/ /g, "\\s+")).join("|") +
     ")\\s*[*_]*\\s*(?:[:\\uFF1A\\u2013-]\\s*[*_]*\\s*(.*)|$)", "i");
@@ -106,6 +110,12 @@ const Notes = (() => {
         .filter(Boolean))].slice(0, 12),
     };
     n.topic = n.topic.replace(/^["']|["']$/g, "").slice(0, 200);
+    const products = list(raw.products || []);
+    const ingredients = lines(raw.ingredients || []).filter((x) => !/^(none|n\/a|-)\.?$/i.test(x) && !/^leave/i.test(x));
+    const steps = lines(raw.steps || []).filter((x) => !/^(none|n\/a|-)\.?$/i.test(x) && !/^leave/i.test(x));
+    if (products.length) n.products = products.slice(0, 12);
+    if (ingredients.length) n.ingredients = ingredients.slice(0, 40);
+    if (steps.length) n.steps = steps.slice(0, 40);
     return n;
   }
 
@@ -139,6 +149,9 @@ const Notes = (() => {
     out.push(`MEANING: ${n.meaning || ""}`);
     if ((n.use || []).length > 1) { out.push("USE IT FOR:"); n.use.forEach((u) => out.push(`- ${u}`)); } else out.push(`USE IT FOR: ${(n.use || [])[0] || ""}`);
     out.push(`TOOLS: ${(n.tools || []).join(", ") || "none"}`);
+    if ((n.products || []).length) out.push(`PRODUCTS: ${n.products.join(", ")}`);
+    if ((n.ingredients || []).length) { out.push("INGREDIENTS:"); n.ingredients.forEach((x) => out.push(`- ${x}`)); }
+    if ((n.steps || []).length) { out.push("STEPS:"); n.steps.forEach((x, i) => out.push(`${i + 1}. ${x}`)); }
     out.push(`TAKEAWAY: ${n.takeaway || ""}`);
     out.push(`TAGS: ${(n.tags || []).join(", ")}`);
     return out.join("\n");
@@ -401,21 +414,28 @@ const Notes = (() => {
   function tokens(s) { return (String(s || "").toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}+#.-]*/gu) || []).map((w) => w.replace(/[.-]+$/, "")).filter((w) => w && w.length > 1 && !STOP.has(w)); }
   function words(s) { return tokens(s).map(stem); }
 
-  /** Keeps only the points the reel itself backs up: each point has to share real words with what the reel shows or says
-   *  (caption, text on screen, speech, comments). Short points need one shared word, longer ones two. With too little
-   *  reel text to judge (under 30 letters), nothing is dropped. Returns how many points were left out. */
+  /** Keeps only the points (and recipe lines and products) the reel itself backs up: each has to share real words with
+   *  what the reel shows or says (caption, text on screen, speech, comments). Short ones need one shared word, longer
+   *  ones two. With too little reel text to judge (under 30 letters), nothing is dropped. Returns how many were left out. */
   function keepBacked(notes, reel) {
     const text = ["title", "caption", "transcript", "onscreen", "comments", "extra"].map((k) => reel[k] || "").join(" ").replace(/#\S+/g, "");
     if (!notes || text.trim().length < 30) return 0;
     const have = new Set(words(text));
-    const before = (notes.points || []).length;
-    notes.points = (notes.points || []).filter((p) => {
+    const backed = (p) => {
       const own = [...new Set(words(p))];
       const shared = own.filter((w) => have.has(w)).length;
       return shared >= (own.length <= 3 ? 1 : 2);
-    });
-    notes.unbacked = before - notes.points.length;
-    return notes.unbacked;
+    };
+    let left = 0;
+    for (const k of ["points", "ingredients", "steps", "products"]) {
+      if (!notes[k]) continue;
+      const before = notes[k].length;
+      notes[k] = notes[k].filter(backed);
+      left += before - notes[k].length;
+      if (k !== "points" && !notes[k].length) delete notes[k];
+    }
+    notes.unbacked = left;
+    return left;
   }
 
   // words people use for the same thing; a search for one also finds the others (at a lower score)

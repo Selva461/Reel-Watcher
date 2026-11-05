@@ -150,6 +150,7 @@ function setNotes(r, notes, by, raw) {
   r.status = "done";
   r.error = "";
   if (raw) r.raw = String(raw).slice(0, 20000);
+  if (typeof Products !== "undefined") Products.addFromReel(db, r);  // products the notes name go to Products
 }
 
 /** Things shared to Reel Shelf while it was closed (reel links, Meta AI answers). */
@@ -718,10 +719,13 @@ function notesHtml(n) {
     ${sec("Topic", n.topic ? `<p><strong>${esc(n.topic)}</strong></p>` : "")}
     ${sec("What they really mean", n.intent ? `<p>${esc(n.intent)}</p>` : "")}
     ${sec("Tone", n.tone ? `<p>${esc(n.tone)}</p>` : "")}
-    ${sec("Points", ol(n.points) + (n.unbacked ? `<p class="small muted">${n.unbacked === 1 ? "1 point was" : n.unbacked + " points were"} left out: nothing in the reel backed ${n.unbacked === 1 ? "it" : "them"} up.</p>` : ""))}
+    ${sec("Points", ol(n.points) + (n.unbacked ? `<p class="small muted">${n.unbacked === 1 ? "1 line was" : n.unbacked + " lines were"} left out: nothing in the reel backed ${n.unbacked === 1 ? "it" : "them"} up.</p>` : ""))}
+    ${sec("Ingredients", (n.ingredients || []).length ? `<ul>${n.ingredients.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "")}
+    ${sec("Steps", ol(n.steps))}
     ${sec("Meaning", n.meaning ? `<p>${esc(n.meaning)}</p>` : "")}
     ${sec("Use it for", ul(n.use))}
     ${sec("Tools", (n.tools || []).length ? `<p>${esc(n.tools.join(", "))}</p>` : "")}
+    ${sec("Products", (n.products || []).length ? `<p>${esc(n.products.join(", "))}</p>` : "")}
     ${sec("Takeaway", n.takeaway ? `<p>${esc(n.takeaway)}</p>` : "")}
     ${sec("Tags", (n.tags || []).length ? `<span class="tagrow">${n.tags.map((t) => `<span class="tag">#${esc(t)}</span>`).join("")}</span>` : "")}</div>`;
 }

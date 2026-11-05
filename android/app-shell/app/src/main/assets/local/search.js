@@ -37,6 +37,7 @@ const Search = (() => {
   ];
   const REEL_WORDS = /\b(reels?|videos?|clips?|shorts?(?! films?)|memes?|posts?)\b/;
   const QUOTE_WORDS = /\b(quotes?|quotations?|sayings?|lines?)\b/;
+  const PRODUCT_WORDS = /\b(products?|things? to buy|shopping|buy list)\b/;
 
   // genres: the words people say, and what the databases call them (TMDB, AniList, MangaDex, Wikidata)
   const GENRES = [
@@ -164,9 +165,10 @@ const Search = (() => {
       cut(new RegExp(rx.source, "g"));
     }
     if (types) { p.types = types; say("type", kindLabels.join(" ")); }
-    const wantsReels = REEL_WORDS.test(q), wantsQuotes = QUOTE_WORDS.test(q);
-    if (wantsReels || wantsQuotes) {
-      p.kinds = [...(types ? ["media"] : []), ...(wantsReels ? ["reels"] : []), ...(wantsQuotes ? ["quotes"] : [])];
+    const wantsReels = REEL_WORDS.test(q), wantsQuotes = QUOTE_WORDS.test(q), wantsProducts = PRODUCT_WORDS.test(q);
+    if (wantsReels || wantsQuotes || wantsProducts) {
+      p.kinds = [...(types ? ["media"] : []), ...(wantsReels ? ["reels"] : []), ...(wantsQuotes ? ["quotes"] : []), ...(wantsProducts ? ["products"] : [])];
+      if (wantsProducts) { say("kind", "Products", "products"); cut(new RegExp(PRODUCT_WORDS.source, "g")); }
       if (wantsReels) { say("kind", "Reels", "reels"); cut(new RegExp(REEL_WORDS.source, "g")); }
       if (wantsQuotes) { say("kind", "Quotes", "quotes"); cut(new RegExp(QUOTE_WORDS.source, "g")); }
     }
@@ -294,7 +296,7 @@ const Search = (() => {
       const mediaOnly = p.types || p.maxMin || p.minMin || p.status || f.status || f.maxMin || f.language || f.genre || f.year || f.verified || f.source;
       return k === "media" || !mediaOnly;
     };
-    const out = { p, media: [], reels: [], quotes: [], noLength: [] };
+    const out = { p, media: [], reels: [], quotes: [], products: [], noLength: [] };
 
     const onlyTags = query.trim() && !p.structured && p.text && p.text.split(/\s+/).every((w) => w.startsWith("#"));
     if (want("media") && !onlyTags) {
@@ -340,6 +342,15 @@ const Search = (() => {
           for (const w of words.split(" ")) for (const x of Quotes.find(db, w)) if (!seen.has(x)) { seen.add(x); out.quotes.push(x); }
         }
       } else if (!query.trim()) out.quotes = (db.quotes || []).slice();
+    }
+    if (want("products") && typeof Products !== "undefined") {
+      if (words) {
+        out.products = Products.find(db, words);
+        if (!out.products.length && words.split(" ").length > 1) {
+          const seen = new Set();
+          for (const w of words.split(" ")) for (const x of Products.find(db, w)) if (!seen.has(x)) { seen.add(x); out.products.push(x); }
+        }
+      } else if (!query.trim()) out.products = (db.products || []).slice();
     }
     return out;
   }

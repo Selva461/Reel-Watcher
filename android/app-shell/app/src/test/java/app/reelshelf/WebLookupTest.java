@@ -69,4 +69,28 @@ public class WebLookupTest {
         assertTrue(urls.get(0).contains("srsearch=%22Why+so+serious+Let%27s+put+a+smile+on+that+face+said+the%22"));  // 12 words, one phrase
         assertFalse(w.quote("Nobody ever said this line anywhere").getBoolean("found"));
     }
+
+    @Test
+    public void aProductIsLookedUpInTheOpenProductDatabases() throws Exception {
+        List<String> urls = new ArrayList<>();
+        WebLookup w = new WebLookup((url, body, h) -> {
+            urls.add(url);
+            String b = url.contains("openbeautyfacts") && url.contains("Clinic")
+                    ? "{\"products\":[{\"code\":\"8901030865278\",\"product_name\":\"Clinic Plus Strong & Long Shampoo\",\"brands\":\"Clinic Plus,Unilever\","
+                    + "\"quantity\":\"340 ml\",\"image_front_small_url\":\"https://images.openbeautyfacts.org/x.jpg\"},{\"code\":\"bad\",\"product_name\":\"No code\"}]}"
+                    : url.contains("openfoodfacts") && url.contains("Maggi") ? "{\"products\":[{\"code\":\"8901058000290\",\"product_name\":\"Masala Noodles\",\"brands\":\"Maggi\"}]}"
+                    : "{\"products\":[]}";
+            return new TitleVerifier.Res(200, b, 0);
+        });
+        org.json.JSONArray r = w.product("Clinic Plus Strong and Long Shampoo").getJSONArray("results");
+        assertEquals(1, r.length());  // a result without a barcode is left out
+        assertEquals("Clinic Plus", r.getJSONObject(0).getString("brand"));
+        assertEquals("https://world.openbeautyfacts.org/product/8901030865278", r.getJSONObject(0).getString("url"));
+        assertEquals("Open Beauty Facts", r.getJSONObject(0).getString("db"));
+        assertEquals(1, urls.size());  // found in the first database: the others are not asked
+        org.json.JSONArray m = w.product("Maggi Masala Noodles").getJSONArray("results");
+        assertEquals("Open Food Facts", m.getJSONObject(0).getString("db"));
+        assertEquals(0, w.product("Nothing like this").getJSONArray("results").length());
+        assertEquals(0, w.product("ab").getJSONArray("results").length());
+    }
 }
