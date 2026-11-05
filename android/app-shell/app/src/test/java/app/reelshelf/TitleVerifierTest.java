@@ -363,18 +363,18 @@ public class TitleVerifierTest {
         TitleVerifier v = new TitleVerifier(net, new FakeClock(), "k", null);
         Map<String, String> ext = new java.util.HashMap<>();
         ext.put("tmdb", "movie/27205");
-        assertEquals(148, v.details(ext)[0]);
+        assertEquals(148, v.details(ext, "movie").runtime);
         ext.put("tmdb", "tv/1399");
-        int[] got = v.details(ext);
-        assertEquals(68, got[0]);
-        assertEquals(73, got[1]);
+        TitleVerifier.Details got = v.details(ext, "series");
+        assertEquals(68, got.runtime);
+        assertEquals(73, got.episodes);
         Map<String, String> an = new java.util.HashMap<>();
         an.put("anilist", "21");
-        assertEquals(24, v.details(an)[0]);
+        assertEquals(24, v.details(an, "anime").runtime);
         Map<String, String> bad = new java.util.HashMap<>();
         bad.put("tmdb", "movie/1?x=");  // not an id: nothing is asked
         int before = net.calls.size();
-        assertEquals(0, v.details(bad)[0]);
+        assertEquals(0, v.details(bad, "movie").runtime);
         assertEquals(before, net.calls.size());
     }
 
@@ -395,8 +395,8 @@ public class TitleVerifierTest {
         long now = System.currentTimeMillis();
         JSONArray media = new JSONArray()
                 .put(entry("m-old", "Inception", "verified", now).put("ext", new JSONObject().put("tmdb", "movie/27205")))
-                .put(entry("m-has", "Heat", "verified", now).put("runtime", 170).put("ext", new JSONObject().put("tmdb", "movie/949")))
-                .put(entry("m-tried", "Up", "verified", now).put("runtime_tried", now).put("ext", new JSONObject().put("tmdb", "movie/14160")))
+                .put(entry("m-has", "Heat", "verified", now).put("runtime", 170).put("details_at", now).put("ext", new JSONObject().put("tmdb", "movie/949")))
+                .put(entry("m-tried", "Up", "verified", now).put("details_at", now).put("ext", new JSONObject().put("tmdb", "movie/14160")))
                 .put(entry("m-book", "Dune", "verified", now).put("type", "book").put("ext", new JSONObject().put("anilist", "5")));
         writeDb(dir, media);
         FakeNet net = new FakeNet().on("3/movie/27205?", "{\"runtime\":148}");
@@ -450,5 +450,82 @@ public class TitleVerifierTest {
         JSONObject r = new TitleVerifier(net, new FakeClock(), "k", null).verify(cand("Inception", "movie", 2010));
         assertEquals("verified", r.getString("verdict"));
         assertEquals(0, net.count("en.wikipedia.org"));
+    }
+
+    static String alNode(long id, String format, int eps, int year, String en, long prequel, long sequel) throws Exception {
+        JSONArray edges = new JSONArray();
+        if (prequel > 0) edges.put(new JSONObject().put("relationType", "PREQUEL").put("node", new JSONObject().put("id", prequel).put("type", "ANIME").put("format", "TV")));
+        if (sequel > 0) edges.put(new JSONObject().put("relationType", "SEQUEL").put("node", new JSONObject().put("id", sequel).put("type", "ANIME").put("format", "TV")));
+        edges.put(new JSONObject().put("relationType", "ADAPTATION").put("node", new JSONObject().put("id", 999).put("type", "MANGA").put("format", "MANGA")));
+        return new JSONObject().put("data", new JSONObject().put("Media", new JSONObject().put("id", id).put("format", format).put("episodes", eps)
+                .put("duration", 25).put("averageScore", 82).put("seasonYear", year).put("title", new JSONObject().put("english", en).put("romaji", en))
+                .put("relations", new JSONObject().put("edges", edges)))).toString();
+    }
+
+    @Test
+    public void anAnimeShowsEachSeasonAndItsMyAnimeListScore() throws Exception {
+        // AniList keeps each season apart: found as season 2, it walks back to season 1 and on to season 3
+        FakeNet net = new FakeNet()
+                .on("\"i\":21355", alNode(21355, "TV", 25, 2016, "Re:ZERO -Starting Life in Another World-", 0, 108632))
+                .on("\"i\":108632", alNode(108632, "TV", 25, 2020, "Re:ZERO Season 2", 21355, 163134))
+                .on("\"i\":163134", alNode(163134, "TV", 16, 2024, "Re:ZERO Season 3", 108632, 0))
+                .on("api.jikan.moe/v4/anime/31240", "{\"data\":{\"duration\":\"25 min per ep\",\"episodes\":25,\"score\":8.23,\"scored_by\":1234567}}");
+        TitleVerifier v = new TitleVerifier(net, new FakeClock(), "", null);
+        Map<String, String> ext = new java.util.HashMap<>();
+        ext.put("anilist", "108632");
+        ext.put("mal", "31240");
+        TitleVerifier.Details d = v.details(ext, "anime");
+        assertEquals(3, d.seasons.length());
+        assertEquals(1, d.seasons.getJSONObject(0).getInt("n"));
+        assertEquals(25, d.seasons.getJSONObject(0).getInt("episodes"));
+        assertEquals(2016, d.seasons.getJSONObject(0).getInt("year"));
+        assertEquals(16, d.seasons.getJSONObject(2).getInt("episodes"));
+        assertEquals("Re:ZERO Season 3", d.seasons.getJSONObject(2).getString("title"));
+        assertEquals(8.2, d.rating, 0.001);
+        assertEquals("MyAnimeList", d.ratingBy);
+        assertEquals(1234567, d.votes);
+        assertEquals(0, net.count("omdbapi"));
+    }
+
+    @Test
+    public void aSeriesShowsTmdbSeasonsAndTheImdbRatingWithAnOmdbKey() throws Exception {
+        String tv = "{\"episode_run_time\":[50],\"number_of_episodes\":30,\"vote_average\":8.43,\"vote_count\":5000,"
+                + "\"external_ids\":{\"imdb_id\":\"tt4574334\"},\"seasons\":[{\"season_number\":0,\"episode_count\":3,\"name\":\"Specials\"},"
+                + "{\"season_number\":1,\"episode_count\":8,\"air_date\":\"2016-07-15\",\"name\":\"Season 1\"},"
+                + "{\"season_number\":2,\"episode_count\":9,\"air_date\":\"2017-10-27\",\"name\":\"Season 2\"}]}";
+        FakeNet net = new FakeNet().on("3/tv/66732?", tv).on("omdbapi.com/?i=tt4574334", "{\"imdbRating\":\"8.6\",\"imdbVotes\":\"1,412,000\"}");
+        TitleVerifier v = new TitleVerifier(net, new FakeClock(), "k", null);
+        Map<String, String> ext = new java.util.HashMap<>();
+        ext.put("tmdb", "tv/66732");
+        TitleVerifier.Details noKey = v.details(ext, "series");
+        assertEquals(2, noKey.seasons.length());  // "Specials" is not a season
+        assertEquals(8, noKey.seasons.getJSONObject(0).getInt("episodes"));
+        assertEquals(2017, noKey.seasons.getJSONObject(1).getInt("year"));
+        assertEquals("TMDB", noKey.ratingBy);
+        assertEquals(8.4, noKey.rating, 0.001);
+        assertEquals("tt4574334", noKey.imdb);
+        assertEquals(0, net.count("omdbapi"));
+
+        v.omdbKey = "my-omdb";
+        TitleVerifier.Details d = v.details(ext, "series");
+        assertEquals("IMDb", d.ratingBy);
+        assertEquals(8.6, d.rating, 0.001);
+        assertEquals(1412000, d.votes);
+        for (String c : net.calls) if (!c.contains("omdbapi.com")) assertFalse(c.contains("my-omdb"));  // the key goes to OMDb only
+    }
+
+    @Test
+    public void aVerifiedTitleCarriesItsRatingAndSeasons() throws Exception {
+        String tv = "{\"episode_run_time\":[50],\"number_of_episodes\":17,\"vote_average\":8.4,\"vote_count\":5000,"
+                + "\"seasons\":[{\"season_number\":1,\"episode_count\":8,\"air_date\":\"2016-07-15\"},{\"season_number\":2,\"episode_count\":9,\"air_date\":\"2017-10-27\"}]}";
+        JSONObject show = new JSONObject().put("id", 66732).put("media_type", "tv").put("name", "Stranger Things").put("first_air_date", "2016-07-15")
+                .put("original_language", "en").put("genre_ids", new JSONArray()).put("poster_path", "/s.jpg");
+        FakeNet net = new FakeNet().on("3/tv/66732?", tv).on("search/multi", new JSONObject().put("results", new JSONArray().put(show)).toString());
+        JSONObject r = new TitleVerifier(net, new FakeClock(), "k", null).verify(cand("STRANGER THINGS", "series", 0));
+        assertEquals("verified", r.getString("verdict"));
+        JSONObject f = r.getJSONObject("facts");
+        assertEquals("Stranger Things", f.getString("title"));
+        assertEquals(8.4, f.getJSONObject("rating").getDouble("score"), 0.001);
+        assertEquals(2, f.getJSONArray("seasons").length());
     }
 }

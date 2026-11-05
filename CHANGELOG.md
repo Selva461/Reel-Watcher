@@ -5,6 +5,18 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.4
+- Nothing to check by hand anywhere: the "It is right" and "Not a real title" buttons are gone from the title page.
+  When no database matches a title closely, the phone AI (if downloaded) reads the closest matches and a web search
+  for the name (only the name is sent) and picks one, or none. Titles still not found keep their name, show "Not
+  found online yet" and are tried again later by themselves.
+- Comment text is no longer taken for titles ("View 4 replies", "12 likes Reply", usernames like ezequiel_266,
+  "Liked by..."), and such entries already saved are deleted.
+- Like a movie app, each title shows its seasons with their episodes (Re:Zero: S1 · 25 eps · 2016, S2 · 25 eps,
+  S3 · 16 eps) and a rating: MyAnimeList for anime, TMDB for movies and series, or the IMDb rating with your own free
+  OMDb key (Settings; IMDb itself has no free way to read its ratings). An IMDb button opens the title's IMDb page.
+  Titles checked before get their seasons and rating on the next check.
+
 ## 1.3.3
 - Titles from screenshots are checked by the app alone: nothing waits for you to pick. Each title is looked up in
   TMDB (or Wikidata), AniList, MyAnimeList and MangaDex, and when none of them finds it, in Wikipedia's search, which

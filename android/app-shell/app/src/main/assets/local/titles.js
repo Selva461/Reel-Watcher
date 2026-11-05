@@ -137,6 +137,25 @@ const Titles = (() => {
     for (const [k, words] of Object.entries(KIND_WORDS)) if (words.includes(w)) return k;
     return "";
   }
+  // Comment and button lines that change with the numbers or names in them ("View 4 replies", "12 likes Reply",
+  // "ezequiel_266 2w", "Liked by sam and others"). Never a title.
+  const CHROME_LINES = [
+    /^view\s+(all\s+)?\d*\s*(more\s+|previous\s+)?(repl(y|ies)|comments?)\b/i,
+    /^(hide|see|show)\s+(\d+\s+)?(more\s+)?(repl(y|ies)|translation|comments?)\b/i,
+    /^\d[\d.,]*\s*[km]?\s*(likes?|repl(y|ies)|comments?|views?|shares?)\b/i,
+    /^\d+\s*[smhdwy]\s+(reply|like|likes|see translation)\b/i,
+    /^(liked by|replying to|reply to|replied to|followed by|suggested for you|see translation)\b/i,
+    /^@?[a-z0-9]*[._][a-z0-9._]*(\s+\d+\s*[smhdwy])?(\s+([Rr]eply|[Aa]uthor|[Ff]ollow))?$/,  // a username (lower case, has _ or .), maybe "2w"
+    /^@?[\w.]+\s+\d+\s*[smhdwy]$/i,  // "sam 2w"
+    /\b(reply|replies)\s*$/i,  // ends like a comment's buttons
+  ];
+  /** True for app buttons, counters and comment lines (a username, "View 4 replies", "12 likes Reply"). */
+  function isChrome(t) {
+    const x = String(t || "").replace(/\s+/g, " ").trim();
+    if (!x) return true;
+    if (CHROME.has(lower(x)) || CHROME.has(lower(x).replace(/[?.!]+$/, ""))) return true;
+    return CHROME_LINES.some((re) => re.test(x));
+  }
   function langOf(word) {
     const w = lower(word).replace(/[^a-z]/g, "");
     for (const [k, words] of Object.entries(LANG_WORDS)) if (words.includes(w)) return k;
@@ -151,7 +170,7 @@ const Titles = (() => {
   function nameLike(t) {
     if (!t || t.length < 2 || t.length > 70) return 0;
     if (NOISE.test(t)) return 0;
-    if (CHROME.has(lower(t)) || CHROME.has(lower(t).replace(/[?.!]+$/, ""))) return 0;
+    if (isChrome(t)) return 0;
     const words = t.split(/\s+/);
     if (words.length > 9) return 0;
     const letters = (t.match(/\p{L}/gu) || []).length;
@@ -286,7 +305,8 @@ const Titles = (() => {
     for (let i = 0; i < rows.length; i++) {
       if (!ASK.test(rows[i].t)) continue;
       for (let j = i + 1; j < Math.min(rows.length, i + 6); j++) {
-        let t = rows[j].t.replace(/^@[\w.]+\s*/, "").replace(/^(it'?s|its|it is|this is|that'?s|movie is|name is|called)\s+/i, "");
+        if (isChrome(rows[j].t)) continue;  // "View 4 replies", a username, "12 likes Reply"
+        let t = rows[j].t.replace(/^@[\w.]+\s*/, "").replace(/^[\w]*[._][\w.]*\s+/, "").replace(/^(it'?s|its|it is|this is|that'?s|movie is|name is|called)\s+/i, "");
         if (ASK.test(t)) continue;
         if (nameLike(clean(t).title) >= 0.55 && t.split(/\s+/).length <= 7) { add(t, 0.7, "comment", rows[i].t + " / " + rows[j].t); break; }
       }
@@ -360,7 +380,7 @@ const Titles = (() => {
     return "unsure";
   }
 
-  return { read, clean, key, nameLike, context, verdict, kindOf, langOf, tagTitle, KIND_WORDS, LANG_WORDS };
+  return { read, clean, key, nameLike, isChrome, context, verdict, kindOf, langOf, tagTitle, KIND_WORDS, LANG_WORDS };
 })();
 
 if (typeof module !== "undefined") module.exports = Titles;

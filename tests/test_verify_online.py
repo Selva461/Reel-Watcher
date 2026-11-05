@@ -73,7 +73,7 @@ def test_titles_left_to_pick_before_the_update_are_checked_again(phone):
     d = {m["id"]: m for m in db_of(phone)["media"]}
     assert d["m-dune"]["verified"] == "unverified" and "review" not in d["m-dune"]
     assert "checked_at" not in d["m-zzq"] and d["m-heat"]["verified"] == "verified"
-    assert db_of(phone)["verify_rules"] == 2
+    assert db_of(phone)["verify_rules"] == 3
 
 
 def test_answers_from_the_night_are_applied_when_the_app_opens(phone):
@@ -105,3 +105,71 @@ def test_hostile_titles_are_shown_as_text(phone):
     phone.open_with({"db": start_db(), "verifyPending": ans}, "#/")
     phone.get_by_text(bad).first.wait_for()
     assert phone.evaluate("window.__pwned") is None
+
+
+ZZQ_CHOICES = [{"source": "anilist", "title": "Dai to Dai", "year": 1991, "type": "manga", "language": "ja", "score": 0.5,
+                "facts": facts("Dai to Dai", 1991, "ja", "manga", ext={"anilist": "1"})},
+               {"source": "mangadex", "title": "Daio", "year": 2020, "type": "manga", "language": "ja", "score": 0.45,
+                "facts": facts("Daio", 2020, "ja", "manga", ext={"mangadex": "x"})}]
+
+
+def test_the_phone_ai_picks_when_no_database_was_sure(phone):
+    ans = {"m-zzq": {"verdict": "not_found", "confidence": 0.5, "by": "anilist", "note": "Closest online: Dai to Dai", "checked_at": 5,
+                     "choices": ZZQ_CHOICES}}
+    phone.open_with({"db": start_db(), "verifyAnswers": ans, "model": {"ready": True}, "answers": ["2"],
+                     "web": [{"title": "Daio", "url": "https://en.wikipedia.org/wiki/Daio", "text": "Daio is a manga.", "source": "Wikipedia"}]}, "#/check")
+    phone.get_by_role("button", name="Process: check 3 titles online").click()
+    phone.get_by_text("1 picked by the phone AI").wait_for()
+    st = phone.rn()
+    gen = [c for c in st["calls"] if c[0] == "generate"]
+    assert len(gen) == 1 and "1. Dai to Dai" in gen[0][1] and "2. Daio" in gen[0][1] and "Daio is a manga." in gen[0][1]
+    assert ["webSearch", "zzq vvx Movie"] in st["calls"]  # only the name goes online
+    z = {m["id"]: m for m in db_of(phone)["media"]}["m-zzq"]
+    assert z["title"] == "Daio" and z["verified"] == "verified" and z["verified_by"] == "phone AI"
+    assert st["stopped"] >= 1  # the model is let go afterwards
+
+
+def test_the_phone_ai_can_say_none_and_nothing_is_renamed(phone):
+    ans = {"m-zzq": {"verdict": "not_found", "confidence": 0.5, "by": "anilist", "note": "", "checked_at": 5, "choices": ZZQ_CHOICES}}
+    phone.open_with({"db": start_db(), "verifyPending": ans, "model": {"ready": True}, "answers": ["0"]}, "#/check")
+    phone.get_by_role("button", name="Process: check 3 titles online").click()  # 3: the old "not found" date is past 30 days
+    phone.wait_for_function("() => window.__rn.calls.some((c) => c[0] === 'generate')")
+    phone.get_by_text("Done").wait_for()
+    z = {m["id"]: m for m in db_of(phone)["media"]}["m-zzq"]
+    assert z["title"] == "zzq vvx" and z["verified"] == "unverified" and z["ai_at"] > 0  # not asked again every time
+    phone.goto(phone.url.split("#")[0] + "#/m/m-zzq")
+    phone.get_by_text("Not found online yet").wait_for()  # marked quietly, tried again later
+
+
+def test_comment_lines_saved_as_titles_are_deleted(phone):
+    db = json.dumps({"reels": [], "inbox": [], "verify_rules": 2, "media": [
+        media("m-v", "View 4 replies"), media("m-l", "12 likes Reply"), media("m-u", "ezequiel_266"),
+        media("m-ok", "Interstellar"), media("m-kgf", "K.G.F")]})
+    phone.open_with({"db": db}, "#/")
+    phone.wait_for_function("() => JSON.parse(window.__rn.db).verify_rules === 3")
+    assert {m["title"] for m in db_of(phone)["media"]} == {"Interstellar", "K.G.F"}
+
+
+def test_a_title_shows_its_rating_and_seasons_like_a_movie_app(phone):
+    seasons = [{"n": 1, "episodes": 25, "year": 2016, "title": "Re:ZERO -Starting Life in Another World-"},
+               {"n": 2, "episodes": 25, "year": 2020, "title": "Re:ZERO Season 2"}, {"n": 3, "episodes": 16, "year": 2024, "title": "Re:ZERO Season 3"}]
+    db = json.dumps({"reels": [], "inbox": [], "media": [media("m-rz", "Re:ZERO -Starting Life in Another World-", type="anime", verified="verified",
+                                                               ext={"anilist": "21355", "mal": "31240"})]})
+    ans = {"m-rz": {"verdict": "details", "runtime": 25, "episodes": 25, "checked_at": 9, "seasons": seasons,
+                    "rating": {"score": 8.23, "by": "MyAnimeList", "votes": 1234567}}}
+    phone.open_with({"db": db, "verifyPending": ans}, "#/")
+    phone.locator("#results").get_by_text("★ 8.2 MyAnimeList", exact=False).wait_for()
+    phone.locator("#results").get_by_text("3 seasons · 66 eps", exact=False).wait_for()
+    phone.locator("#results a.list-item").first.click()
+    phone.get_by_role("heading", name="3 seasons").wait_for()
+    phone.get_by_text("16 eps · 2024").wait_for()
+    phone.get_by_text("1,234,567 votes", exact=False).wait_for()
+    m = db_of(phone)["media"][0]
+    assert m["rating"] == {"score": 8.2, "by": "MyAnimeList", "votes": 1234567} and m["details_at"] == 9 and len(m["seasons"]) == 3
+
+
+def test_omdb_key_in_settings(phone):
+    phone.open_with({"db": start_db()}, "#/settings")
+    phone.locator("#omdbkey").fill("omdb-key")
+    phone.locator("#omdbsave").click()
+    assert json.loads(phone.rn()["settings"])["omdbKey"] == "omdb-key"

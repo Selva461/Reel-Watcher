@@ -66,8 +66,8 @@ final class VerifyJob {
         if (!tmp.renameTo(f)) throw new IOException("Could not save " + f.getName());
     }
 
-    /** Answers from before titles were picked automatically (1.3.3) are asked again, not reused. */
-    static final int CACHE_VERSION = 2;
+    /** Answers from before 1.3.4 (no seasons, ratings or close matches kept) are asked again, not reused. */
+    static final int CACHE_VERSION = 3;
 
     static String cacheKey(TitleVerifier.Candidate c) {
         return TitleMatch.clean(c.title) + "|" + c.type + "|" + (c.year > 0 ? c.year : "") + "|" + c.lang;
@@ -175,7 +175,7 @@ final class VerifyJob {
                         JSONObject keep = new JSONObject(res.toString());
                         keep.remove("id");
                         keep.remove("updated_at");
-                        keep.remove("choices");
+                        if (!"not_found".equals(keep.optString("verdict"))) keep.remove("choices");  // the close ones: for the phone AI
                         keep.put("v", CACHE_VERSION);
                         cache.put(key, keep);
                     }
@@ -199,10 +199,10 @@ final class VerifyJob {
                     unsaved = 0;
                 }
             }
-            // titles checked before 1.3.0 have no length yet: look it up once (for "under 1.5 hours" searches)
+            // titles checked before 1.3.4 have no seasons or rating yet (some no length): looked up once
             int lengths = 0;
             if (!stopped && !offline) {
-                List<String[]> need = needLength(db, rs);
+                List<String[]> need = needDetails(db, rs);
                 int failedInARow = 0;
                 for (String[] n : need) {
                     if (stop.get() || (budgetMs > 0 && System.currentTimeMillis() - t0 > budgetMs)) {
@@ -218,9 +218,9 @@ final class VerifyJob {
                         String k = it.next();
                         ext.put(k, e.optString(k));
                     }
-                    int[] d;
+                    TitleVerifier.Details d;
                     try {
-                        d = verifier.details(ext);
+                        d = verifier.details(ext, m.optString("type"));
                         failedInARow = 0;
                     } catch (TitleVerifier.Stopped x) {
                         stopped = true;
@@ -231,8 +231,11 @@ final class VerifyJob {
                     }
                     JSONObject r = new JSONObject();
                     r.put("verdict", "details");
-                    r.put("runtime", d[0]);
-                    r.put("episodes", d[1]);
+                    r.put("runtime", d.runtime);
+                    r.put("episodes", d.episodes);
+                    if (d.rating > 0) r.put("rating", new JSONObject().put("score", d.rating).put("by", d.ratingBy).put("votes", d.votes));
+                    if (d.seasons.length() > 0) r.put("seasons", d.seasons);
+                    if (!d.imdb.isEmpty()) r.put("imdb", d.imdb);
                     r.put("checked_at", System.currentTimeMillis());
                     rs.put(n[0], r);
                     lengths++;
@@ -258,15 +261,15 @@ final class VerifyJob {
         }
     }
 
-    /** Checked titles to watch that have an id but no length yet (and were never tried): [[id]]. */
-    static List<String[]> needLength(JSONObject db, JSONObject results) {
+    /** Checked titles to watch that have an id but were never given seasons and a rating (details_at): [[id]]. */
+    static List<String[]> needDetails(JSONObject db, JSONObject results) {
         List<String[]> out = new ArrayList<>();
         JSONArray media = db.optJSONArray("media");
         if (media == null) return out;
         for (int i = 0; i < media.length(); i++) {
             JSONObject m = media.optJSONObject(i);
             if (m == null || !"verified".equals(m.optString("verified"))) continue;
-            if (m.optInt("runtime", 0) > 0 || m.has("runtime_tried")) continue;
+            if (m.has("details_at")) continue;
             if (!TitleVerifier.groupOf(m.optString("type")).equals("watch")) continue;
             JSONObject e = m.optJSONObject("ext");
             if (e == null || !(e.has("tmdb") || e.has("anilist") || e.has("mal"))) continue;
