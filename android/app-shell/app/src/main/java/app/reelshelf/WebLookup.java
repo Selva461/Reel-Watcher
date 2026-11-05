@@ -75,6 +75,35 @@ final class WebLookup {
                 .put("snippet", cut(top.optString("snippet").replaceAll("<[^>]*>", "").replace("&quot;", "\"").replace("&amp;", "&")));
     }
 
+    private static final String[][] PRODUCT_DBS = {
+            {"Open Beauty Facts", "https://world.openbeautyfacts.org"},
+            {"Open Food Facts", "https://world.openfoodfacts.org"},
+            {"Open Products Facts", "https://world.openproductsfacts.org"}};
+
+    /**
+     * A product's name (as read from a label or a store page) to the open product databases: Open Beauty Facts, then
+     * Open Food Facts, then Open Products Facts (free, no key, not AI), until one has matches.
+     * {results: [{name, brand, url, image, quantity, db}]}, at most 3; the page decides which one fits what was read.
+     */
+    JSONObject product(String name) throws IOException, JSONException {
+        String q = clean(name);
+        JSONArray out = new JSONArray();
+        if (q.length() >= 3) for (String[] d : PRODUCT_DBS) {
+            String body = get(d[1] + "/cgi/search.pl?search_simple=1&action=process&json=1&page_size=3"
+                    + "&fields=code,product_name,brands,image_front_small_url,quantity&search_terms=" + enc(q));
+            JSONArray ps = body.isEmpty() ? null : new JSONObject(body).optJSONArray("products");
+            if (ps != null) for (int i = 0; i < ps.length() && out.length() < 3; i++) {
+                JSONObject p = ps.optJSONObject(i);
+                if (p == null || p.optString("product_name").isEmpty() || !p.optString("code").matches("\\d{6,14}")) continue;
+                out.put(new JSONObject().put("name", clean(p.optString("product_name"))).put("brand", clean(p.optString("brands").split(",")[0]))
+                        .put("url", d[1] + "/product/" + p.optString("code")).put("image", p.optString("image_front_small_url"))
+                        .put("quantity", clean(p.optString("quantity"))).put("db", d[0]));
+            }
+            if (out.length() > 0) break;
+        }
+        return new JSONObject().put("results", out);
+    }
+
     /** One line of plain words, at most 200 characters (a question, never notes). */
     static String clean(String s) {
         String t = s == null ? "" : s.replaceAll("[\\r\\n\\t]+", " ").replaceAll("\\s+", " ").trim();

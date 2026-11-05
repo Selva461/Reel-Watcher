@@ -27,7 +27,7 @@ const UI = {
 
 // ------------------------------------------------------------------ state of the Library
 
-const KINDS = [["all", "All"], ["reels", "Reels"], ["quotes", "Quotes"], ["movies", "Movies"], ["series", "Series"], ["anime", "Anime"], ["manga", "Manga"]];
+const KINDS = [["all", "All"], ["reels", "Reels"], ["quotes", "Quotes"], ["products", "Products"], ["movies", "Movies"], ["series", "Series"], ["anime", "Anime"], ["manga", "Manga"]];
 let lib = { kind: "all", q: "", status: "", language: "", genre: "", year: "", maxMin: 0, verified: "", source: "", tag: "", more: 0 };
 const MEDIA_KINDS = ["movies", "series", "anime", "manga"];
 const isMediaKind = (k) => MEDIA_KINDS.includes(k);
@@ -117,7 +117,8 @@ function paintLibrary() {
   if (!q && lib.kind === "all") {  // everything, newest first
     const all = [...res.reels.map((h) => ({ t: h.reel.added_at || 0, html: () => reelRow(h.reel) })),
       ...res.media.map((m) => ({ t: m.added_at || 0, html: () => titleRow(m) })),
-      ...res.quotes.map((x) => ({ t: x.at || 0, html: () => quoteRow(x) }))].sort((a, b) => b.t - a.t);
+      ...res.quotes.map((x) => ({ t: x.at || 0, html: () => quoteRow(x) })),
+      ...(res.products || []).map((x) => ({ t: x.at || 0, html: () => productRow(x) }))].sort((a, b) => b.t - a.t);
     rows.push(...all.slice(0, limit).map((x) => x.html()));
     if (all.length > limit) rows.push(moreBtn(all.length - limit));
     if (!all.length) rows.push(db.reels.length ? `<div class="empty">Nothing here yet.</div>` : emptyShelf());
@@ -127,6 +128,7 @@ function paintLibrary() {
     if (res.media.length || (res.noLength.length && (lib.kind === "all" || isMediaKind(lib.kind)))) sections.push(["Titles", res.media.map(titleRow), res.media.length, res.noLength]);
     if (res.reels.length) sections.push(["Reels", res.reels.map((h) => q ? reelHit(h, q) : reelRow(h.reel)), res.reels.length]);
     if (res.quotes.length) sections.push(["Quotes", res.quotes.map(quoteRow), res.quotes.length]);
+    if ((res.products || []).length) sections.push(["Products", res.products.map(productRow), res.products.length]);
     if (!res.p.structured) sections.sort((a, b) => sectionScore(b, q) - sectionScore(a, q));
     let left = limit;
     for (const [label, list, n, noLength] of sections) {
@@ -141,6 +143,7 @@ function paintLibrary() {
   if (q && looksLikeQuestion(q, res)) rows.unshift(`<a class="btn block" id="askq" href="#/ask?q=${enc(q)}">${UI.ask} Answer this</a>`);
   box.innerHTML = rows.join("");
   box.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", (e) => { e.preventDefault(); copyQuote(b.dataset.copy); }));
+  box.querySelectorAll("[data-url]").forEach((b) => b.addEventListener("click", (e) => { e.preventDefault(); sync("openUrl", b.dataset.url); }));
   const mb = box.querySelector("#more");
   if (mb) mb.addEventListener("click", () => { lib.more++; paintLibrary(); });
   const ai = box.querySelector("#aisearch");
@@ -151,7 +154,7 @@ function paintLibrary() {
 function looksLikeQuestion(q, res) {
   if (res.p.structured) return false;
   return /\?\s*$/.test(q) || /^(how|what|why|who|when|where|which|is|are|can|does|do|should|explain|tell me)\b/i.test(q)
-    || (!res.media.length && !res.reels.length && !res.quotes.length);
+    || (!res.media.length && !res.reels.length && !res.quotes.length && !(res.products || []).length);
 }
 
 function sectionScore([label, , n], q) {
@@ -176,6 +179,18 @@ function quoteRow(x) {
   const tag = !o ? "" : o.found ? `<span class="tag ok">${o.twice ? "Confirmed" : "Wikiquote"}: ${esc(o.page)}</span>` : `<span class="tag">Not found online</span>`;
   return `<div class="list-item"><span class="grow stack" style="gap:4px"><span>“${esc(x.text)}”</span>${x.from ? `<span class="small muted">${esc(x.from)}</span>` : ""}${tag ? `<span class="tagrow">${tag}</span>` : ""}</span>
     <button class="icon-btn" data-copy="${esc(x.id)}" aria-label="Copy">${UI.copy}</button></div>`;
+}
+/** A product: its name, what the database says, and links (the store link read from the screenshot or caption, the
+ *  database page, a store search). Links open in your browser only when tapped. */
+function productRow(x) {
+  const o = x.online;
+  const tag = !o ? "" : o.found ? `<span class="tag ok">Confirmed: ${esc(o.db)}</span>` : `<span class="tag">Not found online</span>`;
+  const name = o && o.found ? [o.brand, o.name].filter(Boolean).join(" ") : x.name;
+  const meta = [o && o.found && o.quantity, x.price, x.from === "reel" ? "from a reel" : "from a screenshot"].filter(Boolean).join(" · ");
+  const btn = (url, label) => url ? `<button class="btn" data-url="${esc(url)}">${label}</button>` : "";
+  return `<div class="list-item" style="align-items:flex-start">${o && o.image ? `<img src="${esc(o.image)}" alt="" width="48" height="48" style="object-fit:contain;border-radius:8px">` : ""}
+    <span class="grow stack" style="gap:6px"><span class="title clamp">${esc(name)}</span><span class="small muted">${esc(meta)}</span>${tag ? `<span class="tagrow">${tag}</span>` : ""}
+    <span class="row wrap" style="gap:6px">${btn(x.link, "Product link")}${btn(o && o.found ? o.url : "", "Details")}${btn(Products.searchUrl(x), "Find in stores")}</span></span></div>`;
 }
 function copyQuote(id) {
   const x = (db.quotes || []).find((q) => q.id === id);

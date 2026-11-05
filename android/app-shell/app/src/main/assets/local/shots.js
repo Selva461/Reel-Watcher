@@ -108,6 +108,7 @@ const Shots = (() => {
         for (const c of kept) { job.found++; job.added += toCatalog(c, "screenshot", p.k); job.recent.unshift(c.title); }
         job.quotes = (job.quotes || 0) + Quotes.addFrom(db, res, p.k);  // lines worth keeping go to Quotes
         const texts = (g.lines || []).map((l) => l.t || "");
+        job.products = (job.products || 0) + Products.addFrom(db, texts.join("\n"), p.k);  // a label or store page goes to Products
         if (Notes.isCommentScreen(texts) && window.fileCommentScreen && fileCommentScreen(texts, p.m)) job.comments = (job.comments || 0) + 1;  // a reel's comments
         state.seen[p.k] = { m: p.m, st: kept.length ? st : (st === "found" || st === "several" ? "unsure" : st), n: p.n, f: p.f,
           c: res.candidates.slice(0, 5).map((c) => c.title), x: res.text.slice(0, 300) };

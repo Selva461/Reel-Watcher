@@ -144,6 +144,7 @@ Answer with the number of the right title, or 0 if none of them is it. Answer wi
       lengths: list.filter((m) => m.verified === "verified" && !m.details_at && m.ext && (m.ext.tmdb || m.ext.anilist || m.ext.mal)
         && (typeof Catalog === "undefined" || Catalog.typeInfo(db, m.type).group === "watch")).length,
       quotes: typeof Quotes === "undefined" ? 0 : Quotes.unchecked(db, now).length,
+      products: typeof Products === "undefined" ? 0 : Products.unchecked(db, now).length,
     };
   }
 
@@ -188,6 +189,12 @@ Answer with the number of the right title, or 0 if none of them is it. Answer wi
           job.quotes = await Quotes.checkOnline(db, (t) => phone("quoteCheck", t), { stop: () => !!(job.sum && job.sum.stopped) });
           saveDb();
         }
+        if (typeof Products !== "undefined" && Products.unchecked(db).length && !(job.sum && job.sum.offline)) {
+          job.step = "products";
+          paint();
+          job.products = await Products.checkOnline(db, (t) => phone("productCheck", t), { stop: () => !!(job.sum && job.sum.stopped) });
+          saveDb();
+        }
         job.finished = true;
         settings.verifyRunning = false;
         saveSettings();
@@ -207,13 +214,14 @@ Answer with the number of the right title, or 0 if none of them is it. Answer wi
         <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.verified}</strong><span class="small muted">verified</span></div>
         <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.notFound}</strong><span class="small muted">not found yet</span></div>
       </div>
-      ${running ? `<div class="card stack"><strong>${job.step === "quotes" ? "Looking up quotes on Wikiquote" : `Checking ${Math.min(job.done + 1, job.total)} of ${job.total}`}</strong><span class="bar"><span style="width:${pct}%"></span></span>
+      ${running ? `<div class="card stack"><strong>${job.step === "quotes" ? "Looking up quotes on Wikiquote" : job.step === "products" ? "Looking up products" : `Checking ${Math.min(job.done + 1, job.total)} of ${job.total}`}</strong><span class="bar"><span style="width:${pct}%"></span></span>
           <span class="small muted">You can leave the app: it keeps checking, with a notification to stop it.</span><button class="btn block" id="vstop">Stop</button></div>`
-        : `<button class="btn primary block" id="vgo" ${c.waiting || c.lengths || c.quotes ? "" : "disabled"}>${c.waiting ? `Process: check ${plural(c.waiting, "title")} online` : c.lengths ? `Process: seasons and ratings for ${plural(c.lengths, "title")}` : c.quotes ? `Process: look up ${plural(c.quotes, "quote")} online` : "Nothing new to check"}</button>`}
+        : `<button class="btn primary block" id="vgo" ${c.waiting || c.lengths || c.quotes || c.products ? "" : "disabled"}>${c.waiting ? `Process: check ${plural(c.waiting, "title")} online` : c.lengths ? `Process: seasons and ratings for ${plural(c.lengths, "title")}` : c.quotes ? `Process: look up ${plural(c.quotes, "quote")} online` : c.products ? `Process: look up ${plural(c.products, "product")} online` : "Nothing new to check"}</button>`}
       ${job && job.finished ? `<div class="card stack"><strong>${job.error ? esc(job.error) : job.sum && job.sum.offline ? "No internet: try again on Wi-Fi or mobile data" : job.sum && job.sum.stopped ? "Paused" : "Done"}</strong>
           ${job.applied ? `<span class="small muted">${job.applied.verified} verified and renamed${job.ai ? `, ${job.ai} picked by the phone AI` : ""}, ${Math.max(0, job.applied.notFound - (job.ai || 0))} not found</span>` : ""}
-          ${job.quotes !== undefined ? `<span class="small muted">Quotes: ${job.quotes} found on Wikiquote</span>` : ""}</div>` : ""}
-      <p class="hint">Movies and series: ${settings.tmdbKey ? "TMDB (your key) and Wikidata" : "Wikidata (add a free TMDB key in Settings for posters and genres)"}. Anime: AniList and MyAnimeList. Manga: AniList and MangaDex. Names none of them find are searched on Wikipedia. Quotes from your screenshots are looked up on Wikiquote (only their first words are sent).
+          ${job.quotes !== undefined ? `<span class="small muted">Quotes: ${job.quotes} found on Wikiquote</span>` : ""}
+          ${job.products !== undefined ? `<span class="small muted">Products: ${job.products} confirmed in a product database</span>` : ""}</div>` : ""}
+      <p class="hint">Movies and series: ${settings.tmdbKey ? "TMDB (your key) and Wikidata" : "Wikidata (add a free TMDB key in Settings for posters and genres)"}. Anime: AniList and MyAnimeList. Manga: AniList and MangaDex. Names none of them find are searched on Wikipedia. Quotes from your screenshots are looked up on Wikiquote (only their first words are sent). Products: their names go to Open Beauty Facts, Open Food Facts and Open Products Facts, and count as confirmed only when the brand and name there match the label.
         The best match is picked for you and the title takes its official name, but only when two independent sources agree on its name, year and kind. One source is never enough: the name read stays and it is tried again in 30 days.${settings.tmdbKey ? "" : " Without a TMDB key, movies and series have only one source (Wikidata), so they cannot be confirmed."}</p>
       <p class="hint">Nightly check: ${night.on ? "on (phone not in use, battery 40%+)" : "off"}${night.last ? ` · last night: ${night.last.checked || 0} checked` : ""}. Change it in <a href="#/settings">Settings</a>.</p>
 `;
