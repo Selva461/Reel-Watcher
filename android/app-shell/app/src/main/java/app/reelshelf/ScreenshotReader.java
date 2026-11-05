@@ -41,6 +41,8 @@ import java.util.concurrent.TimeUnit;
  */
 final class ScreenshotReader {
     private static final String FOLDERS = "shot_folders";
+    /** Folders you picked for reel videos (Instagram's own Download, screen recordings), kept apart from screenshots. */
+    static final String VIDEO_FOLDERS = "video_folders";
     private static final int MAX_SIDE = 2400;
     private static final int MAX_FILES = 200_000;
 
@@ -75,8 +77,12 @@ final class ScreenshotReader {
     // ------------------------------------------------------------------ folders you picked
 
     JSONArray folders() {
+        return foldersOf(FOLDERS);
+    }
+
+    JSONArray foldersOf(String key) {
         try {
-            return new JSONArray(prefs.getString(FOLDERS, "[]"));
+            return new JSONArray(prefs.getString(key, "[]"));
         } catch (JSONException e) {
             return new JSONArray();
         }
@@ -84,20 +90,28 @@ final class ScreenshotReader {
 
     /** Keeps read access to a picked folder (also after a restart) and remembers it. Returns {uri, name}. */
     JSONObject addFolder(Uri tree) throws JSONException {
+        return addFolderTo(FOLDERS, tree);
+    }
+
+    JSONObject addFolderTo(String key, Uri tree) throws JSONException {
         ctx.getContentResolver().takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        JSONArray all = folders();
+        JSONArray all = foldersOf(key);
         String u = tree.toString();
         for (int i = 0; i < all.length(); i++) if (u.equals(all.getJSONObject(i).optString("uri"))) return all.getJSONObject(i);
         JSONObject o = new JSONObject();
         o.put("uri", u);
         o.put("name", niceName(DocumentsContract.getTreeDocumentId(tree)));
         all.put(o);
-        prefs.edit().putString(FOLDERS, all.toString()).apply();
+        prefs.edit().putString(key, all.toString()).apply();
         return o;
     }
 
     void removeFolder(String uri) {
-        JSONArray all = folders();
+        removeFolderFrom(FOLDERS, uri);
+    }
+
+    void removeFolderFrom(String key, String uri) {
+        JSONArray all = foldersOf(key);
         JSONArray keep = new JSONArray();
         for (int i = 0; i < all.length(); i++) {
             JSONObject o = all.optJSONObject(i);
@@ -110,7 +124,7 @@ final class ScreenshotReader {
                 }
             } else keep.put(o);
         }
-        prefs.edit().putString(FOLDERS, keep.toString()).apply();
+        prefs.edit().putString(key, keep.toString()).apply();
     }
 
     /** "primary:DCIM/Screenshots" -> "DCIM/Screenshots" */
@@ -130,6 +144,43 @@ final class ScreenshotReader {
     }
 
     private static final long MAX_PICTURE = 30L * 1024 * 1024;
+    static final long MAX_VIDEO_FILE = 500L * 1024 * 1024;
+
+    /** Videos you shared to Reel Shelf (from the gallery) are copied here, the app's own storage. */
+    static File videoInbox(Context c) {
+        File d = new File(c.getFilesDir(), "video-inbox");
+        if (!d.isDirectory()) d.mkdirs();
+        return d;
+    }
+
+    /** Copies shared videos into the video inbox. Returns how many were copied. */
+    static int addVideos(Context c, List<Uri> uris) {
+        if (uris == null) return 0;
+        File dir = videoInbox(c);
+        int n = 0;
+        long now = System.currentTimeMillis();
+        for (Uri u : uris) {
+            if (u == null || n >= 200) continue;
+            String type = c.getContentResolver().getType(u);
+            if (type != null && !type.startsWith("video/")) continue;
+            File out = new File(dir, "video_" + now + "_" + n + ".mp4");
+            try (InputStream in = c.getContentResolver().openInputStream(u); OutputStream o = new FileOutputStream(out)) {
+                if (in == null) continue;
+                byte[] buf = new byte[65536];
+                long total = 0;
+                int r;
+                while ((r = in.read(buf)) > 0) {
+                    total += r;
+                    if (total > MAX_VIDEO_FILE) throw new Exception("too big");
+                    o.write(buf, 0, r);
+                }
+                n++;
+            } catch (Exception e) {
+                out.delete();
+            }
+        }
+        return n;
+    }
 
     /** Copies pictures (from the picker or Share) into the inbox. Returns how many were copied. */
     static int addPictures(Context c, List<Uri> uris) {
@@ -162,11 +213,15 @@ final class ScreenshotReader {
     }
 
     private boolean inInbox(String key) {
+        return inDir(key, inbox(ctx));
+    }
+
+    private static boolean inDir(String key, File dir) {
         try {
             String p = Uri.parse(key).getPath();
             if (p == null) return false;
             File f = new File(p).getCanonicalFile();
-            return f.getParentFile() != null && f.getParentFile().equals(inbox(ctx).getCanonicalFile());
+            return f.getParentFile() != null && f.getParentFile().equals(dir.getCanonicalFile());
         } catch (Exception e) {
             return false;
         }
@@ -175,8 +230,18 @@ final class ScreenshotReader {
     /** A picture may be read only when it is inside a folder you picked, or one you chose or shared yourself. */
     boolean allowed(String key) {
         if (key != null && key.startsWith("file://")) return inInbox(key);
+        return inFolder(FOLDERS, key);
+    }
+
+    /** A video may be read only when it is inside a video folder you picked, or one you shared yourself. */
+    boolean videoAllowed(String key) {
+        if (key != null && key.startsWith("file://")) return inDir(key, videoInbox(ctx));
+        return inFolder(VIDEO_FOLDERS, key);
+    }
+
+    private boolean inFolder(String foldersKey, String key) {
         if (key == null || !key.startsWith("content://")) return false;
-        JSONArray all = folders();
+        JSONArray all = foldersOf(foldersKey);
         for (int i = 0; i < all.length(); i++) {
             String t = all.optJSONObject(i) == null ? "" : all.optJSONObject(i).optString("uri");
             if (!t.isEmpty() && key.startsWith(t + "/document/")) return true;
@@ -188,22 +253,31 @@ final class ScreenshotReader {
 
     /** Every picture in the picked folders (and their sub-folders): [{k, n, f, m, s}], newest first is not guaranteed. */
     JSONArray list() throws JSONException {
+        return listIn(FOLDERS, "image/", inbox(ctx), "Chosen pictures");
+    }
+
+    /** Every video in the picked video folders and the shared ones: [{k, n, f, m, s}]. */
+    JSONArray listVideos() throws JSONException {
+        return listIn(VIDEO_FOLDERS, "video/", videoInbox(ctx), "Shared videos");
+    }
+
+    private JSONArray listIn(String foldersKey, String mimePrefix, File inboxDir, String inboxName) throws JSONException {
         JSONArray out = new JSONArray();
-        File[] mine = inbox(ctx).listFiles();
+        File[] mine = inboxDir.listFiles();
         if (mine != null) {
             for (File f : mine) {
                 if (!f.isFile()) continue;
                 JSONObject o = new JSONObject();
                 o.put("k", Uri.fromFile(f).toString());
                 o.put("n", f.getName());
-                o.put("f", "Chosen pictures");
+                o.put("f", inboxName);
                 o.put("m", f.lastModified());
                 o.put("s", f.length());
                 out.put(o);
             }
         }
         ContentResolver cr = ctx.getContentResolver();
-        JSONArray all = folders();
+        JSONArray all = foldersOf(foldersKey);
         for (int i = 0; i < all.length() && !stop; i++) {
             Uri tree = Uri.parse(all.getJSONObject(i).getString("uri"));
             ArrayDeque<String[]> todo = new ArrayDeque<>();  // {documentId, folder path}
@@ -229,7 +303,7 @@ final class ScreenshotReader {
                             if (depth++ < 400 && name != null && !name.startsWith(".")) todo.add(new String[]{id, d[1] + "/" + name});
                             continue;
                         }
-                        if (mime == null || !mime.startsWith("image/") || mime.equals("image/gif")) continue;
+                        if (mime == null || !mime.startsWith(mimePrefix) || mime.equals("image/gif")) continue;
                         JSONObject o = new JSONObject();
                         o.put("k", DocumentsContract.buildDocumentUriUsingTree(tree, id).toString());
                         o.put("n", name == null ? "" : name);

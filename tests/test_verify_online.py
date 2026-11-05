@@ -73,7 +73,7 @@ def test_titles_left_to_pick_before_the_update_are_checked_again(phone):
     d = {m["id"]: m for m in db_of(phone)["media"]}
     assert d["m-dune"]["verified"] == "unverified" and "review" not in d["m-dune"]
     assert "checked_at" not in d["m-zzq"] and d["m-heat"]["verified"] == "verified"
-    assert db_of(phone)["verify_rules"] == 3
+    assert db_of(phone)["verify_rules"] == 4
 
 
 def test_answers_from_the_night_are_applied_when_the_app_opens(phone):
@@ -107,9 +107,9 @@ def test_hostile_titles_are_shown_as_text(phone):
     assert phone.evaluate("window.__pwned") is None
 
 
-ZZQ_CHOICES = [{"source": "anilist", "title": "Dai to Dai", "year": 1991, "type": "manga", "language": "ja", "score": 0.5,
+ZZQ_CHOICES = [{"source": "anilist", "title": "Dai to Dai", "year": 1991, "type": "manga", "language": "ja", "score": 0.5, "sources": 2,
                 "facts": facts("Dai to Dai", 1991, "ja", "manga", ext={"anilist": "1"})},
-               {"source": "mangadex", "title": "Daio", "year": 2020, "type": "manga", "language": "ja", "score": 0.45,
+               {"source": "mangadex", "title": "Daio", "year": 2020, "type": "manga", "language": "ja", "score": 0.45, "sources": 2,
                 "facts": facts("Daio", 2020, "ja", "manga", ext={"mangadex": "x"})}]
 
 
@@ -146,8 +146,19 @@ def test_comment_lines_saved_as_titles_are_deleted(phone):
         media("m-v", "View 4 replies"), media("m-l", "12 likes Reply"), media("m-u", "ezequiel_266"),
         media("m-ok", "Interstellar"), media("m-kgf", "K.G.F")]})
     phone.open_with({"db": db}, "#/")
-    phone.wait_for_function("() => JSON.parse(window.__rn.db).verify_rules === 3")
+    phone.wait_for_function("() => JSON.parse(window.__rn.db).verify_rules === 4")
     assert {m["title"] for m in db_of(phone)["media"]} == {"Interstellar", "K.G.F"}
+
+
+def test_titles_confirmed_by_one_source_are_checked_again(phone):
+    db = json.dumps({"reels": [], "inbox": [], "verify_rules": 3, "media": [
+        media("m-one", "Heat", verified="verified", verified_by="tmdb"), media("m-two", "Alien", verified="verified", verified_by="tmdb+wikidata"),
+        media("m-you", "Up", verified="verified", verified_by="you", seasons=[{"n": 1, "episodes": 8}], details_at=5)]})
+    phone.open_with({"db": db}, "#/")
+    phone.wait_for_function("() => JSON.parse(window.__rn.db).verify_rules === 4")
+    d = {m["id"]: m["verified"] for m in db_of(phone)["media"]}
+    assert d == {"m-one": "unverified", "m-two": "verified", "m-you": "verified"}
+    assert "details_at" not in [m for m in db_of(phone)["media"] if m["id"] == "m-you"][0]  # seasons get a second source
 
 
 def test_a_title_shows_its_rating_and_seasons_like_a_movie_app(phone):
@@ -155,7 +166,7 @@ def test_a_title_shows_its_rating_and_seasons_like_a_movie_app(phone):
                {"n": 2, "episodes": 25, "year": 2020, "title": "Re:ZERO Season 2"}, {"n": 3, "episodes": 16, "year": 2024, "title": "Re:ZERO Season 3"}]
     db = json.dumps({"reels": [], "inbox": [], "media": [media("m-rz", "Re:ZERO -Starting Life in Another World-", type="anime", verified="verified",
                                                                ext={"anilist": "21355", "mal": "31240"})]})
-    ans = {"m-rz": {"verdict": "details", "runtime": 25, "episodes": 25, "checked_at": 9, "seasons": seasons,
+    ans = {"m-rz": {"verdict": "details", "runtime": 25, "episodes": 25, "checked_at": 9, "seasons": seasons, "seasons_by": "AniList, checked with MyAnimeList",
                     "rating": {"score": 8.23, "by": "MyAnimeList", "votes": 1234567}}}
     phone.open_with({"db": db, "verifyPending": ans}, "#/")
     phone.locator("#results").get_by_text("★ 8.2 MyAnimeList", exact=False).wait_for()
@@ -163,6 +174,7 @@ def test_a_title_shows_its_rating_and_seasons_like_a_movie_app(phone):
     phone.locator("#results a.list-item").first.click()
     phone.get_by_role("heading", name="3 seasons").wait_for()
     phone.get_by_text("16 eps · 2024").wait_for()
+    phone.get_by_text("From AniList, checked with MyAnimeList").wait_for()
     phone.get_by_text("1,234,567 votes", exact=False).wait_for()
     m = db_of(phone)["media"][0]
     assert m["rating"] == {"score": 8.2, "by": "MyAnimeList", "votes": 1234567} and m["details_at"] == 9 and len(m["seasons"]) == 3

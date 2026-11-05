@@ -8,7 +8,7 @@
 const Shots = (() => {
   const BATCH = 6;            // pictures per call to the phone
   const SAVE_EVERY = 60;      // pictures between saves
-  const LOW_BATTERY = 15;     // pause below this, unless charging
+  const LOW_BATTERY = 40;     // pause below this, unless charging (Avles: battery is the only rule)
   let state = { v: 1, seen: {}, reels: {} };  // seen[key] = {m, st, n, f, c: [titles], x: short text}
   let loaded = false;
   let job = null;             // {phase, total, i, found, added, started, stop, finished, paused, why, recent}

@@ -74,10 +74,11 @@ function loadDb() {
       const d = JSON.parse(t);
       db = { ...d, reels: d.reels || [], inbox: d.inbox || [], media: d.media || [], mediaTypes: d.mediaTypes || [] };
       for (const r of db.reels) if (r.status === "working") r.status = r.notes ? "done" : "new";  // the app was closed mid-way
+      for (const r of db.reels) if (r.author && !Notes.isYoutube(r) && !Notes.username(r.author)) r.author = "";  // "Media": a label from the export, not a creator (before 1.3.5)
     } catch (e) { toast("Your library file could not be read"); } }
 }
 function saveDb() { if (sync("store", JSON.stringify(db)) === false) toast("Could not save. Is the phone's storage full?"); }
-function reel(code) { return db.reels.find((r) => r.code === code); }
+function reel(code) { return db.reels.find((r) => r.code === code || r.ig_code === code); }
 
 const MODELS = [
   { id: "qwen", name: "Qwen2.5 1.5B", file: "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
@@ -201,6 +202,7 @@ let run = null;  // {codes, i, step, stop, done, failed, current}
 
 function needsWork(r, ready) {
   if (r.notes && !(r.notes_by === "auto" && (ready || (!Notes.isYoutube(r) && !r.video_tried)))) return false;
+  if (r.file) return !r.video_tried || (ready && Notes.material(r) >= 30 && r.status !== "ready_no_text");  // a video on the phone
   if (!r.url) return false;
   if (!r.caption_read) return true;
   if (!Notes.isYoutube(r) && !r.video_tried) return true;  // read before videos were read: read what it shows and says
@@ -292,7 +294,67 @@ async function igFetch(url) {
   }
 }
 
+// ------------------------------------------------------------------ whole reels from videos on the phone
+// Instagram shows logged-out visitors the video of only a few reels. Its own Download button (and screen recordings)
+// put the whole reel on the phone: those videos are read in full, the same way, with no login and no ban risk.
+
+function shortHash(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+/** New videos in your video folders (or shared to Reel Shelf) become reels to read. Returns how many are new. */
+async function scanVideos() {
+  if (!(RN && RN.listVideos)) return 0;
+  let list = [];
+  try { list = JSON.parse(await phone("listVideos") || "[]"); } catch (e) { return 0; }
+  const known = new Set(db.reels.map((r) => r.file).filter(Boolean));
+  let n = 0;
+  for (const v of list) {
+    if (!v || !v.k || known.has(v.k)) continue;
+    db.reels.unshift({ code: "v" + shortHash(v.k), url: "", file: v.k, file_name: String(v.n || "").slice(0, 120), author: "", collections: [],
+      status: "new", added_at: v.m || Date.now(), added_by: "video" });
+    known.add(v.k);
+    n++;
+  }
+  if (n) saveDb();
+  return n;
+}
+
+/** Reads a whole reel video from the phone; when it is a reel you saved (same creator, only one), the two become one. */
+async function readFileVideo(r) {
+  r.video_tried = Date.now();
+  const v = JSON.parse(await phone("readLocalVideo", r.file) || "{}");
+  const screen = String(v.screen || "").trim();
+  if (screen) r.onscreen = screen.slice(0, 6000);
+  if (v.speech) r.transcript = String(v.speech).slice(0, 40000);
+  r.content = v.speech ? "video+speech" : "video";
+  r.seconds = v.seconds || 0;
+  if (v.media && run) run.media = r.code;
+  // Instagram's Download writes the creator's name on the video ("@name")
+  const at = screen.match(/@([A-Za-z0-9._]{2,30})/);
+  if (at && Notes.username(at[1]) && !r.author) r.author = at[1];
+  const same = r.author ? db.reels.filter((x) => x !== r && x.url && !x.file && !Notes.isYoutube(x) && (x.author || "").toLowerCase() === r.author.toLowerCase()
+    && !/^video/.test(x.content || "")) : [];
+  if (same.length === 1) {  // the saved reel that only had its caption: it is this video
+    const old = same[0];
+    r.url = old.url;
+    r.ig_code = old.code;
+    if (old.caption && !r.caption) r.caption = old.caption;
+    r.collections = [...new Set([...(old.collections || []), ...(r.collections || [])])];
+    r.added_at = Math.min(r.added_at || Date.now(), old.added_at || Date.now());
+    db.reels = db.reels.filter((x) => x !== old);
+  }
+}
+
 async function readCaption(r) {
+  if (r.file) {
+    await readFileVideo(r);
+    r.caption_read = Date.now();
+    r.keywords = Notes.keywords([r.caption, r.onscreen, r.transcript].filter(Boolean).join("\n"), 10);
+    return;
+  }
   if (!r.url) return;
   if (Notes.isYoutube(r)) {
     try { await readYoutube(r); } catch (e) { r.error = e.message; }
@@ -369,6 +431,7 @@ async function writeWithPhoneAi(r) {
     JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.LOCAL_SYSTEM, maxTokens: settings.maxTokens, temperature: settings.temperature, media })));
   const notes = Notes.parse(out.text);
   if (!notes) throw new Error("The on-phone AI's answer was not in the notes format. Try again, or Ask Meta AI.");
+  Notes.keepBacked(notes, r);
   setNotes(r, notes, "phone", out.text);
   return out;
 }
@@ -381,6 +444,7 @@ function byUsefulThenNewest(a, b) {
 
 async function startRun(codes) {
   if (run && !run.finished) { location.hash = "#/run"; return; }
+  if (!codes) await scanVideos();  // reel videos saved since last time are read too
   const ready = !!modelInfo().ready;
   const list = (codes || db.reels.filter((r) => needsWork(r, ready)).sort(byUsefulThenNewest).map((r) => r.code)).filter((c) => reel(c));
   run = { codes: list, i: 0, step: "", stop: false, done: 0, failed: 0, current: "", finished: false, log: [], ready };
@@ -444,7 +508,7 @@ function stopRun() {
   sync("stopModel");
 }
 
-// ------------------------------------------------------------------ overnight run: everything in one go, while charging
+// ------------------------------------------------------------------ overnight run: everything in one go (stops below 40% battery)
 // 1. the on-phone AI model (downloaded if missing), 2. Start on every reel waiting, 3. screenshots, 4. titles checked
 // online, 5. a JSON backup in Downloads/ReelShelf. One notification with Stop the whole time. Never starts by itself.
 let night = null;
@@ -458,7 +522,7 @@ async function overnightRun(auto) {
   if (night && !night.finished) return;
   if (!auto) {
     const b = (() => { try { return JSON.parse(sync("battery") || "{}"); } catch (e) { return {}; } })();
-    if (b.level >= 0 && !b.charging && !confirm("The phone is not charging. Run everything anyway?")) return;
+    if (b.level >= 0 && b.level < 40 && !b.charging && !confirm(`Battery at ${b.level}%. Runs stop below 40%. Run anyway?`)) return;
   }
   night = { step: "AI model", detail: "", stop: false, finished: false, log: [], auto: !!auto };
   const say = (t) => { night.log.push(t); if (location.hash === "#/run") runScreen(); };
@@ -478,6 +542,7 @@ async function overnightRun(auto) {
     } else say("AI model ready");
     if (!night.stop) {
       night.step = "notes";
+      await scanVideos();
       // reels read before videos were read are read again only after you tried it yourself (Try on 5 or Start)
       const ready = !!modelInfo().ready;
       await startRun(db.reels.filter((x) => needsWork(x, ready) && (settings.rereadOk || !x.caption_read || Notes.isYoutube(x)))
@@ -523,9 +588,8 @@ function nightSettingsHtml() {
     <label class="row" style="gap:10px"><input type="checkbox" id="nrOn" ${n.on ? "checked" : ""}><span>Every night: file what you shared and imported, write notes for new reels, read new screenshots, check titles</span></label>
     <div class="grid2"><label class="field">Time<select class="input" id="nrHour">${hours}</select></label>
       <label class="field">Battery<select class="input" id="nrBat">${levels}</select></label></div>
-    <label class="row" style="gap:10px"><input type="checkbox" id="nrCharge" ${n.chargingOnly !== false ? "checked" : ""}><span>Only while charging (stops when unplugged)</span></label>
     <label class="field">Reels per night<select class="input" id="nrMax">${[50, 100, 200, 400, 1000].map((x) => `<option value="${x}" ${x === (settings.nightMax || 200) ? "selected" : ""}>${x}</option>`).join("")}</select></label>
-    <p class="hint">Easy on the battery: it pauses when the phone gets warm (40°C), stops when unplugged, and reads at most this many reels a night. The rest wait for the next night. Reels already done are skipped.</p></div>`;
+    <p class="hint">Easy on the battery: no charger or Wi-Fi needed. It stops when the battery falls below the level above, pauses when the phone gets warm (40°C), and reads at most this many reels a night. The rest wait for the next night. Reels already done are skipped.</p></div>`;
 }
 function bindNightSettings() {
   const save = () => {
@@ -533,7 +597,6 @@ function bindNightSettings() {
     toast("Nightly run saved");
   };
   bind("#nrOn", "change", save); bind("#nrHour", "change", save); bind("#nrBat", "change", save);
-  bind("#nrCharge", "change", (e, el) => { sync("setNightCharging", el.checked); toast("Nightly run saved"); });
   bind("#nrMax", "change", (e, el) => { settings.nightMax = Number(el.value); saveSettings(); toast("Nightly run saved"); });
 }
 
@@ -655,7 +718,7 @@ function notesHtml(n) {
     ${sec("Topic", n.topic ? `<p><strong>${esc(n.topic)}</strong></p>` : "")}
     ${sec("What they really mean", n.intent ? `<p>${esc(n.intent)}</p>` : "")}
     ${sec("Tone", n.tone ? `<p>${esc(n.tone)}</p>` : "")}
-    ${sec("Points", ol(n.points))}
+    ${sec("Points", ol(n.points) + (n.unbacked ? `<p class="small muted">${n.unbacked === 1 ? "1 point was" : n.unbacked + " points were"} left out: nothing in the reel backed ${n.unbacked === 1 ? "it" : "them"} up.</p>` : ""))}
     ${sec("Meaning", n.meaning ? `<p>${esc(n.meaning)}</p>` : "")}
     ${sec("Use it for", ul(n.use))}
     ${sec("Tools", (n.tools || []).length ? `<p>${esc(n.tools.join(", "))}</p>` : "")}
@@ -830,7 +893,7 @@ async function webAsk(q, results, b) {
     try {
       const out = JSON.parse(await phone("generate", Notes.webAnswerPrompt(q, results.slice(0, 4), lastAsk.web),
         JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: "You answer only from the notes and web results you are given, briefly, citing them like [1] or [W1].", maxTokens: settings.maxTokens, temperature: 0.1 })));
-      lastAsk.answer = { text: out.text, by: "on-phone AI, with web results" };
+      lastAsk.answer = { text: Notes.markOneSource(out.text, lastAsk.web), by: "on-phone AI, with web results" };
     } catch (err) { toast(err.message === "stopped" ? "Stopped" : err.message); }
     sync("stopModel");
   }
@@ -1148,5 +1211,6 @@ loadDb();
 bindTopBar();
 takeShared();
 Verify.onOpen();
+Verify.resume();  // a check cut short by an update carries on
 render();
 if (sync("isNight")) overnightRun(true);  // the nightly run (no screen): see NightRun.java

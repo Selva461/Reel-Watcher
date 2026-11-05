@@ -55,6 +55,26 @@ final class WebLookup {
         return out;
     }
 
+    /**
+     * Is this quote really said somewhere? Its first words (at most 12, as one exact phrase) go to Wikiquote's search
+     * (free, no key, not AI). {found, page, url, snippet}: page is the Wikiquote page it is on (the film, show or person).
+     */
+    JSONObject quote(String text) throws IOException, JSONException {
+        String[] w = clean(text).replaceAll("[^\\p{L}\\p{N}' ]+", " ").trim().split("\\s+");
+        JSONObject out = new JSONObject().put("found", false);
+        if (w.length < 3) return out;
+        String phrase = String.join(" ", java.util.Arrays.copyOf(w, Math.min(12, w.length)));
+        String body = get("https://en.wikiquote.org/w/api.php?action=query&format=json&list=search&srlimit=3&srprop=snippet&srsearch="
+                + enc("\"" + phrase + "\""));
+        JSONObject q = body.isEmpty() ? null : new JSONObject(body).optJSONObject("query");
+        JSONArray hits = q == null ? null : q.optJSONArray("search");
+        JSONObject top = hits == null || hits.length() == 0 ? null : hits.optJSONObject(0);
+        if (top == null || top.optString("title").isEmpty()) return out;
+        String page = top.optString("title");
+        return out.put("found", true).put("page", page).put("url", "https://en.wikiquote.org/wiki/" + page.replace(' ', '_'))
+                .put("snippet", cut(top.optString("snippet").replaceAll("<[^>]*>", "").replace("&quot;", "\"").replace("&amp;", "&")));
+    }
+
     /** One line of plain words, at most 200 characters (a question, never notes). */
     static String clean(String s) {
         String t = s == null ? "" : s.replaceAll("[\\r\\n\\t]+", " ").replaceAll("\\s+", " ").trim();

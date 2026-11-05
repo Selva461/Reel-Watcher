@@ -10,7 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Receives "Share" from Instagram (a reel link) or from Meta AI (its answer). It only saves what was shared and closes
+ * Receives "Share" from Instagram (a reel link), from Meta AI (its answer), or a reel video from the gallery. It only saves what was shared and closes
  * at once, so you stay in Instagram. Nothing is processed now: open Reel Shelf and tap Start when you want.
  */
 public class ShareActivity extends Activity {
@@ -31,6 +31,22 @@ public class ShareActivity extends Activity {
             int n = ScreenshotReader.addPictures(this, uris);
             Toast.makeText(this, n == 0 ? "Could not keep those pictures"
                     : n + (n == 1 ? " picture" : " pictures") + " saved. Open Reel Shelf, Start, Read my screenshots (or wait for the nightly run).",
+                    Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
+        if (type != null && type.startsWith("video/")) {  // a reel video (Instagram's Download, a screen recording): read whole
+            List<Uri> uris = new ArrayList<>();
+            if (Intent.ACTION_SEND_MULTIPLE.equals(in.getAction())) {
+                ArrayList<Uri> many = in.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+                if (many != null) uris.addAll(many);
+            } else {
+                Uri one = in.getParcelableExtra(Intent.EXTRA_STREAM);
+                if (one != null) uris.add(one);
+            }
+            int n = ScreenshotReader.addVideos(this, uris);
+            Toast.makeText(this, n == 0 ? "Could not keep that video"
+                    : n + (n == 1 ? " video" : " videos") + " saved. Reel Shelf reads the whole reel on Start (or at night).",
                     Toast.LENGTH_LONG).show();
             finish();
             return;

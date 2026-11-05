@@ -73,5 +73,32 @@ const Quotes = (() => {
     }).filter((o) => o.hit).sort((a, b) => b.hit - a.hit).map((o) => o.x);
   }
 
-  return { pick, addFrom, find, sentenceLike };
+  /** Quotes not looked up online yet (or not found, more than 30 days ago). */
+  function unchecked(db, now = Date.now()) {
+    return (db.quotes || []).filter((q) => !q.online || (!q.online.found && now - (q.online.at || 0) > 30 * 864e5));
+  }
+
+  /** Looks quotes up on Wikiquote (ask(text) -> {found, page, url}), at most `max`, one every `gap` ms. Returns how many
+   *  were found. A quote whose screenshot also named the title, and that Wikiquote has on that title's page, is
+   *  confirmed twice (screenshot + Wikiquote). */
+  async function checkOnline(db, ask, { max = 40, gap = 1000, stop = () => false, nap = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+    let found = 0;
+    for (const q of unchecked(db).slice(0, max)) {
+      if (stop()) break;
+      let r;
+      try { r = JSON.parse(await ask(q.text)); } catch (e) { break; }  // offline: the rest wait for the next Process
+      q.online = r && r.found ? { found: true, page: String(r.page || "").slice(0, 200), url: /^https:\/\/en\.wikiquote\.org\//.test(r.url || "") ? r.url : "", at: Date.now() }
+        : { found: false, at: Date.now() };
+      if (q.online.found) {
+        found++;
+        const page = fold(q.online.page.replace(/\s*\((film|tv series|novel|manga|anime|video game)[^)]*\)\s*$/i, ""));
+        q.online.twice = !!q.from && (page === fold(q.from) || page.includes(fold(q.from)) || fold(q.from).includes(page));
+        if (!q.from) q.from = q.online.page.replace(/\s*\([^)]*\)\s*$/, "");
+      }
+      await nap(gap);
+    }
+    return found;
+  }
+
+  return { pick, addFrom, find, sentenceLike, unchecked, checkOnline };
 })();

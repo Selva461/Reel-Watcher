@@ -5,6 +5,27 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.5
+- Two sources for everything: a title is verified only when two independent services agree on its name, year and
+  kind (Wikipedia and Wikidata count as one). Titles verified by a single source before are checked again. Without a
+  TMDB key, movies and series have only Wikidata, so they stay "not found online yet".
+- About 10 titles are checked at once; each service keeps its own pace, so none of them blocks the app. Each name is
+  looked up once even when many screenshots have it. A check cut off by an app update carries on when the app opens.
+- Seasons are checked with a second source (Wikidata's number of seasons, or AniList / MyAnimeList's episodes) and the
+  title page says so ("From TMDB, checked with Wikidata"), says where they differ, or says "(one source)".
+- Reel notes: points the phone AI writes that nothing in the reel backs up (caption, text on screen, speech,
+  comments) are left out, and the note says how many.
+- Web answers: a fact that only one web page gives is marked "(one source)".
+- Quotes from screenshots are looked up on Wikiquote during Process (only their first words are sent): "Confirmed"
+  when the screenshot's title and Wikiquote agree, "Wikiquote: <page>" when only Wikiquote has it, or "Not found
+  online".
+- Whole reels: pick a folder with downloaded reels or screen recordings (Inbox, Videos), or share videos to Reel
+  Shelf. Start reads each one whole (frames, text on screen, speech) and replaces the caption-only note of the same
+  creator's reel.
+- Creators read as "@Media" from the Instagram export are fixed: export labels are not usernames.
+- Background jobs no longer need Wi-Fi or the charger; mobile data is fine. The only rule is the battery: the
+  nightly run and the nightly check stop below 40% (adjustable). They still pause when the phone is hot.
+
 ## 1.3.4
 - Nothing to check by hand anywhere: the "It is right" and "Not a real title" buttons are gone from the title page.
   When no database matches a title closely, the phone AI (if downloaded) reads the closest matches and a web search

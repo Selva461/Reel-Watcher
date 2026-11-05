@@ -77,7 +77,7 @@ function titleScreen(id) {
         <span class="tagrow">${verifiedTag(m)}${(m.genres || []).map((g) => `<span class="tag">${esc(g)}</span>`).join("")}</span>
         ${m.confidence && m.verified !== "verified" ? `<span class="small muted">Sure: ${Math.round(m.confidence * 100)}%</span>` : ""}</div></div>
     ${m.overview ? `<p class="soft" style="margin:0;line-height:1.5">${esc(m.overview)}</p>` : ""}
-    ${(m.seasons || []).length ? `<div class="stack" style="gap:6px"><h2>${plural(m.seasons.length, "season")}</h2>${m.seasons.map((x) => `<div class="list-item season">
+    ${(m.seasons || []).length ? `<div class="stack" style="gap:6px"><h2>${plural(m.seasons.length, "season")}</h2>${m.seasons_by ? `<span class="small muted">From ${esc(m.seasons_by)}</span>` : ""}${m.seasons.map((x) => `<div class="list-item season">
       <strong>S${x.n}</strong><span class="grow stack" style="gap:2px"><span>${x.episodes ? `${x.episodes} eps` : "Episodes not known yet"}${x.year ? ` · ${x.year}` : ""}</span>${x.title && x.title !== m.title ? `<span class="small muted clamp">${esc(x.title)}</span>` : ""}</span></div>`).join("")}</div>` : ""}
     <div class="seg" role="group" aria-label="Status">${Object.entries(Catalog.STATUS).map(([k, l]) => `<button data-st="${k}" aria-pressed="${(m.status || "want") === k}">${esc(t.group === "read" ? ({ want: "Want", watching: "Reading", done: "Finished", dropped: "Dropped" })[k] : ({ want: "Want", watching: "Watching", done: "Finished", dropped: "Dropped" })[k])}</button>`).join("")}</div>
     ${firstReel ? `<button class="btn primary block" id="openig">${UI.insta} Instagram</button>` : ""}

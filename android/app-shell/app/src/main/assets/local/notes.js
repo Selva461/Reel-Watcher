@@ -401,6 +401,23 @@ const Notes = (() => {
   function tokens(s) { return (String(s || "").toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}+#.-]*/gu) || []).map((w) => w.replace(/[.-]+$/, "")).filter((w) => w && w.length > 1 && !STOP.has(w)); }
   function words(s) { return tokens(s).map(stem); }
 
+  /** Keeps only the points the reel itself backs up: each point has to share real words with what the reel shows or says
+   *  (caption, text on screen, speech, comments). Short points need one shared word, longer ones two. With too little
+   *  reel text to judge (under 30 letters), nothing is dropped. Returns how many points were left out. */
+  function keepBacked(notes, reel) {
+    const text = ["title", "caption", "transcript", "onscreen", "comments", "extra"].map((k) => reel[k] || "").join(" ").replace(/#\S+/g, "");
+    if (!notes || text.trim().length < 30) return 0;
+    const have = new Set(words(text));
+    const before = (notes.points || []).length;
+    notes.points = (notes.points || []).filter((p) => {
+      const own = [...new Set(words(p))];
+      const shared = own.filter((w) => have.has(w)).length;
+      return shared >= (own.length <= 3 ? 1 : 2);
+    });
+    notes.unbacked = before - notes.points.length;
+    return notes.unbacked;
+  }
+
   // words people use for the same thing; a search for one also finds the others (at a lower score)
   const SYN = [
     "ai artificial-intelligence llm gpt chatgpt claude gemini model chatbot", "password secret credential key token apikey", "phone mobile android iphone smartphone app",
@@ -608,8 +625,20 @@ const Notes = (() => {
     const notes = results.map((x, i) => `[${i + 1}] ${format(x.reel.notes || {}) || (x.reel.caption || "").slice(0, 800)}`).join("\n\n");
     const found = web.map((w, i) => `[W${i + 1}] ${w.title} (${w.source}): ${w.text}`).join("\n\n");
     return `Answer my question briefly and accurately. Use my notes first; use the web results only for what my notes do not ` +
-      `cover. After each fact, write where it came from, like [1] or [W1]. If neither answers it, say so; do not guess.\n\n` +
+      `cover. After each fact, write where it came from, like [1] or [W1]. A fact from the web needs two web results that both ` +
+      `say it: cite both, like [W1][W2]. If only one says it, still cite it. If neither answers it, say so; do not guess.\n\n` +
       `Question: ${question}\n\n${notes ? `My notes:\n\n${notes}\n\n` : ""}Web results:\n\n${found}`;
+  }
+
+  /** Each sentence of a web answer that rests on a single web page (one [Wn], no note [n]) is marked "(one source)". */
+  function markOneSource(text, web) {
+    return String(text || "").replace(/[^.!?\n]*\[W\d{1,2}\][^.!?\n]*[.!?]?/g, (s) => {
+      if (/\[\d{1,2}\]/.test(s) || /\(one source\)/.test(s)) return s;
+      const pages = new Set((s.match(/\[W(\d{1,2})\]/g) || []).map((m) => { const w = (web || [])[Number(m.slice(2, -1)) - 1]; return w ? w.url || w.title : m; }));
+      if (pages.size >= 2) return s;
+      const end = s.match(/[.!?]?\s*$/)[0];
+      return s.slice(0, s.length - end.length) + " (one source)" + end;
+    });
   }
 
   // ---------------------------------------------------------------- reading a reel's public page (caption, creator)
@@ -707,6 +736,13 @@ const Notes = (() => {
     return null;
   }
 
+  /** An Instagram username, not one of the export's own labels ("Media", "Saved on", "Owner"...). */
+  const LABELS = /^(media|saved ?on|saved|owner|author|username|user|url|uri|href|link|title|name|value|timestamp|data|string_map_data|label_values|posts?|reels?|collection)$/i;
+  function username(t) {
+    const u = String(t || "").trim().replace(/^@/, "");
+    return /^[A-Za-z0-9._]{1,30}$/.test(u) && !LABELS.test(u) ? u : "";
+  }
+
   function hasOwnLink(e) { return JSON.stringify(e.string_map_data || e.label_values || {}).match(/instagram\.com\/(?:[A-Za-z0-9_.]+\/)?(?:reels?|p|tv)\//i); }
 
   /** Saved reels from one export file: [{code, url, collection, author}] */
@@ -726,7 +762,11 @@ const Notes = (() => {
           walk(el, title, c);
         }
       } else if (node && typeof node === "object") {
-        const t = typeof node.title === "string" && node.title ? node.title : title;
+        // the creator: an entry's "title" in the old export, a "Username"/"Owner" label in the newer one
+        let t = username(node.title) || title;
+        for (const lv of Array.isArray(node.label_values) ? node.label_values : []) {
+          if (lv && /user ?name|owner|author/i.test(String(lv.label || "")) && username(lv.value)) t = username(lv.value);
+        }
         for (const v of Object.values(node)) {
           if (typeof v === "string") { if (isLink(v)) push(v, coll, t); } else walk(v, t, coll);
         }
@@ -829,8 +869,8 @@ const Notes = (() => {
     return lines.map((l) => String(l).trim()).filter((l) => l.length > 2 && !COMMENT_NOISE.test(l) && !/^\d+[smhdw]\b/.test(l) && !/^@?[a-z0-9_.]{3,30}$/i.test(l));
   }
 
-  return { reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, material, embedUrl, readPage,
+  return { keepBacked, username, reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, material, embedUrl, readPage,
     ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
-    YT_CLIENTS, condense, search, answerPrompt, webAnswerPrompt, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
+    YT_CLIENTS, condense, search, answerPrompt, webAnswerPrompt, markOneSource, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
     exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS };
 })();
