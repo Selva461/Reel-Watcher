@@ -187,6 +187,7 @@ public class NightRun extends BroadcastReceiver {
         @Override public void pickModelFile(Consumer<Uri> cb) { cb.accept(null); }
         @Override public void pickFolder(Consumer<Uri> cb) { cb.accept(null); }
         @Override public void pickImages(Consumer<java.util.List<Uri>> cb) { cb.accept(null); }
+        @Override public void listen(Consumer<String> cb) { cb.accept(null); }
         @Override public void sendToLens(Uri uri) { }
         @Override public void keepScreenOn(boolean on) { }
         @Override public String displayName(Uri uri) { return uri.getLastPathSegment(); }

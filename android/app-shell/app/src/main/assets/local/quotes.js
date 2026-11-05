@@ -73,29 +73,5 @@ const Quotes = (() => {
     }).filter((o) => o.hit).sort((a, b) => b.hit - a.hit).map((o) => o.x);
   }
 
-  // ---------------------------------------------------------------- screen (#/quotes)
-
-  let query = "";
-  function screen() {
-    const list = find(db, query);
-    $app.innerHTML = `${header("Quotes", "#/")}
-      <label class="search">${ICON.search}<input id="qq" type="search" placeholder="Search quotes" value="${esc(query)}" aria-label="Search quotes"></label>
-      <p class="hint">${plural((db.quotes || []).length, "quote")} kept from your screenshots. New screenshots are read when you tap Process, and every night.</p>
-      <div class="stack" id="qlist">${listHtml(list)}</div>`;
-    bind("#qq", "input", (e, el) => { query = el.value; document.getElementById("qlist").innerHTML = listHtml(find(db, query)); bindList(); });
-    bindList();
-  }
-  function listHtml(list) {
-    if (!list.length) return `<div class="empty">${query ? "No quote has those words." : "No quotes yet. Read your screenshots (Start, Screenshots to watchlist) and lines worth keeping show up here."}</div>`;
-    return list.slice(0, 200).map((q) => `<div class="card stack" data-q="${esc(q.id)}"><span>“${esc(q.text)}”</span>
-      ${q.from ? `<span class="small muted">${esc(q.from)}</span>` : ""}
-      <div class="grid2"><button class="btn" data-copy="${esc(q.id)}">Copy</button><button class="btn danger" data-del="${esc(q.id)}">Remove</button></div></div>`).join("");
-  }
-  function bindList() {
-    const get = (id) => (db.quotes || []).find((q) => q.id === id);
-    bind("[data-copy]", "click", (e, b) => { const q = get(b.dataset.copy); if (q) { sync("copy", `"${q.text}"${q.from ? " (" + q.from + ")" : ""}`); toast("Copied"); } });
-    bind("[data-del]", "click", (e, b) => { db.quotes = (db.quotes || []).filter((q) => q.id !== b.dataset.del); saveDb(); screen(); });
-  }
-
-  return { pick, addFrom, find, sentenceLike, screen };
+  return { pick, addFrom, find, sentenceLike };
 })();

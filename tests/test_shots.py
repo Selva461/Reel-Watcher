@@ -152,7 +152,9 @@ def test_quotes_kept_from_screenshots_and_searchable(phone):
     q = db_of(phone)["quotes"]
     assert len(q) == 1 and q[0]["from"] == "Interstellar" and q[0]["text"].startswith("Love is the one thing")
     phone.goto(phone.url.split("#")[0] + "#/quotes")
-    phone.fill("#qq", "dimensions TIME")
-    phone.get_by_text("Interstellar").wait_for()
-    phone.fill("#qq", "banana")
-    phone.get_by_text("No quote has those words.").wait_for()
+    phone.wait_for_url("**#/")
+    assert phone.locator('[data-kind="quotes"]').get_attribute("aria-pressed") == "true"
+    phone.fill("#tq", "dimensions TIME")
+    phone.locator("#results").get_by_text("Interstellar").wait_for()
+    phone.fill("#tq", "banana")
+    phone.locator("#results").get_by_text("Nothing found").wait_for()

@@ -204,6 +204,8 @@ const Catalog = (() => {
     if (facts.language) m.language = langCode(facts.language);
     for (const k of ["original_title", "country", "poster", "overview"]) if (facts[k]) m[k] = clean(facts[k], k === "overview" ? 1500 : k === "poster" ? 2000 : 200);
     if (facts.genres && facts.genres.length) m.genres = uniq(facts.genres.map(genreName));
+    if (Number(facts.runtime) > 0) m.runtime = Math.round(Number(facts.runtime));
+    if (Number(facts.episodes) > 0) m.episodes = Math.round(Number(facts.episodes));
     if (facts.aka) m.aka = uniq([...(m.aka || []), ...facts.aka]);
     m.aka = (m.aka || []).filter((a) => normTitle(a) !== normTitle(m.title));
     m.ext = { ...(m.ext || {}), ...Object.fromEntries(Object.entries(facts.ext || {}).filter(([, v]) => v).map(([k, v]) => [k, String(v)])) };
@@ -229,7 +231,7 @@ const Catalog = (() => {
     for (const s of drop.sources || []) if (!keep.sources.some((x) => sourceKey(x) === sourceKey(s))) keep.sources.push(s);
     keep.aka = uniq([...(keep.aka || []), drop.title, ...(drop.aka || [])]).filter((t) => normTitle(t) !== normTitle(keep.title));
     keep.genres = uniq([...(keep.genres || []), ...(drop.genres || [])]);
-    for (const k of ["year", "language", "original_title", "country", "poster", "overview"]) if (!keep[k] && drop[k]) keep[k] = drop[k];
+    for (const k of ["year", "language", "original_title", "country", "poster", "overview", "runtime", "episodes"]) if (!keep[k] && drop[k]) keep[k] = drop[k];
     keep.ext = { ...(drop.ext || {}), ...(keep.ext || {}) };
     keep.confidence = Math.max(keep.confidence || 0, drop.confidence || 0);
     if (drop.status && drop.status !== "want" && keep.status === "want") keep.status = drop.status;

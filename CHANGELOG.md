@@ -24,6 +24,18 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 - Screenshots: choose pictures, or share them from Gallery to Reel Shelf; "Read my screenshots" is on the Shelf too.
 - Ask Meta AI is hidden on reels unless switched on in Settings.
 - The APK is for 64-bit phones only (smaller download).
+- New, simpler layout: two tabs. **Library** holds everything (reels, quotes, movies, series, anime, manga) with
+  chips, To watch / Watching / Watched, and a filter button (status, language, genre, years, length, tag).
+  **Inbox** has today's shares, Start, Try 5, Screenshots, Comments, Add, tonight's run and what needs you.
+  The top bar has the search, filters, a mic and Settings.
+- Search understands everyday words without AI: "horror movie under 1.5 hours", "korean drama I haven't watched",
+  "anime from the 2010s", "funny reels about money". It shows what it understood. Titles without a known length are
+  listed separately, never mixed in. If the words are unclear and the phone AI is installed, it can turn them into
+  a search (nothing leaves the phone).
+- Speak your search: the mic uses Android's own speech recognizer (offline when the phone has the language pack);
+  Reel Shelf gets no microphone permission.
+- Lengths of movies and episodes come from TMDB, AniList, MyAnimeList and Wikidata. Titles checked before get their
+  length once, on the next Process or nightly check.
 
 ## 1.2.0
 - Play Protect: the app no longer has an Instagram sign-in page inside it, no Termux permission, no old server mode and

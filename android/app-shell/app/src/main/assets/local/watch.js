@@ -3,7 +3,6 @@
    Storage and dedupe live in catalog.js; this file is only the screens. Uses the helpers in local.js. */
 "use strict";
 
-let wf = { q: "", group: "", type: "", language: "", genre: "", year: "", verified: "", status: "", source: "" };
 const TYPE_COLORS = { watch: "#F2B544", read: "#7FB7E8", other: "#CFCBC3" };
 
 /** For the extraction step (and anything else): add one title, save, and refresh the list if it is open. */
@@ -12,7 +11,7 @@ const Watch = {
   addMany(list) { const r = Catalog.addMany(db, list); saveDb(); refreshWatch(); return r; },
 };
 window.Watch = Watch;
-function refreshWatch() { if (/^#\/(watch|m\/)/.test(location.hash)) render(); }
+function refreshWatch() { if (/^#?\/?$|^#\/m\//.test(location.hash)) render(); }
 
 function posterHtml(m, cls = "thumb") {
   const t = Catalog.typeInfo(db, m.type);
@@ -26,77 +25,26 @@ function verifiedTag(m) {
   return `<span class="tag ${kind}">${esc(Catalog.VERIFIED[v] || v)}</span>`;
 }
 
+/** "1h 34m", or "45m × 16" for a series (one episode × episodes). */
+function lengthText(m) {
+  if (!(m.runtime > 0)) return "";
+  const t = Search.fmtMin(m.runtime);
+  return m.episodes > 1 ? `${t} × ${m.episodes}` : t;
+}
+
 function titleRow(m) {
   const t = Catalog.typeInfo(db, m.type);
   const n = (m.sources || []).length;
-  const meta = [t.label, m.year, m.language ? Catalog.langName(m.language) : ""].filter(Boolean).join(" · ");
+  const meta = [t.label, m.year, m.language ? Catalog.langName(m.language) : "", lengthText(m)].filter(Boolean).join(" · ");
   return `<a class="list-item" href="#/m/${enc(m.id)}">${posterHtml(m, "thumb sm")}
     <span class="grow stack" style="gap:4px"><span class="title clamp">${esc(m.title)}</span>
       <span class="small muted">${esc(meta)}</span>
       <span class="tagrow">${verifiedTag(m)}${m.status && m.status !== "want" ? `<span class="tag">${esc(Catalog.STATUS[m.status])}</span>` : ""}${n > 1 ? `<span class="tag">Seen ${n} times</span>` : ""}${(m.genres || []).slice(0, 2).map((g) => `<span class="tag">${esc(g)}</span>`).join("")}</span></span></a>`;
 }
 
-function watchScreen() {
-  const all = (db.media || []).filter((m) => m.verified !== "rejected");
-  // menus count what the other filters leave, so each choice shows how many you will get
-  const without = (k) => Catalog.facets(db, Catalog.filter(db, { ...wf, [k]: "", q: wf.q }));
-  const fType = without("type").type;
-  const fGroup = without("group").group;
-  const sel = (key, label, counts, name, order) => {
-    const keys = Object.keys(counts).sort(order || ((a, b) => counts[b] - counts[a] || String(a).localeCompare(String(b))));
-    if (wf[key] && !keys.includes(wf[key])) keys.unshift(wf[key]);
-    return `<label class="field small-field"><span class="label">${label}</span><select class="input" data-wf="${key}">
-      <option value="">Any</option>${keys.map((k) => `<option value="${esc(k)}" ${wf[key] === k ? "selected" : ""}>${esc(name(k))} (${counts[k] || 0})</option>`).join("")}</select></label>`;
-  };
-  const decades = (a, b) => (a === "unknown") - (b === "unknown") || String(b).localeCompare(String(a));
-  const types = Object.keys(fType).filter((id) => !wf.group || Catalog.typeInfo(db, id).group === wf.group)
-    .sort((a, b) => fType[b] - fType[a]);
-  const shown = Catalog.filter(db, wf);
-  const any = Object.entries(wf).some(([k, v]) => k !== "q" && v);
-  $app.innerHTML = `
-    <div class="brand">Reel Shelf</div>
-    <div class="row between"><h1>Watchlist</h1><button class="btn primary" id="addt">Add</button></div>
-    <label class="search">${ICON.search}<input id="wq" type="search" placeholder="Search titles, other names, genres" value="${esc(wf.q)}" aria-label="Search titles"></label>
-    ${Verify.cardHtml()}
-    ${all.length ? `<div class="seg" role="group" aria-label="Watch or read">${[["", "All", all.length], ["watch", "To watch", fGroup.watch || 0], ["read", "To read", fGroup.read || 0]]
-      .concat(fGroup.other ? [["other", "Other", fGroup.other]] : []).map(([v, l, c]) => `<button data-group="${v}" aria-pressed="${wf.group === v}">${l} ${c}</button>`).join("")}</div>
-    ${types.length > 1 || wf.type ? `<div class="chips"><button class="chip" data-type="" aria-pressed="${!wf.type}">All kinds</button>${types.map((id) => `<button class="chip" data-type="${esc(id)}" aria-pressed="${wf.type === id}">${esc(Catalog.typeInfo(db, id).plural)} ${fType[id]}</button>`).join("")}</div>` : ""}
-    <div class="grid2">
-      ${sel("language", "Language", without("language").language, (k) => k === "unknown" ? "Unknown" : Catalog.langName(k))}
-      ${sel("genre", "Genre", without("genre").genre, (k) => k)}
-      ${sel("year", "Years", without("year").decade, (k) => k === "unknown" ? "Unknown" : k, decades)}
-      ${sel("status", "Status", without("status").status, (k) => Catalog.STATUS[k] || k)}
-      ${sel("verified", "Checked online", without("verified").verified, (k) => Catalog.VERIFIED[k] || k)}
-      ${sel("source", "Found in", without("source").source, (k) => ({ screenshot: "Screenshots", reel: "Reels", manual: "Added by you" }[k] || k))}
-    </div>
-    <div class="row between"><span class="small muted" id="wcount">${plural(shown.length, "title")}${any || wf.q ? ` of ${all.length}` : ""}</span>${any ? `<button class="btn" id="wclear" style="min-height:36px">Clear filters</button>` : ""}</div>` : ""}
-    <div class="stack" id="wlist">${watchListHtml(shown, all.length)}</div>`;
-  bind("#wq", "input", (e, el) => {
-    wf.q = el.value;
-    const list = Catalog.filter(db, wf);
-    document.getElementById("wlist").innerHTML = watchListHtml(list, all.length);
-    const c = document.getElementById("wcount");
-    if (c) c.textContent = plural(list.length, "title") + (wf.q || any ? ` of ${all.length}` : "");
-  });
-  bind("[data-wf]", "change", (e, el) => { wf[el.dataset.wf] = el.value; watchScreen(); });
-  bind("[data-group]", "click", (e, b) => { wf.group = b.dataset.group; if (wf.type && Catalog.typeInfo(db, wf.type).group !== wf.group && wf.group) wf.type = ""; watchScreen(); });
-  bind("[data-type]", "click", (e, b) => { wf.type = b.dataset.type; watchScreen(); });
-  bind("#wclear", "click", () => { wf = { ...wf, group: "", type: "", language: "", genre: "", year: "", verified: "", status: "", source: "" }; watchScreen(); });
-  bind("#addt", "click", () => titleDialog(null));
-}
-
-function watchListHtml(list, total) {
-  if (!total) return `<div class="empty stack" style="text-align:left"><strong style="color:var(--text)">No titles yet</strong>
-    <span>Movies, series, K-dramas, anime, manga and more found in your screenshots and reels show up here, each one only once, however many times it was saved.</span>
-    <span>You can also <a href="#" id="addt2">add a title yourself</a>.</span></div>`;
-  if (!list.length) return `<div class="empty">Nothing matches these filters.</div>`;
-  return list.slice(0, 400).map(titleRow).join("") + (list.length > 400 ? `<div class="empty small">Showing 400 of ${list.length}. Narrow the filters to see the rest.</div>` : "");
-}
-document.addEventListener("click", (e) => { if (e.target && e.target.id === "addt2") { e.preventDefault(); titleDialog(null); } });
-
 function titleScreen(id) {
   const m = Catalog.get(db, id);
-  if (!m) { $app.innerHTML = `${header("Not found", "#/watch")}<div class="empty">This title is no longer in your watchlist.</div>`; return; }
+  if (!m) { $app.innerHTML = `${header("Not found", "#/")}<div class="empty">This title is no longer in your watchlist.</div>`; return; }
   const t = Catalog.typeInfo(db, m.type);
   const src = (m.sources || []).slice().sort((a, b) => (b.at || 0) - (a.at || 0));
   const srcRow = (s) => {
@@ -105,15 +53,17 @@ function titleScreen(id) {
     const body = `<span class="grow stack" style="gap:2px"><strong class="small">${esc(what)}${esc(how)}</strong>${s.text ? `<span class="small muted clamp">${esc(s.text)}</span>` : ""}<span class="small muted">${day(s.at)}</span></span>`;
     return s.kind === "reel" && s.ref && reel(s.ref) ? `<a class="list-item" href="#/r/${enc(s.ref)}">${body}${ICON.chev}</a>` : `<div class="list-item">${body}</div>`;
   };
-  $app.innerHTML = `${header(t.label, "#/watch")}
+  const firstReel = src.map((s) => s.kind === "reel" && s.ref && reel(s.ref)).find((r) => r && r.url);
+  $app.innerHTML = `${header(t.label, "#/")}
     <div class="row" style="align-items:flex-start;gap:14px">${posterHtml(m, "thumb big poster")}
       <div class="stack grow" style="gap:6px"><h2 style="font-size:22px">${esc(m.title)}</h2>
         ${m.original_title && m.original_title !== m.title ? `<span class="small soft">${esc(m.original_title)}</span>` : ""}
-        <span class="small muted">${esc([t.label, m.year, m.language ? Catalog.langName(m.language) : "", m.country].filter(Boolean).join(" · "))}</span>
+        <span class="small muted">${esc([t.label, m.year, m.language ? Catalog.langName(m.language) : "", m.country, lengthText(m)].filter(Boolean).join(" · "))}</span>
         <span class="tagrow">${verifiedTag(m)}${(m.genres || []).map((g) => `<span class="tag">${esc(g)}</span>`).join("")}</span>
         ${m.confidence && m.verified !== "verified" ? `<span class="small muted">Sure: ${Math.round(m.confidence * 100)}%</span>` : ""}</div></div>
     ${m.overview ? `<p class="soft" style="margin:0;line-height:1.5">${esc(m.overview)}</p>` : ""}
     <div class="seg" role="group" aria-label="Status">${Object.entries(Catalog.STATUS).map(([k, l]) => `<button data-st="${k}" aria-pressed="${(m.status || "want") === k}">${esc(t.group === "read" ? ({ want: "Want", watching: "Reading", done: "Finished", dropped: "Dropped" })[k] : ({ want: "Want", watching: "Watching", done: "Finished", dropped: "Dropped" })[k])}</button>`).join("")}</div>
+    ${firstReel ? `<button class="btn primary block" id="openig">${UI.insta} Instagram</button>` : ""}
     <div class="grid2">
       <button class="btn" id="edit">Edit</button>
       <button class="btn" id="look">Look it up</button>
@@ -126,11 +76,12 @@ function titleScreen(id) {
     <button class="btn block danger" id="mdel">Remove from watchlist</button>`;
   bind("[data-st]", "click", (e, b) => { Catalog.update(db, m.id, { status: b.dataset.st }); saveDb(); titleScreen(m.id); });
   bind("#edit", "click", () => titleDialog(m));
+  bind("#openig", "click", () => { firstReel.opened_at = Date.now(); saveDb(); sync("openUrl", firstReel.url); });
   bind("#look", "click", () => sync("openUrl", "https://www.google.com/search?q=" + enc([m.title, m.year, t.label].filter(Boolean).join(" "))));
   bind("#okv", "click", () => { Catalog.verify(db, m.id, {}, "verified", "you"); saveDb(); toast("Marked as checked"); titleScreen(m.id); });
-  bind("#wrong", "click", () => { Catalog.verify(db, m.id, {}, "rejected", "you"); saveDb(); toast("Hidden from your watchlist"); location.hash = "#/watch"; });
+  bind("#wrong", "click", () => { Catalog.verify(db, m.id, {}, "rejected", "you"); saveDb(); toast("Hidden from your watchlist"); location.hash = "#/"; });
   bind("#mnote", "change", (e, el) => { Catalog.update(db, m.id, { note: el.value }); saveDb(); toast("Saved"); });
-  bind("#mdel", "click", () => { if (confirm(`Remove "${m.title}" from your watchlist?`)) { Catalog.remove(db, m.id); saveDb(); location.hash = "#/watch"; } });
+  bind("#mdel", "click", () => { if (confirm(`Remove "${m.title}" from your watchlist?`)) { Catalog.remove(db, m.id); saveDb(); location.hash = "#/"; } });
 }
 
 /** Add or edit a title. fromReel: the reel code it came from (adds a reel source). */

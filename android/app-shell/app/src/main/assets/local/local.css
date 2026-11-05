@@ -19,3 +19,26 @@ nav.tabs a { min-width: 52px; }
 .thumb.big.poster { aspect-ratio: 2/3; width: 120px; }
 mark { background: rgba(242, 181, 68, 0.28); color: inherit; border-radius: 3px; padding: 0 1px; }
 a.chip { display: inline-flex; align-items: center; text-decoration: none; }
+/* Top bar, two tabs, Inbox tiles (1.3.0) */
+.top { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 10px 16px 6px; }
+.top .inner { max-width: 560px; margin: 0 auto; display: flex; gap: 8px; align-items: center; }
+.top .search { min-height: 46px; padding: 0 6px 0 12px; gap: 6px; }
+.top .search input { min-height: 44px; min-width: 0; }
+.top .search input::-webkit-search-cancel-button { display: none; }
+.top .icon-btn { position: relative; flex-shrink: 0; color: var(--soft); }
+.grow { flex: 1; min-width: 0; }
+button.bare { border: 0; background: transparent; color: var(--muted); width: 36px; height: 40px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
+#tq:placeholder-shown ~ #tclear { display: none; }
+.dot { position: absolute; top: 9px; right: 9px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+body.with-top #app { padding-top: 8px; }
+nav.tabs .ico { position: relative; display: inline-flex; }
+.badge { position: absolute; top: -4px; right: -10px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: var(--on-accent);
+         font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; line-height: 1; }
+.badge[hidden], .dot[hidden] { display: none; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 8px; }
+.tile-btn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-height: 80px; padding: 10px 4px; border-radius: 16px;
+            border: 0; background: var(--surface); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; text-align: center; }
+.tile-btn svg { color: var(--accent); }
+.tile-btn#start, .tile-btn#goRun { background: var(--accent); color: var(--on-accent); }
+.tile-btn#start svg, .tile-btn#goRun svg { color: var(--on-accent); }
+#understood:empty { display: none; }

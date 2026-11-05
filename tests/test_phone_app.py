@@ -57,6 +57,7 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
     downloadSpeech: (id) => { st.calls.push(["speechDownload"]); keep(); later(() => rnProgress("speech", 20e6, 40e6)); later(() => { st.speech = true; keep(); rnDone(id, true, "ready"); }); },
     deleteSpeech: () => { st.speech = false; keep(); },
     addShotPictures: (id) => later(() => rnDone(id, false, "cancelled")),
+    listen: (id) => { st.calls.push(["listen"]); later(() => st.said ? rnDone(id, true, st.said) : rnDone(id, false, "cancelled")) },
     readPictures: (id) => later(() => st.pictureText ? rnDone(id, true, st.pictureText) : rnDone(id, false, "cancelled")),
     commentReaderOn: () => !!st.a11y,
     openAccessibilitySettings: () => { st.opened.push("a11y"); keep(); },
@@ -202,7 +203,8 @@ def test_shared_reel_is_only_saved_then_start_reads_and_writes_notes(phone):
     st = phone.rn()
     assert not any(c[0] in ("fetchPage", "generate") for c in st["calls"])  # sharing only saves: no work until Start
     assert db_of(phone)["reels"][0]["status"] == "new"
-    phone.get_by_role("button", name="Start: 1 reel").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
     r = db_of(phone)["reels"][0]
     assert r["status"] == "done" and r["notes_by"] == "phone" and r["author"] == "creator_a"
@@ -221,7 +223,8 @@ def test_shared_reel_is_only_saved_then_start_reads_and_writes_notes(phone):
 
 def test_without_the_model_start_reads_captions_and_ask_meta_ai_files_the_answer(phone):
     phone.open_with({"shared": ["https://www.instagram.com/reel/BBB222/"], "pages": {"BBB222/embed": EMBED}, "settings": json.dumps({"metaAi": True})})
-    phone.get_by_role("button", name="Start: 1 reel").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
     assert not any(c[0] == "generate" for c in phone.rn()["calls"])
     r = db_of(phone)["reels"][0]
@@ -273,8 +276,9 @@ def test_bulk_paste_links_and_old_answers(phone):
     phone.get_by_text("2 answers saved").wait_for()
     reels = db_of(phone)["reels"]
     assert len(reels) == 5 and sum(1 for r in reels if r.get("notes")) == 2
-    phone.get_by_role("button", name="#ideas").click()
-    assert phone.locator(".list-item").count() == 1
+    phone.goto(phone.url.split("#")[0] + "#/")
+    phone.locator("#tq").fill("#ideas")
+    phone.wait_for_function("() => document.querySelectorAll('#results a.list-item').length === 1")
 
 
 def test_instagram_export_zip_with_collections(phone, tmp_path):
@@ -384,7 +388,7 @@ def test_nightly_run_settings(phone):
 
 def test_waiting_for_instagram_export_reminder(phone):
     import time
-    phone.open_with({"igWaiting": int(time.time() * 1000) - 3 * 3600 * 1000})
+    phone.open_with({"igWaiting": int(time.time() * 1000) - 3 * 3600 * 1000}, "#/inbox")
     card = phone.locator("#igwait")
     card.get_by_text("3 hours ago").wait_for()
     card.get_by_role("button", name="Check now").click()
@@ -393,7 +397,7 @@ def test_waiting_for_instagram_export_reminder(phone):
     phone.locator("#igwait").get_by_role("button", name="Hide").click()
     assert phone.locator("#igwait").count() == 0 and not phone.rn()["igWaiting"]
     phone.goto(phone.url.split("#")[0] + "#/")
-    phone.get_by_text("Your reel notes").wait_for()
+    phone.locator("#results").wait_for()
     assert phone.locator("#igwait").count() == 0
 
 
@@ -418,7 +422,8 @@ def test_exports_and_leaving_the_app_stops_work(phone):
         sessionStorage.setItem('rn', JSON.stringify(s)); onAppResume(); }""")
     phone.evaluate("""() => { RN.generate = (id) => { window.__genId = id; }; }""")  # the answer never comes back on its own
     phone.goto(phone.url.split("#")[0] + "#/run")
-    phone.get_by_role("button", name="Start: 1 reel").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     for _ in range(100):
         if phone.evaluate("() => !!window.__genId"):
             break
@@ -468,7 +473,8 @@ TIMED = """<?xml version="1.0" encoding="utf-8" ?><transcript>
 def test_youtube_short_reads_the_spoken_words_and_writes_notes(phone):
     phone.open_with({"shared": ["look https://youtube.com/shorts/dQw4w9WgXcQ?si=abc"], "model": {"ready": True, "partial": 0, "installed": []},
                      "pages": {"youtube.com/watch": WATCH, "api/timedtext": TIMED}, "player": PLAYER, "answers": [ANSWER]})
-    phone.get_by_role("button", name="Start: 1 reel").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
     st = phone.rn()
     post = next(c for c in st["calls"] if c[0] == "postJson")
@@ -487,10 +493,10 @@ def test_youtube_short_reads_the_spoken_words_and_writes_notes(phone):
 def test_ask_meta_ai_about_several_reels_in_one_message(phone):
     codes = ["AAA111", "BBB222", "CCC333"]
     db = {"reels": [{"code": c, "url": f"https://www.instagram.com/reel/{c}/", "status": "new", "added_at": 1} for c in codes], "inbox": []}
-    phone.open_with({"db": json.dumps(db)})
-    assert phone.get_by_role("button", name="Ask Meta AI about 3 reels at once").count() == 0  # off unless you switch it on
-    phone.open_with({"db": json.dumps(db), "settings": json.dumps({"metaAi": True})})
-    phone.get_by_role("button", name="Ask Meta AI about 3 reels at once").click()
+    phone.open_with({"db": json.dumps(db)}, "#/inbox")
+    assert phone.get_by_role("button", name="Ask Meta AI · 3").count() == 0  # off unless you switch it on
+    phone.open_with({"db": json.dumps(db), "settings": json.dumps({"metaAi": True})}, "#/inbox")
+    phone.get_by_role("button", name="Ask Meta AI · 3").click()
     title, text = phone.rn()["sharedOut"][0]
     assert title == "Ask Meta AI" and all(f"https://www.instagram.com/reel/{c}/" in text for c in codes) and "REEL:" in text
     # Meta AI answers all three in one message; sharing it back files each part under its own reel
@@ -525,8 +531,8 @@ def test_library_search_ranks_allows_typos_and_similar_words(phone):
     related = phone.evaluate("() => { const rs = JSON.parse(window.__rn.db).reels; return Notes.related(rs, rs[1]).map(x => x.reel.code); }")
     assert related[:1] == ["SEC002"]
     # the shelf search box uses the same ranking
-    phone.fill("#q", "pasword")
-    assert phone.locator("#list .list-item").count() == 1
+    phone.fill("#tq", "pasword")
+    phone.wait_for_function("() => document.querySelectorAll('#results a.list-item').length === 1")
     phone.goto(phone.url.split("#")[0] + "#/r/SEC001")
     phone.get_by_role("heading", name="Related reels").wait_for()
 
@@ -569,7 +575,8 @@ def test_text_on_the_cover_picture_and_its_description_count_for_notes(phone):
              '<div class="Caption"><a class="CaptionUsername" href="#">creator_b</a>Part 2 #tech</div></div></body></html>')
     phone.open_with({"shared": ["https://www.instagram.com/reel/COV001/"], "pages": {"COV001/embed": embed},
                      "coverText": "Keep secrets on the server, rotate any leaked key and scan code before shipping"})
-    phone.get_by_role("button", name="Start: 1 reel").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
     r = db_of(phone)["reels"][0]
     assert ["cover", "https://scontent-a.cdninstagram.com/v/cover.jpg"] in phone.rn()["calls"]
@@ -588,7 +595,8 @@ def test_reel_video_gives_screen_text_and_speech_and_old_reels_are_read_again(ph
     phone.open_with({"db": json.dumps({"reels": [old], "inbox": []}), "pages": {"VID001/embed": VIDEO_EMBED}, "speech": True,
                      "video": {"screen": "3 habits that changed my mornings", "seconds": 31,
                                "speech": "first drink water as soon as you wake up then walk for ten minutes and write down one goal for the day"}}, "#/run")
-    phone.get_by_role("button", name="Start: 1 reel").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
     r = db_of(phone)["reels"][0]
     assert ["video", "https://scontent-b.cdninstagram.com/v/reel.mp4?a=1&b=2"] in phone.rn()["calls"]
@@ -619,7 +627,8 @@ def test_useful_reels_go_first_then_memes(phone):
              mk("USE002", "3 habits and tips to fix your sleep, avoid these mistakes", 2)]
     phone.open_with({"db": json.dumps({"reels": reels, "inbox": []})}, "#/run")
     phone.get_by_text("2 useful reels will be read properly first").wait_for()
-    phone.get_by_role("button", name="Start: 3 reels").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 3", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
     fetched = [c[1] for c in phone.rn()["calls"] if c[0] == "fetchPage"]
     order = [next(c for c in ("USE001", "USE002", "FUN001") if c in u) for u in fetched if "/embed" in u]
@@ -651,7 +660,8 @@ def test_comments_from_screenshots_and_from_scrolling_go_to_the_right_reel(phone
 def test_instagram_slow_down_waits_then_stops_and_keeps_the_rest(phone):
     links = [f"https://www.instagram.com/reel/SLW00{i}/" for i in range(3)]
     phone.open_with({"shared": links, "igStatus": "Instagram answered 429"})
-    phone.get_by_role("button", name="Start: 3 reels").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 3", exact=True).click()
     phone.get_by_text("Instagram asked to slow down. The rest waits for the next run.").wait_for()
     reels = db_of(phone)["reels"]
     assert all(r["status"] == "new" and not r.get("caption_read") for r in reels)  # nothing marked read: retried next time
@@ -675,7 +685,8 @@ def run_short(phone, state):
     state = {"shared": ["https://youtube.com/shorts/dQw4w9WgXcQ?si=abc"], "pages": {}, **state}
     state["pages"].setdefault("youtube.com/watch", WATCH)
     phone.open_with(state)
-    phone.get_by_role("button", name="Start: 1 reel").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
     return db_of(phone)["reels"][0], phone.rn()["calls"]
 
@@ -745,3 +756,8 @@ def test_caption_formats_and_unpunctuated_auto_captions(phone):
     long = " ".join(f"Sentence number {i} talks about backups and passwords." for i in range(400))
     short = phone.evaluate("t => Notes.condense(t, 2000)", long)
     assert len(short) <= 2000 and short.startswith("Sentence number")
+
+
+def to_inbox(pg):
+    if not pg.url.endswith("#/inbox"):
+        pg.goto(pg.url.split("#")[0] + "#/inbox")

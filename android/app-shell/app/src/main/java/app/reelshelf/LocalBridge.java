@@ -731,6 +731,17 @@ final class LocalBridge {
         return CommentReader.take(act.ctx());
     }
 
+    /** The search mic: what you said, as text. Android's own recognizer listens, not this app (no microphone permission). */
+    @JavascriptInterface
+    public void listen(int id) {
+        if (!ok()) return;
+        act.runOnUiThread(() -> act.listen(said -> {
+            if (said == null) done(id, false, "cancelled");
+            else if (said.isEmpty()) done(id, false, "This phone has no speech recognizer. Install Google's speech services from the Play Store.");
+            else done(id, true, said);
+        }));
+    }
+
     /** Opens Android's picture picker (choose one or many screenshots). Calls back with how many were added. */
     @JavascriptInterface
     public void addShotPictures(int id) {

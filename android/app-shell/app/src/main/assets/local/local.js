@@ -30,7 +30,9 @@ const ICON = {
   play: '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 5l12 7-12 7z"/></svg>',
   search: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#A3A09A" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>',
 };
+let lastMain = "#/";  // back from a reel or title goes to the tab you came from
 function header(title, back) {
+  if (back === "#/") back = lastMain;
   return `<div class="row">${back ? `<a class="icon-btn" href="${esc(back)}" aria-label="Back">${ICON.back}</a>` : ""}<h1>${esc(title)}</h1></div>`;
 }
 function mb(n) { return n > 0 ? (n / 1048576 >= 1024 ? (n / 1073741824).toFixed(2) + " GB" : Math.round(n / 1048576) + " MB") : "0 MB"; }
@@ -620,50 +622,6 @@ const STATUS = {
 };
 const BY = { meta: "Notes by Meta AI", phone: "Notes by the on-phone AI (from the caption)", you: "Your notes",
   auto: "Quick notes without AI: the key sentences of the caption or transcript" };
-let filter = { q: "", tag: "" };
-
-function homeScreen() {
-  const ready = !!modelInfo().ready;
-  const todo = db.reels.filter((r) => needsWork(r, ready));
-  const tags = {};
-  for (const r of db.reels) for (const t of (r.notes || {}).tags || []) tags[t] = (tags[t] || 0) + 1;
-  const top = Object.entries(tags).sort((a, b) => b[1] - a[1]).slice(0, 14).map(([t]) => t);
-  const running = run && !run.finished;
-  $app.innerHTML = `
-    <div class="brand">Reel Shelf</div>
-    <h1>Your reel notes</h1>
-    <label class="search">${ICON.search}<input id="q" type="search" placeholder="Search topics, points, tools, tags" value="${esc(filter.q)}" aria-label="Search"></label>
-    ${igWaitingCard()}
-    <a class="card" href="#/shots"><span class="grow"><strong>Read my screenshots</strong><br><span class="small muted">Movie, series, anime and manga names go to Watch, good lines to Quotes</span></span>${ICON.chev}</a>
-    ${(db.quotes || []).length ? `<a class="card" href="#/quotes"><span class="grow"><strong>Quotes (${db.quotes.length})</strong><br><span class="small muted">Lines kept from your screenshots, searchable</span></span>${ICON.chev}</a>` : ""}
-    ${db.inbox.length ? `<a class="card accent" href="#/inbox"><span class="grow"><strong>${plural(db.inbox.length, "Meta AI answer")} to file</strong><br><span>Pick the reel each one belongs to</span></span></a>` : ""}
-    ${running ? `<a class="card accent" href="#/run"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="grow"><strong>Working: ${run.i + 1} of ${run.codes.length}</strong><br><span>Keeps going if you leave the app</span></span></a>`
-      : todo.length ? `<button class="card accent" id="start"><span class="coll-icon" style="background:#15161A;color:#F2B544">${ICON.play}</span><span class="stack grow" style="gap:2px">
-        <strong style="font-size:17px">Start: ${plural(todo.length, "reel")}</strong><span>${ready ? "Reads each caption and writes the notes on this phone" : "Reads each caption. Download the AI model in Settings to write notes too"}</span></span></button>` : ""}
-    ${settings.metaAi && forMeta().length > 1 && !running ? `<button class="card" id="batch"><span class="grow stack" style="gap:2px"><strong>Ask Meta AI about ${Math.min(BATCH, forMeta().length)} reels at once</strong><span class="small muted">One message instead of ${Math.min(BATCH, forMeta().length)}. Share its answer back and each part is filed.</span></span>${ICON.chev}</button>` : ""}
-    ${top.length ? `<div class="chips"><button class="chip" data-tag="" aria-pressed="${!filter.tag}">All</button>${top.map((t) => `<button class="chip" data-tag="${esc(t)}" aria-pressed="${filter.tag === t}">#${esc(t)}</button>`).join("")}</div>` : ""}
-    <div class="stack" id="list">${listHtml()}</div>`;
-  bind("#q", "input", (e, el) => { filter.q = el.value; document.getElementById("list").innerHTML = listHtml(); });
-  bind("[data-tag]", "click", (e, b) => { filter.tag = b.dataset.tag; homeScreen(); });
-  bind("#start", "click", () => startRun());
-  bind("#batch", "click", askMetaBatch);
-  bindIgWaiting();
-}
-
-
-function listHtml() {
-  const q = filter.q.trim();
-  let shown = db.reels.filter((r) => !filter.tag || ((r.notes || {}).tags || []).includes(filter.tag));
-  if (q) {  // ranked like a search engine: best match first, typos and similar words allowed
-    const plain = q.toLowerCase();
-    const hits = Lib.find(shown, q, 200);
-    const seen = new Set(hits.map((h) => h.reel));
-    // a name or link typed exactly also counts
-    const exact = shown.filter((r) => !seen.has(r) && [r.author, r.url, r.code].join(" ").toLowerCase().includes(plain));
-    shown = [...hits.map((h) => h.reel), ...exact];
-  }
-  return db.reels.length ? (shown.length ? shown.map(reelRow).join("") : `<div class="empty">Nothing matches. Try other words, or <a href="#/ask?q=${enc(q)}">ask your library</a>.</div>`) : emptyShelf();
-}
 
 /** Instagram reels Meta AI has not done yet (YouTube is read on the phone instead). */
 function forMeta() {
@@ -823,7 +781,7 @@ function askScreen() {
   const fix = q && results.length < 3 ? Lib.didYouMean(db.reels, q) : null;
   lastAsk.results = results;
   const mark = (s) => Lib.highlight(s, q);
-  $app.innerHTML = `${header("Ask your library", "")}
+  $app.innerHTML = `${header("Ask your library", "#/")}
     <form class="stack" id="askf"><label class="search">${ICON.search}<input id="aq" type="search" enterkeyhint="search" placeholder="e.g. how do I keep API keys safe?" value="${esc(q)}" aria-label="Question"></label></form>
     ${!q ? `<p class="hint">Search everything you saved, like a search engine for what you learned. It works without any AI: it ranks your notes by the words you type, allows typos and similar words (phone, mobile, android), and shows the lines that answer it. Use "exact words", -word to leave a word out, and #tag to keep one tag.</p>${libraryOverview()}` : ""}
     ${fix ? `<p class="small">Did you mean <a href="#/ask?q=${enc(fix)}" id="fix">${esc(fix)}</a>?</p>` : ""}
@@ -882,7 +840,7 @@ function pasteDialog(r) {
 }
 
 function addScreen() {
-  $app.innerHTML = `${header("Add reels", "")}
+  $app.innerHTML = `${header("Add reels", "#/inbox")}
     ${igWaitingCard()}
     <div class="card stack"><strong>From your screenshots</strong>
       <p class="hint">Reads the text in your screenshots on the phone: movie, series, anime and manga names go to Watch, lines worth keeping go to Quotes. Only new screenshots are read each time.</p>
@@ -946,18 +904,18 @@ function addScreen() {
   });
 }
 
-function inboxScreen() {
-  if (!db.inbox.length) { location.hash = "#/"; return; }
+function fileScreen() {
+  if (!db.inbox.length) { location.hash = "#/inbox"; return; }
   const a = db.inbox[0];
   const n = Notes.parse(a.text) || {};
   const choices = db.reels.filter((r) => r.url && !(r.notes && r.notes_by === "meta")).slice(0, 30);
-  $app.innerHTML = `${header("File this answer", "#/")}
+  $app.innerHTML = `${header("File this answer", "#/inbox")}
     <div class="card"><strong>${esc(n.topic || "Meta AI answer")}</strong><br><span class="small muted">${esc((n.tags || []).map((t) => "#" + t).join(" "))}</span></div>
     <h2>Which reel is it about?</h2>
     <div class="stack">${choices.map((r) => `<button class="list-item" style="border:0;text-align:left" data-pick="${esc(r.code)}"><span class="grow stack" style="gap:3px"><span class="title clamp">${esc(r.caption ? r.caption.split("\n")[0] : r.author ? "@" + r.author : r.code)}</span><span class="small muted">${esc(day(r.added_at))}</span></span>${ICON.chev}</button>`).join("")}</div>
     <button class="btn block" id="alone">Keep it as a note on its own</button>
     <button class="btn block danger" id="drop">Throw it away</button>`;
-  const done = () => { db.inbox.shift(); saveDb(); location.hash = db.inbox.length ? "#/inbox" : "#/"; render(); };
+  const done = () => { db.inbox.shift(); saveDb(); location.hash = db.inbox.length ? "#/file" : "#/inbox"; render(); };
   bind("[data-pick]", "click", (e, b) => { setNotes(reel(b.dataset.pick), n, "meta", a.text); done(); });
   bind("#alone", "click", () => {
     const code = "note-" + Date.now().toString(36);
@@ -974,7 +932,7 @@ function runScreen() {
   if (!run || (night && run.finished)) {
     const ready = !!modelInfo().ready;
     const todo = db.reels.filter((r) => needsWork(r, ready));
-    $app.innerHTML = `${header("Start", "")}
+    $app.innerHTML = `${header("Start", "#/inbox")}
       <p class="soft" style="margin:0">You can leave the app while it works: a notification shows the progress, with Stop. It ends by itself when done.</p>
       ${(() => { const old = db.reels.filter((r) => r.caption_read && !r.video_tried && !Notes.isYoutube(r)); if (!old.length) return "";
         const fun = old.filter((r) => Notes.reelKind(r) === "fun").length;
@@ -1006,7 +964,7 @@ function paintRun(force) {
   const at = RUN_STEPS.findIndex(([k]) => k === run.step);
   const total = run.codes.length;
   const pct = total ? Math.round((Math.min(run.i, total) / total) * 100) : 100;
-  $app.innerHTML = `${header(run.finished ? (run.paused ? "Paused" : "Done") : "Working...", "")}
+  $app.innerHTML = `${header(run.finished ? (run.paused ? "Paused" : "Done") : "Working...", "#/inbox")}
     <div class="card stack"><div class="row between"><strong>${run.finished ? `${Math.min(run.i, total)} of ${total}` : `Reel ${Math.min(run.i + 1, total)} of ${total}`}</strong><span class="small muted">${pct}%</span></div>
       <span class="bar"><span style="width:${pct}%"></span></span>
       ${run.paused ? `<span class="small">You left the app, so it stopped. Tap Start again to continue.</span>` : ""}</div>
@@ -1017,7 +975,7 @@ function paintRun(force) {
       : `<button class="btn primary block" id="again">${run.paused ? "Continue" : "Back to the shelf"}</button>`}
     ${run.log.length ? `<div class="stack"><h2>Results</h2>${run.log.slice(0, 40).map((l) => `<a class="list-item" href="#/r/${enc(l.code)}"><span aria-hidden="true">${l.ok ? "✓" : "–"}</span><span class="grow small">${esc(l.text)}</span>${ICON.chev}</a>`).join("")}</div>` : ""}`;
   bind("#stop", "click", () => { stopRun(); });
-  bind("#again", "click", () => { const p = run.paused; run = null; if (p) startRun(); else location.hash = "#/"; });
+  bind("#again", "click", () => { const p = run.paused; run = null; if (p) startRun(); else location.hash = "#/inbox"; });
 }
 
 // ------------------------------------------------------------------ speech to text (offline, Vosk)
@@ -1051,7 +1009,7 @@ function settingsScreen() {
   const dl = !!info.downloading;
   const pct = m && info.partial ? Math.round((info.partial / m.size) * 100) : 0;
   const seg = (key, opts) => `<div class="seg">${opts.map(([v, l]) => `<button data-set="${key}" data-val="${esc(JSON.stringify(v))}" aria-pressed="${settings[key] === v}">${l}</button>`).join("")}</div>`;
-  $app.innerHTML = `${header("Settings", "")}
+  $app.innerHTML = `${header("Settings", "#/")}
     ${speechHtml()}
     ${RN && RN.commentReaderOn ? `<div class="stack"><h2>Comments</h2><div class="card stack">
       <div class="row between"><strong>Read while I scroll</strong><span class="tag ${sync("commentReaderOn") ? "ok" : "warn"}">${sync("commentReaderOn") ? "On" : "Off"}</span></div>
@@ -1139,21 +1097,24 @@ function settingsScreen() {
 // ------------------------------------------------------------------ router
 
 const ROUTES = [
-  [/^#?\/?$/, homeScreen, "home"], [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "home"], [/^#\/inbox$/, inboxScreen, "home"],
-  [/^#\/ask(\?.*)?$/, askScreen, "ask"], [/^#\/topic\/(.+)$/, (m) => topicScreen(decodeURIComponent(m[1])), "ask"],
-  [/^#\/watch$/, watchScreen, "watch"], [/^#\/m\/(.+)$/, (m) => titleScreen(decodeURIComponent(m[1])), "watch"],
-  [/^#\/add$/, addScreen, "add"], [/^#\/run$/, runScreen, "run"],
-  [/^#\/shots$/, () => Shots.screen(), "run"], [/^#\/shots\/review$/, () => Shots.review(), "run"], [/^#\/settings$/, settingsScreen, "settings"],
-  [/^#\/check$/, () => Verify.screen(), "watch"], [/^#\/quotes$/, () => Quotes.screen(), "home"],
+  [/^#?\/?$/, libraryScreen, "lib", true], [/^#\/inbox$/, inboxScreen, "inbox", true],
+  [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "lib"], [/^#\/file$/, fileScreen, "inbox"],
+  [/^#\/ask(\?.*)?$/, askScreen, "lib"], [/^#\/topic\/(.+)$/, (m) => topicScreen(decodeURIComponent(m[1])), "lib"],
+  [/^#\/watch$/, () => { lib.kind = "movies"; location.replace("#/"); }, "lib"], [/^#\/m\/(.+)$/, (m) => titleScreen(decodeURIComponent(m[1])), "lib"],
+  [/^#\/add$/, addScreen, "inbox"], [/^#\/run$/, runScreen, "inbox"],
+  [/^#\/shots$/, () => Shots.screen(), "inbox"], [/^#\/shots\/review$/, () => Shots.review(), "inbox"], [/^#\/settings$/, settingsScreen, ""],
+  [/^#\/check$/, () => Verify.screen(), "inbox"], [/^#\/quotes$/, () => { lib.kind = "quotes"; location.replace("#/"); }, "lib"],
 ];
 
 function render() {
   const h = location.hash || "#/";
-  for (const [rx, fn, tab] of ROUTES) {
+  for (const [rx, fn, tab, top] of ROUTES) {
     const m = h.match(rx);
     if (!m) continue;
-    document.querySelectorAll("nav.tabs a").forEach((a) => (a.dataset.tab === tab ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
-    try { fn(m); } catch (err) { $app.innerHTML = `<div class="empty">${esc(err.message)}<br><br><a class="btn" href="#/">Back to Shelf</a></div>`; }
+    paintTabs(tab);
+    topBar(!!top);
+    if (top) lastMain = h === "#/inbox" ? "#/inbox" : "#/";
+    try { fn(m); } catch (err) { $app.innerHTML = `<div class="empty">${esc(err.message)}<br><br><a class="btn" href="#/">Library</a></div>`; }
     return;
   }
   location.hash = "#/";
@@ -1162,6 +1123,7 @@ function render() {
 window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); });
 loadSettings();
 loadDb();
+bindTopBar();
 takeShared();
 Verify.onOpen();
 render();

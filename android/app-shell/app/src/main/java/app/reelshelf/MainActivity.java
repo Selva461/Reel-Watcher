@@ -32,6 +32,7 @@ public class MainActivity extends Activity implements Host {
     private static final int MODEL_REQUEST = 3;
     private static final int FOLDER_REQUEST = 4;
     private static final int IMAGES_REQUEST = 5;
+    private static final int LISTEN_REQUEST = 6;
     private static final int FILE_REQUEST = 1;
 
     private WebView web;
@@ -42,6 +43,7 @@ public class MainActivity extends Activity implements Host {
     private java.util.function.Consumer<Uri> modelCallback;
     private java.util.function.Consumer<Uri> folderCallback;
     private java.util.function.Consumer<java.util.List<Uri>> imagesCallback;
+    private java.util.function.Consumer<String> listenCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -132,6 +134,23 @@ public class MainActivity extends Activity implements Host {
         }
     }
 
+    /** The search mic: Android's speech screen (no microphone permission for this app; offline when the phone has the pack). */
+    @Override
+    public void listen(java.util.function.Consumer<String> cb) {
+        listenCallback = cb;
+        Intent i = new Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        i.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        i.putExtra(android.speech.RecognizerIntent.EXTRA_PREFER_OFFLINE, true);
+        i.putExtra(android.speech.RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+        i.putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Search");
+        try {
+            startActivityForResult(i, LISTEN_REQUEST);
+        } catch (Exception e) {
+            listenCallback = null;
+            cb.accept("");
+        }
+    }
+
     public void pickFolder(java.util.function.Consumer<Uri> cb) {
         folderCallback = cb;
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
@@ -213,6 +232,17 @@ public class MainActivity extends Activity implements Host {
             java.util.function.Consumer<Uri> cb = modelCallback;
             modelCallback = null;
             cb.accept(resultCode == RESULT_OK && data != null ? data.getData() : null);
+            return;
+        }
+        if (requestCode == LISTEN_REQUEST && listenCallback != null) {
+            java.util.function.Consumer<String> cb = listenCallback;
+            listenCallback = null;
+            String said = null;
+            if (resultCode == RESULT_OK && data != null) {
+                java.util.ArrayList<String> got = data.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS);
+                if (got != null && !got.isEmpty()) said = got.get(0);
+            }
+            cb.accept(said);
             return;
         }
         if (requestCode == IMAGES_REQUEST && imagesCallback != null) {

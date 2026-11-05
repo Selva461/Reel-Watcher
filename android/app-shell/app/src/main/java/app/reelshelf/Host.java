@@ -33,6 +33,9 @@ interface Host {
     /** Android's picture picker, several at once; null or empty when cancelled. */
     void pickImages(Consumer<java.util.List<Uri>> cb);
 
+    /** Android's own speech recognizer (on the phone when its offline pack is installed); null when cancelled. */
+    void listen(Consumer<String> cb);
+
     void sendToLens(Uri uri);
 
     void keepScreenOn(boolean on);

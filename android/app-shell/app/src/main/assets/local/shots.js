@@ -136,7 +136,7 @@ const Shots = (() => {
     const fs = folders();
     const n = counts();
     const b = battery();
-    $app.innerHTML = `${header("Screenshots to watchlist", "#/run")}
+    $app.innerHTML = `${header("Screenshots", "#/inbox")}
       <p class="soft" style="margin:0">Reads the text in your screenshots on the phone (nothing is uploaded), finds the movie, series, anime and manga names, and puts them in your watchlist to be checked online.</p>
       <div class="card stack"><strong>Choose screenshots</strong>
         <span class="hint">Pick one or many pictures, or share them from your Gallery to Reel Shelf. They are read right away.</span>
@@ -172,7 +172,7 @@ const Shots = (() => {
     const mins = (Date.now() - job.started) / 60000;
     const rate = mins > 0.2 && job.i ? job.i / mins : 0;
     const left = rate ? Math.ceil((job.total - job.i) / rate) : 0;
-    $app.innerHTML = `${header("Working...", "")}
+    $app.innerHTML = `${header("Working...", "#/inbox")}
       <div class="card stack"><div class="row between"><strong>${job.phase === "list" ? "Listing your screenshots..." : job.phase === "reels" ? "Reel captions..." : `${job.i} of ${job.total}`}</strong><span class="small muted">${pct}%</span></div>
         <span class="bar"><span style="width:${pct}%"></span></span>
         <span class="small">${plural(job.found, "name")} found, ${plural(job.added, "new title")}${rate ? ` · about ${Math.round(rate)} a minute${left ? `, ${left < 90 ? left + " min" : Math.round(left / 60) + " h"} left` : ""}` : ""}</span></div>
