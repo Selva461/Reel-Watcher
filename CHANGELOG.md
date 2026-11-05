@@ -5,6 +5,13 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.1
+- Fix: Play Protect blocked 1.3.0 ("App blocked to protect your device ... can request access to sensitive data").
+  The cause was the new Accessibility helper ("Read while I scroll"): Play Protect blocks apps installed from outside
+  the Play Store that ask for Accessibility. It is removed. Comments still come from screenshots: tap Add comments on a
+  reel, use Comments in Inbox, or keep them in your Screenshots folder; they are matched to their reel.
+- No other permission changed: internet, notifications, the nightly alarm and the background-job notification.
+
 ## 1.3.0
 - Reels are read for real, all on the phone. When Instagram gives the video (logged out), Reel Shelf reads the text on
   screen (a frame every 2 seconds) and what is said (offline speech to text, about 40 MB, Settings, What reels say).

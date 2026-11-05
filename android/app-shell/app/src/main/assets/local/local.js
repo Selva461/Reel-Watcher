@@ -574,7 +574,7 @@ window.onAppPause = () => {  // the app left the screen: nothing keeps running
   if (run && !run.finished) { run.paused = true; stopRun(); }
   Shots.pause();
 };
-// ------------------------------------------------------------------ comments: from screenshots or "Read while I scroll"
+// ------------------------------------------------------------------ comments: from your screenshots
 /** Files one Instagram comment screen under its reel: the creator's name on the screen (the caption sits on top of the
     comments), else the reel you opened from Reel Shelf in the 20 minutes before. Returns true when it was filed. */
 window.fileCommentScreen = (lines, at) => {
@@ -589,18 +589,9 @@ window.fileCommentScreen = (lines, at) => {
   if (r.notes_by === "auto") r.video_tried = 0;  // read again with the comments
   return true;
 };
-function takeScrollComments() {
-  let screens = [];
-  try { screens = JSON.parse(sync("takeScrollComments") || "[]"); } catch (e) { screens = []; }
-  let n = 0;
-  for (const s of screens) if (Array.isArray(s.lines) && fileCommentScreen(s.lines.map(String), s.at || Date.now())) n++;
-  if (n) { saveDb(); toast(`Comments added to ${plural(n, "reel")} from your scrolling`); }
-  return n > 0;
-}
 
 let backFrom = "";  // the reel you just looked at in Instagram
 window.onAppResume = () => {
-  const filed = takeScrollComments();
   const seen = db.reels.filter((x) => x.opened_at && Date.now() - x.opened_at < 20 * 60000).sort((a, b) => b.opened_at - a.opened_at)[0];
   if (seen && backFrom !== seen.code) {  // back from Instagram: offer the next step on that reel
     backFrom = seen.code;
@@ -608,7 +599,6 @@ window.onAppResume = () => {
     reelScreen(seen.code);
     return;
   }
-  if (filed && location.hash.startsWith("#/r/")) render();
   const checked = Verify.onOpen();  // titles checked online overnight
   if (takeShared() || checked) render();
   else if (location.hash === "#/settings") render();
@@ -1011,11 +1001,6 @@ function settingsScreen() {
   const seg = (key, opts) => `<div class="seg">${opts.map(([v, l]) => `<button data-set="${key}" data-val="${esc(JSON.stringify(v))}" aria-pressed="${settings[key] === v}">${l}</button>`).join("")}</div>`;
   $app.innerHTML = `${header("Settings", "#/")}
     ${speechHtml()}
-    ${RN && RN.commentReaderOn ? `<div class="stack"><h2>Comments</h2><div class="card stack">
-      <div class="row between"><strong>Read while I scroll</strong><span class="tag ${sync("commentReaderOn") ? "ok" : "warn"}">${sync("commentReaderOn") ? "On" : "Off"}</span></div>
-      <span class="small muted">While you scroll Instagram yourself, comment sections on screen are kept and added to that reel's notes. It never taps or scrolls, reads only Instagram, and uses almost no battery.</span>
-      <button class="btn block" id="a11y">${sync("commentReaderOn") ? "Switch it off" : "Switch it on"} (Android settings)</button>
-      <p class="hint">In Accessibility, open "Reel Shelf: read comments while I scroll". If Android says it is a restricted setting: Settings, Apps, Reel Shelf, the three dots, Allow restricted settings, then try again. Or simply: open a reel's comments in Instagram, take screenshots, and tap Add comments on that reel.</p></div></div>` : ""}
     <div class="stack"><h2>On-phone AI</h2>
       <div class="card stack">
         <div class="row between"><strong>${esc(m ? m.name : settings.modelFile)}</strong><span class="tag ${info.ready ? "ok" : "warn"}" id="mstate">${info.ready ? "Ready" : dl ? "Downloading" : info.partial ? "Paused" : "Not downloaded"}</span></div>
@@ -1055,7 +1040,6 @@ function settingsScreen() {
     <button class="btn block danger" id="wipe">Delete all reels and notes</button>`;
   Verify.bindSettings(settingsScreen);
   bindSpeech();
-  bind("#a11y", "click", () => sync("openAccessibilitySettings"));
   bind("[data-set]", "click", (e, b) => { settings[b.dataset.set] = JSON.parse(b.dataset.val); saveSettings(); settingsScreen(); });
   bind("#dl", "click", () => {
     onProgress.download = (d, t) => {
@@ -1127,5 +1111,4 @@ bindTopBar();
 takeShared();
 Verify.onOpen();
 render();
-takeScrollComments();
 if (sync("isNight")) overnightRun(true);  // the nightly run (no screen): see NightRun.java

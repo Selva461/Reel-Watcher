@@ -808,7 +808,7 @@ const Notes = (() => {
     return f > u ? "fun" : "useful";
   }
 
-  // ---------------------------------------------------------------- comments (from your screenshots or "Read while I scroll")
+  // ---------------------------------------------------------------- comments (from your screenshots)
   const COMMENT_NOISE = /^(reply|replies|see translation|view \d+ more repl\w*|view replies.*|hide replies|liked by.*|add a comment.*|comments?|\d+[smhdw]|\d+\s*(likes?|replies)|author|pinned|edited|top comments?|newest|for you)$/i;
   /** Is this text an Instagram comment screen? */
   function isCommentScreen(lines) {

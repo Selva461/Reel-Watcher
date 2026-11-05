@@ -59,9 +59,6 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
     addShotPictures: (id) => later(() => rnDone(id, false, "cancelled")),
     listen: (id) => { st.calls.push(["listen"]); later(() => st.said ? rnDone(id, true, st.said) : rnDone(id, false, "cancelled")) },
     readPictures: (id) => later(() => st.pictureText ? rnDone(id, true, st.pictureText) : rnDone(id, false, "cancelled")),
-    commentReaderOn: () => !!st.a11y,
-    openAccessibilitySettings: () => { st.opened.push("a11y"); keep(); },
-    takeScrollComments: () => { const s = JSON.stringify(st.scroll || []); st.scroll = []; keep(); return s; },
     readCoverText: (id, url) => { st.calls.push(["cover", url]); keep(); later(() => rnDone(id, true, st.coverText || "")); },
     workUpdate: (title, text, d, t) => { st.work = (st.work || []).concat([["update", title]]); keep(); },
     workEnd: () => { st.work = (st.work || []).concat([["end"]]); keep(); },
@@ -635,16 +632,16 @@ def test_useful_reels_go_first_then_memes(phone):
     assert order == ["USE002", "USE001", "FUN001"]  # useful first (newest first), then memes
 
 
-def test_comments_from_screenshots_and_from_scrolling_go_to_the_right_reel(phone):
+def test_comment_screenshots_go_to_the_right_reel(phone):
     mk = lambda code, author, cap: {"code": code, "url": f"https://www.instagram.com/reel/{code}/", "status": "done", "added_at": 1,
                                     "author": author, "caption": cap, "caption_read": 1, "video_tried": 1, "collections": [],
                                     "notes": {"topic": cap}, "notes_by": "auto"}
     reels = [mk("CMT001", "chef_anna", "Pasta in 10 minutes"), mk("CMT002", "dev_raj", "Stop using var in JavaScript")]
     screen = ["Comments", "dev_raj", "Stop using var in JavaScript", "maria.k", "He means use let and const, var leaks out of blocks",
               "2d", "Reply", "tom_99", "This is sarcasm right? lol", "1d", "Reply", "Add a comment..."]
-    phone.open_with({"db": json.dumps({"reels": reels, "inbox": []}), "scroll": [{"at": 5, "lines": screen}],
+    phone.open_with({"db": json.dumps({"reels": reels, "inbox": []}),
                      "pictureText": "Comments\nchef_anna\nPasta in 10 minutes\nlee\nAdd garlic at the end, not the start\nReply\nbo\nworks!\nReply"})
-    phone.get_by_text("Comments added to 1 reel from your scrolling").wait_for()
+    assert phone.evaluate("(s) => { const ok = fileCommentScreen(s, 5); saveDb(); return ok; }", screen)  # a comment screenshot in the folder
     got = {r["code"]: r for r in db_of(phone)["reels"]}
     assert "He means use let and const, var leaks out of blocks" in got["CMT002"]["comments"] and "Reply" not in got["CMT002"]["comments"]
     assert not got["CMT001"].get("comments") and got["CMT002"]["video_tried"] == 0  # read again with the comments
@@ -653,8 +650,8 @@ def test_comments_from_screenshots_and_from_scrolling_go_to_the_right_reel(phone
     phone.get_by_text("comment lines added").wait_for()
     assert "Add garlic at the end, not the start" in db_of(phone)["reels"][0]["comments"]
     phone.goto(phone.url.split("#")[0] + "#/settings")
-    phone.get_by_role("button", name="Switch it on (Android settings)").click()
-    assert "a11y" in phone.rn()["opened"]
+    phone.locator("#mstate").wait_for()
+    assert phone.get_by_text("Read while I scroll").count() == 0  # no Accessibility helper: Play Protect blocks sideloaded apps with one
 
 
 def test_instagram_slow_down_waits_then_stops_and_keeps_the_rest(phone):

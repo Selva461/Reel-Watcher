@@ -707,30 +707,6 @@ final class LocalBridge {
         }));
     }
 
-    // ------------------------------------------------------------------ "Read while I scroll" (comments, opt-in)
-
-    /** Whether the comment reader is switched on in Android's Accessibility settings. */
-    @JavascriptInterface
-    public boolean commentReaderOn() {
-        if (!ok()) return false;
-        return CommentReader.enabled(act.ctx());
-    }
-
-    /** Opens Android's Accessibility settings, where you switch the comment reader on or off yourself. */
-    @JavascriptInterface
-    public void openAccessibilitySettings() {
-        if (!ok()) return;
-        act.runOnUiThread(() -> act.startActivity(new android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)));
-    }
-
-    /** Comment screens read while you scrolled Instagram, as [{at, lines}] JSON; the queue is emptied. */
-    @JavascriptInterface
-    public String takeScrollComments() {
-        if (!ok()) return "[]";
-        return CommentReader.take(act.ctx());
-    }
-
     /** The search mic: what you said, as text. Android's own recognizer listens, not this app (no microphone permission). */
     @JavascriptInterface
     public void listen(int id) {
