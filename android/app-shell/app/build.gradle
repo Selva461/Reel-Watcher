@@ -10,8 +10,9 @@ android {
         applicationId 'app.reelshelf'
         minSdk 26
         targetSdk 34
-        versionCode 6
-        versionName '1.2.0'  // raise both on every change (versionCode +1); CHANGELOG.md gets a matching section
+        versionCode 7
+        versionName '1.3.0'  // raise both on every change (versionCode +1); CHANGELOG.md gets a matching section
+        ndk { abiFilters 'arm64-v8a' }  // phones only (keeps the APK small: speech, text and AI libraries are native)
     }
     // Release builds are not debuggable. They are signed with your own key when the GitHub secrets
     // ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD are set
@@ -49,4 +50,8 @@ dependencies {
     // Reads the text in screenshots on the phone (Google ML Kit text recognition v2, Latin script). The model is
     // bundled inside the APK: free, works offline, nothing is uploaded, no Google Play services needed.
     implementation 'com.google.mlkit:text-recognition:16.0.1'
+    // Offline speech to text (Vosk, Apache 2.0): the spoken words of a reel, on the phone. Its model (about 40 MB)
+    // is downloaded only when you ask for it in Settings.
+    implementation 'net.java.dev.jna:jna:5.13.0@aar'
+    implementation 'com.alphacephei:vosk-android:0.3.47@aar'
 }

@@ -11,8 +11,10 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -193,6 +195,50 @@ final class VerifyJob {
                     unsaved = 0;
                 }
             }
+            // titles checked before 1.3.0 have no length yet: look it up once (for "under 1.5 hours" searches)
+            int lengths = 0;
+            if (!stopped && !offline) {
+                List<String[]> need = needLength(db, rs);
+                int failedInARow = 0;
+                for (String[] n : need) {
+                    if (stop.get() || (budgetMs > 0 && System.currentTimeMillis() - t0 > budgetMs)) {
+                        stopped = true;
+                        break;
+                    }
+                    if (limit > 0 && checked + lengths >= limit) break;
+                    JSONObject m = media(db, n[0]);
+                    if (m == null) continue;
+                    Map<String, String> ext = new HashMap<>();
+                    JSONObject e = m.optJSONObject("ext");
+                    if (e != null) for (Iterator<String> it = e.keys(); it.hasNext(); ) {
+                        String k = it.next();
+                        ext.put(k, e.optString(k));
+                    }
+                    int[] d;
+                    try {
+                        d = verifier.details(ext);
+                        failedInARow = 0;
+                    } catch (TitleVerifier.Stopped x) {
+                        stopped = true;
+                        break;
+                    } catch (Exception x) {
+                        if (++failedInARow >= 3) break;
+                        continue;
+                    }
+                    JSONObject r = new JSONObject();
+                    r.put("verdict", "details");
+                    r.put("runtime", d[0]);
+                    r.put("episodes", d[1]);
+                    r.put("checked_at", System.currentTimeMillis());
+                    rs.put(n[0], r);
+                    lengths++;
+                    if (++unsaved >= 10) {
+                        save(f, all);
+                        unsaved = 0;
+                    }
+                }
+            }
+            sum.put("lengths", lengths);
             save(f, all);
             if (progress != null) progress.at(checked, total, "");
             sum.put("checked", checked);
@@ -206,6 +252,34 @@ final class VerifyJob {
         } finally {
             RUNNING.set(false);
         }
+    }
+
+    /** Checked titles to watch that have an id but no length yet (and were never tried): [[id]]. */
+    static List<String[]> needLength(JSONObject db, JSONObject results) {
+        List<String[]> out = new ArrayList<>();
+        JSONArray media = db.optJSONArray("media");
+        if (media == null) return out;
+        for (int i = 0; i < media.length(); i++) {
+            JSONObject m = media.optJSONObject(i);
+            if (m == null || !"verified".equals(m.optString("verified"))) continue;
+            if (m.optInt("runtime", 0) > 0 || m.has("runtime_tried")) continue;
+            if (!TitleVerifier.groupOf(m.optString("type")).equals("watch")) continue;
+            JSONObject e = m.optJSONObject("ext");
+            if (e == null || !(e.has("tmdb") || e.has("anilist") || e.has("mal"))) continue;
+            if (results != null && results.has(m.optString("id"))) continue;
+            out.add(new String[]{m.optString("id")});
+        }
+        return out;
+    }
+
+    private static JSONObject media(JSONObject db, String id) {
+        JSONArray media = db.optJSONArray("media");
+        if (media == null) return null;
+        for (int i = 0; i < media.length(); i++) {
+            JSONObject m = media.optJSONObject(i);
+            if (m != null && id.equals(m.optString("id"))) return m;
+        }
+        return null;
     }
 
     private static void save(File f, JSONObject all) {

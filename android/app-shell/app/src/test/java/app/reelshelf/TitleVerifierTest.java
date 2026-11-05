@@ -303,7 +303,7 @@ public class TitleVerifierTest {
         List<int[]> prog = new ArrayList<>();
         JSONObject sum = new VerifyJob(dir, v, new AtomicBoolean()).run(0, 0, (d, t, title) -> prog.add(new int[]{d, t}));
         assertEquals(2, sum.getInt("checked"));
-        assertEquals(1, net.count("themoviedb.org"));  // the second sighting came from the cache
+        assertEquals(1, net.count("search/multi"));  // the second sighting came from the cache
         assertEquals(before, new String(java.nio.file.Files.readAllBytes(new File(dir, "reels.json").toPath()), "UTF-8"));
         assertFalse(prog.isEmpty());
 
@@ -315,7 +315,7 @@ public class TitleVerifierTest {
         // a run after the page applied nothing new does nothing
         JSONObject again = new VerifyJob(dir, v, new AtomicBoolean()).run(0, 0, null);
         assertEquals(2, again.getInt("checked"));  // still unverified in reels.json (page not opened): answered from the cache
-        assertEquals(1, net.count("themoviedb.org"));
+        assertEquals(1, net.count("search/multi"));
     }
 
     @Test
@@ -335,5 +335,64 @@ public class TitleVerifierTest {
         JSONObject s2 = new VerifyJob(dir, new TitleVerifier(new FakeNet(), new FakeClock(), "k", stop), stop).run(0, 0, null);
         assertTrue(s2.getBoolean("stopped"));
         assertNotNull(VerifyJob.take(dir));
+    }
+
+    @Test
+    public void lengthsComeFromEachSource() throws Exception {
+        assertEquals(90, TitleVerifier.jikanMinutes("1 hr 30 min"));
+        assertEquals(24, TitleVerifier.jikanMinutes("24 min per ep"));
+        assertEquals(0, TitleVerifier.jikanMinutes("Unknown"));
+        JSONObject claims = new JSONObject().put("P2047", new JSONArray().put(new JSONObject().put("mainsnak", new JSONObject()
+                .put("datavalue", new JSONObject().put("value", new JSONObject().put("amount", "+88").put("unit", "http://www.wikidata.org/entity/Q7727"))))));
+        assertEquals(88, TitleVerifier.wdMinutes(claims));
+
+        FakeNet net = new FakeNet().on("3/movie/27205?", "{\"runtime\":148}").on("3/tv/1399?", "{\"episode_run_time\":[],\"last_episode_to_air\":{\"runtime\":68},\"number_of_episodes\":73}")
+                .on("Media(id:", "{\"data\":{\"Media\":{\"duration\":24,\"episodes\":12}}}");
+        TitleVerifier v = new TitleVerifier(net, new FakeClock(), "k", null);
+        Map<String, String> ext = new java.util.HashMap<>();
+        ext.put("tmdb", "movie/27205");
+        assertEquals(148, v.details(ext)[0]);
+        ext.put("tmdb", "tv/1399");
+        int[] got = v.details(ext);
+        assertEquals(68, got[0]);
+        assertEquals(73, got[1]);
+        Map<String, String> an = new java.util.HashMap<>();
+        an.put("anilist", "21");
+        assertEquals(24, v.details(an)[0]);
+        Map<String, String> bad = new java.util.HashMap<>();
+        bad.put("tmdb", "movie/1?x=");  // not an id: nothing is asked
+        int before = net.calls.size();
+        assertEquals(0, v.details(bad)[0]);
+        assertEquals(before, net.calls.size());
+    }
+
+    @Test
+    public void aVerifiedMovieGetsItsLength() throws Exception {
+        FakeNet net = new FakeNet().on("3/movie/27205?", "{\"runtime\":148}")
+                .on("search/multi", tmdb(tmdbMovie(27205, "Inception", "2010-07-15", "en", "/i.jpg", 28)));
+        TitleVerifier v = new TitleVerifier(net, new FakeClock(), "k", null);
+        TitleVerifier.Candidate c = TitleVerifier.Candidate.from(new JSONObject().put("id", "m1").put("title", "Inception").put("type", "movie").put("year", 2010));
+        JSONObject r = v.verify(c);
+        assertEquals("verified", r.getString("verdict"));
+        assertEquals(148, r.getJSONObject("facts").getInt("runtime"));
+    }
+
+    @Test
+    public void titlesCheckedBeforeGetTheirLengthOnce() throws Exception {
+        File dir = tmp.newFolder();
+        long now = System.currentTimeMillis();
+        JSONArray media = new JSONArray()
+                .put(entry("m-old", "Inception", "verified", now).put("ext", new JSONObject().put("tmdb", "movie/27205")))
+                .put(entry("m-has", "Heat", "verified", now).put("runtime", 170).put("ext", new JSONObject().put("tmdb", "movie/949")))
+                .put(entry("m-tried", "Up", "verified", now).put("runtime_tried", now).put("ext", new JSONObject().put("tmdb", "movie/14160")))
+                .put(entry("m-book", "Dune", "verified", now).put("type", "book").put("ext", new JSONObject().put("anilist", "5")));
+        writeDb(dir, media);
+        FakeNet net = new FakeNet().on("3/movie/27205?", "{\"runtime\":148}");
+        JSONObject sum = new VerifyJob(dir, new TitleVerifier(net, new FakeClock(), "k", null), new AtomicBoolean()).run(0, 0, null);
+        assertEquals(1, sum.getInt("lengths"));
+        assertEquals(1, net.calls.size());
+        JSONObject taken = new JSONObject(VerifyJob.take(dir));
+        assertEquals("details", taken.getJSONObject("m-old").getString("verdict"));
+        assertEquals(148, taken.getJSONObject("m-old").getInt("runtime"));
     }
 }

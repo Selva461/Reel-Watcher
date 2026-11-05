@@ -5,8 +5,10 @@
 const Notes = (() => {
   const FORMAT = [
     "TOPIC: one short line",
+    "INTENT: what the creator is really trying to say or get you to do (the goal behind the reel)",
+    "TONE: sincere, sarcastic, joking or mixed, and why; if sarcastic or joking, what they actually mean",
     "POINTS:",
-    "1. every point in the order it comes, with the names, numbers, tools and steps it mentions",
+    "1. every useful point in the order it comes, as the creator really means it (turn sarcasm or a bad example into the real advice), with the names, numbers, tools and steps it mentions",
     "2. ...",
     "MEANING: what it means, in simple words",
     "USE IT FOR: when and how I can use this",
@@ -20,7 +22,10 @@ const Notes = (() => {
     "Answer in plain text in exactly this format:\n\n" + FORMAT;
 
   const LOCAL_SYSTEM = "You write short, accurate notes about Instagram reels. Use only the text you are given. " +
-    "If something is not in the text, leave it out instead of guessing. Answer in English.";
+    "Creators often use sarcasm, irony or act out a bad example to make a point: work out what they really mean and " +
+    "write the real message, not the joke. If the reel is just a joke or meme, explain the joke in one or two lines in INTENT. " +
+    "Comments from viewers can explain what the reel means. If something is not in what you are given, leave it out " +
+    "instead of guessing. Answer in English.";
 
   // ---------------------------------------------------------------- reel links
 
@@ -52,7 +57,8 @@ const Notes = (() => {
 
   const KEYS = [["topic", "TOPIC"], ["points", "POINTS"], ["meaning", "MEANING"], ["use", "USE IT FOR"], ["tools", "TOOLS"],
     ["takeaway", "TAKEAWAY"], ["tags", "TAGS"]];
-  const ALIASES = { topic: "topic", title: "topic", points: "points", point: "points", "key points": "points", "main points": "points",
+  const ALIASES = { topic: "topic", title: "topic", intent: "intent", goal: "intent", purpose: "intent", "real message": "intent",
+    tone: "tone", points: "points", point: "points", "key points": "points", "main points": "points",
     meaning: "meaning", "what it means": "meaning", "use it for": "use", "use for": "use", "uses": "use", "use cases": "use",
     tools: "tools", tool: "tools", "tools mentioned": "tools", takeaway: "takeaway", takeaways: "takeaway", "key takeaway": "takeaway",
     tags: "tags", tag: "tags", hashtags: "tags" };
@@ -89,6 +95,8 @@ const Notes = (() => {
     if (found.length < 2 || !(raw.topic || raw.points)) return null;
     const n = {
       topic: para(raw.topic || []),
+      intent: para(raw.intent || []),
+      tone: para(raw.tone || []),
       points: lines(raw.points || []),
       meaning: para(raw.meaning || []),
       use: lines(raw.use || []),
@@ -123,7 +131,10 @@ const Notes = (() => {
   /** The notes back as text, in the same format (to copy or export). */
   function format(n) {
     if (!n) return "";
-    const out = [`TOPIC: ${n.topic || ""}`, "POINTS:"];
+    const out = [`TOPIC: ${n.topic || ""}`];
+    if (n.intent) out.push(`INTENT: ${n.intent}`);
+    if (n.tone) out.push(`TONE: ${n.tone}`);
+    out.push("POINTS:");
     (n.points || []).forEach((p, i) => out.push(`${i + 1}. ${p}`));
     out.push(`MEANING: ${n.meaning || ""}`);
     if ((n.use || []).length > 1) { out.push("USE IT FOR:"); n.use.forEach((u) => out.push(`- ${u}`)); } else out.push(`USE IT FOR: ${(n.use || [])[0] || ""}`);
@@ -151,7 +162,7 @@ const Notes = (() => {
     return `${head}\n\n${FORMAT}\n\nThe reels:\n${reels.map((r, i) => `${i + 1}. ${r.url}`).join("\n")}`;
   }
 
-  function localPrompt(reel, extra) {
+  function localPrompt(reel, extra, opts = {}) {
     const yt = isYoutube(reel);
     const parts = [yt ? "Here is a YouTube video (title, description and what is said in it)." : "Here is what could be read from an Instagram reel."];
     if (reel.url) parts.push(`Link: ${reel.url}`);
@@ -159,7 +170,9 @@ const Notes = (() => {
     if (reel.author) parts.push(`Creator: ${yt ? "" : "@"}${reel.author}`);
     if (reel.caption) parts.push(`${yt ? "Description" : "Caption"}:\n${reel.caption.slice(0, 3000)}`);
     if (reel.transcript) parts.push(`What is said (transcript):\n${condense(reel.transcript, 7000)}`);
-    if (reel.onscreen) parts.push(`Text shown in the reel (cover picture):\n${reel.onscreen.slice(0, 2000)}`);
+    if (reel.onscreen) parts.push(`Text shown on screen in the reel:\n${reel.onscreen.slice(0, 2000)}`);
+    if (reel.comments) parts.push(`Top comments from viewers:\n${reel.comments.slice(0, 2500)}`);
+    if (opts.media) parts.splice(1, 0, "You also get pictures from the reel (key frames) and its first 30 seconds of sound: use them.");
     if (reel.extra) parts.push(`What the reel says (typed by me):\n${reel.extra.slice(0, 6000)}`);
     parts.push(`Write notes in exactly this format:\n\n${FORMAT}`);
     if (extra && extra.trim()) parts.push(`Also: ${extra.trim()}`);
@@ -168,7 +181,7 @@ const Notes = (() => {
 
   /** How much there is to write notes from (the phone's AI cannot watch the video). */
   function material(reel) {
-    return ((reel.title || "") + " " + (reel.caption || "") + " " + (reel.transcript || "") + " " + (reel.onscreen || "") + " " + (reel.extra || "")).replace(/#\S+/g, "").trim().length;
+    return ((reel.title || "") + " " + (reel.caption || "") + " " + (reel.transcript || "") + " " + (reel.onscreen || "") + " " + (reel.comments || "") + " " + (reel.extra || "")).replace(/#\S+/g, "").trim().length;
   }
 
   // ---------------------------------------------------------------- YouTube: title, description, transcript (no key, no login)
@@ -599,6 +612,13 @@ const Notes = (() => {
     const doc = new DOMParser().parseFromString(String(html || ""), "text/html");  // inert: nothing in it runs
     const out = {};
     doc.querySelectorAll("script, style, noscript, template").forEach((x) => x.remove());
+    // the reel's video file, when Instagram puts it in the page for logged-out visitors
+    const raw = String(html || "");
+    const vm = raw.match(/\\?"video_url\\?"\s*:\s*\\?"(https:[^"\\]*(?:\\.[^"\\]*)*)/) || raw.match(/<video[^>]+src="(https:[^"]+)"/);
+    if (vm) {
+      const u = vm[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\/g, "").replace(/&amp;/g, "&");
+      if (/^https:\/\/[^/]+\.(cdninstagram\.com|fbcdn\.net)\//.test(u)) out.video = u;
+    }
     const img = doc.querySelector("img.EmbeddedMediaImage, .EmbeddedMedia img");
     if (img) {
       const src = img.getAttribute("src") || "";
@@ -776,7 +796,31 @@ const Notes = (() => {
     return out;
   }
 
-  return { FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, material, embedUrl, readPage,
+  // ---------------------------------------------------------------- useful or fun (keywords, no AI)
+  const USEFUL = /\b(how to|how i|tips?|steps?|guide|tutorial|learn|lesson|explained?|hack|tool|app|website|free|ai|chatgpt|code|coding|python|excel|money|invest|finance|budget|career|interview|resume|job|business|marketing|health|workout|exercise|diet|protein|recipe|study|productiv\w*|habit|mistakes?|avoid|don'?t|should|must|best way|secret|framework|checklist|save this|bookmark|book|course|skill|science|fact|psychology|mindset|advice|lifehack|setup|settings|feature|shortcut|prompt|security|privacy)\b|\b\d+\s+(ways|things|tips|steps|tools|apps|books|mistakes|habits|rules)\b|^\s*\d+[.)]\s/gim;
+  const FUN = /\b(lol|lmao|haha+|funny|meme|memes|prank|relatable|pov|comedy|comedian|joke|jokes|skit|dance|dancing|vibe|vibes|trend|trending|song|music|edit|edits|fyp|cute|aesthetic|bestie|couple|crush|savage|cringe|roast|fail|fails)\b|😂|🤣|💀|😭/gi;
+  /** "useful" (advice, how-to, facts, tools) or "fun" (jokes, memes, music, edits) from the caption and text, no AI. */
+  function reelKind(r) {
+    const t = [r.caption, r.onscreen, r.transcript, (r.collections || []).join(" ")].filter(Boolean).join("\n");
+    if (!t.trim()) return "useful";  // nothing to go on: read it to find out
+    const u = (t.match(USEFUL) || []).length;
+    const f = (t.match(FUN) || []).length;
+    return f > u ? "fun" : "useful";
+  }
+
+  // ---------------------------------------------------------------- comments (from your screenshots or "Read while I scroll")
+  const COMMENT_NOISE = /^(reply|replies|see translation|view \d+ more repl\w*|view replies.*|hide replies|liked by.*|add a comment.*|comments?|\d+[smhdw]|\d+\s*(likes?|replies)|author|pinned|edited|top comments?|newest|for you)$/i;
+  /** Is this text an Instagram comment screen? */
+  function isCommentScreen(lines) {
+    const t = lines.join("\n");
+    return (/(^|\n)\s*comments?\s*($|\n)/i.test(t) || /add a comment/i.test(t)) && (t.match(/(^|\n)\s*reply\s*($|\n)/gi) || []).length >= 2;
+  }
+  /** The comments themselves from a comment screen's lines (buttons, times and counts dropped). */
+  function commentLines(lines) {
+    return lines.map((l) => String(l).trim()).filter((l) => l.length > 2 && !COMMENT_NOISE.test(l) && !/^\d+[smhdw]\b/.test(l) && !/^@?[a-z0-9_.]{3,30}$/i.test(l));
+  }
+
+  return { reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, material, embedUrl, readPage,
     ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
     YT_CLIENTS, condense, search, answerPrompt, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
     exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS };

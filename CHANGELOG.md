@@ -5,6 +5,38 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.0
+- Reels are read for real, all on the phone. When Instagram gives the video (logged out), Reel Shelf reads the text on
+  screen (a frame every 2 seconds) and what is said (offline speech to text, about 40 MB, Settings, What reels say).
+  With Gemma 4 E2B (recommended, 2.6 GB) or E4B (best, 3.7 GB) the AI also looks at key frames and listens to the
+  sound, then writes ONE note: what the creator really means (INTENT), the TONE (sincere, sarcastic, joking) and the
+  real points. Memes get the joke explained. Reels without a video say "Read from: the caption only".
+- Useful reels are read first (newest first), then memes and fun reels. "Try on 5 reels first" on Start; the nightly
+  run only re-reads old reels after you tap Start yourself.
+- Comments: tap Add comments on a reel and pick screenshots of its comments, or switch on "Read while I scroll"
+  (Settings, Comments): an Accessibility helper that keeps Instagram comment screens while you scroll yourself. It never
+  taps or scrolls. Note: Play Protect and Android ("restricted settings") are strict with Accessibility helpers in apps
+  from outside the Play Store; it is off unless you switch it on. Comment screenshots in your Screenshots folder are
+  matched to their reel too.
+- Open in Instagram, then come back: Reel Shelf opens that reel with the next step (Add comments, Read this reel properly).
+- Battery: the nightly run only runs while charging (default), stops when unplugged, pauses when the phone is warm
+  (40°C) and reads at most 200 reels a night (Settings).
+- Screenshots: choose pictures, or share them from Gallery to Reel Shelf; "Read my screenshots" is on the Shelf too.
+- Ask Meta AI is hidden on reels unless switched on in Settings.
+- The APK is for 64-bit phones only (smaller download).
+- New, simpler layout: two tabs. **Library** holds everything (reels, quotes, movies, series, anime, manga) with
+  chips, To watch / Watching / Watched, and a filter button (status, language, genre, years, length, tag).
+  **Inbox** has today's shares, Start, Try 5, Screenshots, Comments, Add, tonight's run and what needs you.
+  The top bar has the search, filters, a mic and Settings.
+- Search understands everyday words without AI: "horror movie under 1.5 hours", "korean drama I haven't watched",
+  "anime from the 2010s", "funny reels about money". It shows what it understood. Titles without a known length are
+  listed separately, never mixed in. If the words are unclear and the phone AI is installed, it can turn them into
+  a search (nothing leaves the phone).
+- Speak your search: the mic uses Android's own speech recognizer (offline when the phone has the language pack);
+  Reel Shelf gets no microphone permission.
+- Lengths of movies and episodes come from TMDB, AniList, MyAnimeList and Wikidata. Titles checked before get their
+  length once, on the next Process or nightly check.
+
 ## 1.2.0
 - Play Protect: the app no longer has an Instagram sign-in page inside it, no Termux permission, no old server mode and
   no unencrypted (http) traffic. "Get my saved reels" opens Instagram's export page in Chrome; choose the ZIP in Add.

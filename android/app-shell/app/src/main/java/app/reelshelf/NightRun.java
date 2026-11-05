@@ -29,7 +29,9 @@ import java.util.function.Consumer;
  * and checks titles online. It shows the usual notification with Stop and ends by itself.
  */
 public class NightRun extends BroadcastReceiver {
-    static final String ON = "night_on", HOUR = "night_hour", MIN_BATTERY = "night_min_battery";
+    static final String ON = "night_on", HOUR = "night_hour", MIN_BATTERY = "night_min_battery", CHARGING_ONLY = "night_charging_only";
+    /** Battery temperature (°C) above which the run pauses for the night, so the phone and its battery stay cool. */
+    static final int HOT_C = 40;
     private static final String ACTION = "app.reelshelf.NIGHT_RUN";
 
     static SharedPreferences prefs(Context c) {
@@ -42,6 +44,18 @@ public class NightRun extends BroadcastReceiver {
 
     static int hour(Context c) {
         return prefs(c).getInt(HOUR, 0);
+    }
+
+    /** Only while the phone is charging (on unless switched off in Settings): easiest on a worn battery. */
+    static boolean chargingOnly(Context c) {
+        return prefs(c).getBoolean(CHARGING_ONLY, true);
+    }
+
+    /** Battery temperature in °C, or -1. */
+    static int temperature(Context c) {
+        Intent b = c.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        int t = b == null ? -1 : b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1);
+        return t < 0 ? -1 : t / 10;
     }
 
     static int minBattery(Context c) {
@@ -92,7 +106,9 @@ public class NightRun extends BroadcastReceiver {
         schedule(c);  // the next night, whatever happens tonight
         if (!on(c)) return;
         int[] b = battery(c);
+        if (b[1] == 0 && chargingOnly(c)) return;  // not on the charger tonight: skipped
         if (b[0] >= 0 && b[0] < minBattery(c) && b[1] == 0) return;  // too low tonight: skipped
+        if (temperature(c) >= HOT_C) return;  // already warm: skipped
         WorkService.startNight(c);
     }
 
@@ -142,7 +158,8 @@ public class NightRun extends BroadcastReceiver {
             if (done) return;
             int[] b = battery(ctx);
             int floor = Math.max(15, minBattery(ctx) - 20);
-            if (b[0] >= 0 && b[0] < floor && b[1] == 0) {
+            boolean unplugged = b[1] == 0 && chargingOnly(ctx);
+            if ((b[0] >= 0 && b[0] < floor && b[1] == 0) || unplugged || temperature(ctx) >= HOT_C + 2) {
                 callPage("window.stopAllWork && stopAllWork()");
                 ui.postDelayed(this::nightDone, 5000);
                 return;
@@ -169,6 +186,8 @@ public class NightRun extends BroadcastReceiver {
         @Override public void openExternal(Uri u) { }
         @Override public void pickModelFile(Consumer<Uri> cb) { cb.accept(null); }
         @Override public void pickFolder(Consumer<Uri> cb) { cb.accept(null); }
+        @Override public void pickImages(Consumer<java.util.List<Uri>> cb) { cb.accept(null); }
+        @Override public void listen(Consumer<String> cb) { cb.accept(null); }
         @Override public void sendToLens(Uri uri) { }
         @Override public void keepScreenOn(boolean on) { }
         @Override public String displayName(Uri uri) { return uri.getLastPathSegment(); }

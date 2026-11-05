@@ -46,7 +46,7 @@ def start_db():
 def test_process_checks_titles_and_unsure_ones_are_yours_to_pick(phone):
     phone.route("https://image.tmdb.org/**", lambda r: r.fulfill(status=200, content_type="image/png", body=PNG))
     phone.open_with({"db": start_db(), "verifyAnswers": ANSWERS})
-    phone.goto(phone.url.split("#")[0] + "#/watch")
+    phone.goto(phone.url.split("#")[0] + "#/inbox")
     phone.get_by_role("link", name="Look up online").click()
     phone.get_by_role("button", name="Process: check 3 titles online").click()
     phone.get_by_text("1 verified, 1 to pick, 1 not found").wait_for()

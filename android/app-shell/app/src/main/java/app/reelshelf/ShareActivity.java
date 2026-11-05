@@ -2,8 +2,12 @@ package app.reelshelf;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.widget.Toast;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Receives "Share" from Instagram (a reel link) or from Meta AI (its answer). It only saves what was shared and closes
@@ -14,6 +18,23 @@ public class ShareActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Intent in = getIntent();
+        String type = in == null ? null : in.getType();
+        if (type != null && type.startsWith("image/")) {  // screenshots shared from the gallery: kept to be read
+            List<Uri> uris = new ArrayList<>();
+            if (Intent.ACTION_SEND_MULTIPLE.equals(in.getAction())) {
+                ArrayList<Uri> many = in.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+                if (many != null) uris.addAll(many);
+            } else {
+                Uri one = in.getParcelableExtra(Intent.EXTRA_STREAM);
+                if (one != null) uris.add(one);
+            }
+            int n = ScreenshotReader.addPictures(this, uris);
+            Toast.makeText(this, n == 0 ? "Could not keep those pictures"
+                    : n + (n == 1 ? " picture" : " pictures") + " saved. Open Reel Shelf, Start, Read my screenshots (or wait for the nightly run).",
+                    Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
         String text = null;
         if (in != null && Intent.ACTION_SEND.equals(in.getAction())) {
             CharSequence t = in.getCharSequenceExtra(Intent.EXTRA_TEXT);

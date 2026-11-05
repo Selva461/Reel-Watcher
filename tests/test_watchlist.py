@@ -72,22 +72,26 @@ def test_watchlist_screen_filters_and_detail(phone):
     phone.open_with()
     db = phone.evaluate(TWENTY)
     db["reels"] = [{"code": "reel-Heat", "url": "https://www.instagram.com/reel/reel-Heat/", "status": "new", "added_at": 1}]
-    phone.open_with({"db": json.dumps(db)}, "#/watch")
-    phone.get_by_role("heading", name="Watchlist").wait_for()
-    phone.get_by_text("23 titles").wait_for()
-    phone.locator('[data-wf="language"]').select_option("en")
-    phone.get_by_text("20 titles of 23").wait_for()
-    phone.get_by_role("button", name="To read 0").wait_for()  # counts follow the other filters
-    phone.locator('[data-wf="source"]').select_option("reel")
-    phone.get_by_text("13 titles of 23").wait_for()  # 3 screenshot titles were also in reels
-    phone.get_by_role("button", name="Clear filters").click()
-    phone.get_by_role("button", name="Manhwa 1").click()
-    phone.get_by_text("1 title of 23").wait_for()
-    phone.get_by_role("button", name="Clear filters").click()
-    phone.locator("#wq").fill("intersteller")  # one typo is fine
-    phone.locator("#wlist").get_by_text("Interstellar", exact=True).wait_for()
-    phone.locator("#wq").fill("heat two")
-    phone.locator("#wlist a").first.click()
+    phone.open_with({"db": json.dumps(db)}, "#/")
+    rows = lambda n: phone.wait_for_function(f"() => document.querySelectorAll('#results a.list-item').length === {n}")
+    phone.locator('[data-kind="movies"]').click()
+    rows(21)  # 20 English movies and Parasite; the anime and the manhwa have their own chips
+    phone.locator("#filt").click()
+    phone.locator('[data-f="language"]').select_option("en")
+    rows(20)
+    phone.locator('[data-f="source"]').select_option("reel")
+    rows(13)  # 3 screenshot titles were also in reels
+    assert phone.evaluate("!document.getElementById('fdot').hidden")  # the filter icon shows a dot while filters are on
+    phone.locator("#fclear").click()
+    rows(21)
+    phone.locator('[data-kind="manga"]').click()
+    rows(1)
+    phone.locator('[data-kind="all"]').click()
+    phone.locator("#tq").fill("intersteller")  # one typo is fine
+    phone.locator("#results").get_by_text("Interstellar", exact=True).wait_for()
+    phone.locator("#tq").fill("heat two")
+    phone.wait_for_function("() => (document.querySelector('#results a.list-item .title') || {}).textContent === 'Heat Two'")
+    phone.locator("#results a.list-item").first.click()
     phone.get_by_role("heading", name="Heat Two").wait_for()
     phone.get_by_role("button", name="Finished").click()
     phone.get_by_role("button", name="It is right").click()
@@ -119,10 +123,105 @@ def test_add_title_by_hand_from_a_reel_and_export(phone):
 
 
 def test_watch_addcandidate_for_the_extraction_step(phone):
-    phone.open_with(None, "#/watch")
-    phone.get_by_text("No titles yet").wait_for()
+    phone.open_with(None, "#/")
+    phone.locator("#results").wait_for()
     phone.evaluate("""Watch.addCandidate({ title: "Spirited Away", type: "anime movie", year: 2001, language: "japanese", confidence: 0.7,
                        source: { kind: "screenshot", ref: "content://shot/1", method: "hashtag", text: "#spiritedaway" } })""")
     phone.get_by_text("Spirited Away").wait_for()  # the open list refreshes
     m = db_of(phone)["media"][0]
     assert m["type"] == "anime_movie" and m["language"] == "ja" and m["verified"] == "unverified" and m["confidence"] == 0.7
+
+
+SEARCH_DB = """(() => {
+  const db = { media: [], reels: [], quotes: [] };
+  const add = (title, type, genres, runtime, status, year, language, episodes) => {
+    const m = Catalog.add(db, { title, type, year, language: language || "en" }).entry;
+    m.genres = genres; if (runtime) m.runtime = runtime; if (status) m.status = status; if (episodes) m.episodes = episodes;
+    m.verified = runtime ? "verified" : "unverified";
+  };
+  add("Hereditary", "movie", ["Horror", "Mystery"], 127, "", 2018);
+  add("The Babadook", "movie", ["Horror", "Drama"], 94, "", 2014);
+  add("Host", "movie", ["Horror"], 57, "", 2020);
+  add("Barbarian", "movie", ["Horror", "Thriller"], 102, "done", 2022);
+  add("Talk to Me", "movie", ["Horror"], 0, "", 2023);
+  add("Kingdom", "kdrama", ["Horror", "Drama"], 50, "", 2019, "ko", 12);
+  add("Inception", "movie", ["Science fiction", "Action"], 148, "done", 2010);
+  add("Another", "anime", ["Horror", "Mystery", "Supernatural"], 24, "", 2012, "ja", 12);
+  db.reels.push({ code: "HR1", url: "https://www.instagram.com/reel/HR1/", status: "done", added_at: 5,
+    notes: { topic: "How horror movies use sound", points: ["Low drones make you uneasy"], tags: ["horror", "filmmaking"] }, notes_by: "phone" });
+  db.quotes.push({ id: "q1", text: "We all go a little mad sometimes", from: "Psycho", at: 3 });
+  return db;
+})()"""
+
+
+def test_everyday_words_become_filters(phone):
+    phone.open_with()
+    got = phone.evaluate("""(() => { const P = (q) => { const p = Search.parse(q, new Date(2026, 10, 5));
+        return { types: p.types, g: p.genres.map(x => x.label), max: p.maxMin, min: p.minMin, lang: p.language, st: p.status, yf: p.yearFrom, yt: p.yearTo, text: p.text, kinds: p.kinds }; };
+      return {
+        a: P("I want to watch a movie where it is a horror movie and under 1.5 hours"),
+        b: P("korean drama I haven't watched"), c: P("anime from the 2010s"), d: P("funny reels about money"),
+        e: P("thriller between 1 and 2 hours"), f: P("comedy film in hindi 1h30 or less"), g: P("scary anime movie around 2 hours"),
+        h: P("sci-fi series after 2015 already watched"), i: P("movies -horror"), j: P("an hour and a half max romcom"), k: P("recent tamil movies"),
+        l: P("quotes about love"), m: P("inception") }; })()""")
+    a = got["a"]
+    assert a["g"] == ["Horror"] and a["max"] == 90 and "movie" in a["types"] and a["st"] == "" and a["text"] == ""  # "want to watch" is not a filter
+    assert got["b"]["types"] == ["kdrama"] and got["b"]["st"] == "want"
+    assert got["c"]["types"] == ["anime", "anime_movie"] and (got["c"]["yf"], got["c"]["yt"]) == (2010, 2019)
+    assert got["d"]["kinds"] == ["reels"] and got["d"]["g"] == ["Comedy"] and got["d"]["text"] == "money"
+    assert (got["e"]["min"], got["e"]["max"]) == (60, 120) and got["e"]["g"] == ["Thriller"]
+    assert got["f"]["max"] == 90 and got["f"]["lang"] == "hi" and got["f"]["g"] == ["Comedy"]
+    assert got["g"]["types"] == ["anime_movie"] and (got["g"]["min"], got["g"]["max"]) == (102, 138)
+    assert got["h"]["g"] == ["Science fiction"] and got["h"]["st"] == "done" and got["h"]["yf"] == 2016
+    assert got["i"]["g"] == [] and got["i"]["text"] == "-horror"  # leave-out words stay operators
+    assert got["j"]["max"] == 90 and set(got["j"]["g"]) == {"Romance", "Comedy"}
+    assert got["k"]["lang"] == "ta" and got["k"]["yf"] == 2023
+    assert got["l"]["kinds"] == ["quotes"] and got["l"]["text"] == "love"
+    assert got["m"]["text"] == "inception" and got["m"]["types"] is None
+
+
+def test_search_horror_under_ninety_minutes(phone):
+    phone.open_with()
+    db = phone.evaluate(SEARCH_DB)
+    got = phone.evaluate(f"""(() => {{ const db = {SEARCH_DB}; const T = (q, f) => {{ const r = Search.run(db, q, f || {{}});
+        return {{ media: r.media.map(m => m.title), noLength: r.noLength.map(m => m.title), reels: r.reels.map(h => h.reel.code), quotes: r.quotes.map(x => x.id) }}; }};
+      return {{ a: T("I want to watch a horror movie under 1.5 hours"), b: T("horror movie under 2 hours not watched"), c: T("horror"),
+               d: T("movies -horror"), e: T("korean drama"), f: T("horror", {{ kind: "anime" }}), g: T("mad"), h: T("series under an hour") }}; }})()""")
+    assert got["a"]["media"] == ["Host"] and got["a"]["noLength"] == ["Talk to Me"] and got["a"]["reels"] == []
+    assert got["b"]["media"] == ["Host", "The Babadook"]  # Barbarian is watched
+    assert set(got["c"]["media"]) == {"Hereditary", "The Babadook", "Host", "Barbarian", "Talk to Me", "Kingdom", "Another"}
+    assert got["c"]["reels"] == ["HR1"]  # plain words search reels too
+    assert got["c"]["media"][-1] == "Barbarian"  # titles you watched come last
+    assert got["d"]["media"] == ["Inception"]
+    assert got["e"]["media"] == ["Kingdom"]
+    assert got["f"]["media"] == ["Another"]
+    assert got["g"]["quotes"] == ["q1"]
+    assert set(got["h"]["media"]) == {"Kingdom", "Another"}  # one episode's length
+
+    phone.open_with({"db": json.dumps(db)}, "#/")
+    phone.locator("#tq").fill("horror movie under 1.5 hours")
+    phone.wait_for_function("() => document.querySelectorAll('#results > a.list-item').length === 1")
+    phone.locator("#results").get_by_text("Host", exact=True).wait_for()
+    assert phone.locator("#understood .tag").all_inner_texts() == ["≤ 1h 30m", "movie", "Horror"]
+    phone.locator("#results summary").get_by_text("+1 · length unknown (1 not checked online yet)").wait_for()
+    phone.locator("#results a.list-item").first.click()
+    phone.get_by_role("heading", name="Host").wait_for()
+    phone.get_by_text("57m").wait_for()
+
+
+def test_voice_search_and_the_inbox(phone):
+    phone.open_with()
+    db = phone.evaluate(SEARCH_DB)
+    db["reels"].append({"code": "NEW1", "url": "https://www.instagram.com/reel/NEW1/", "status": "new", "added_at": 4102444800000, "caption": "Fresh one"})
+    phone.open_with({"db": json.dumps(db), "said": "korean drama"}, "#/inbox")
+    phone.get_by_role("button", name="Start 1", exact=True).wait_for()
+    phone.get_by_role("link", name="Screenshots").wait_for()
+    phone.get_by_role("button", name="Comments").wait_for()
+    phone.locator("#ibadge").get_by_text("1").wait_for()
+    phone.locator(".list-item", has_text="Fresh one").wait_for()  # today's share
+    phone.locator("#mic").click()
+    phone.wait_for_url("**#/")
+    phone.locator("#results").get_by_text("Kingdom", exact=True).wait_for()
+    assert phone.locator("#tq").input_value() == "korean drama"
+    assert ["listen"] in phone.rn()["calls"]
+    assert phone.evaluate("document.documentElement.scrollWidth") <= 390

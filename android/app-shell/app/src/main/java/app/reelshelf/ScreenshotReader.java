@@ -26,8 +26,12 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayDeque;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -116,8 +120,61 @@ final class ScreenshotReader {
         return c >= 0 ? docId.substring(c + 1) : docId;
     }
 
-    /** A picture may be read only when it is inside a folder you picked. */
+    // ------------------------------------------------------------------ pictures you chose or shared one by one
+
+    /** Pictures you chose in Reel Shelf or shared to it are copied here (the app's own storage, nobody else's). */
+    static File inbox(Context c) {
+        File d = new File(c.getFilesDir(), "shot-inbox");
+        if (!d.isDirectory()) d.mkdirs();
+        return d;
+    }
+
+    private static final long MAX_PICTURE = 30L * 1024 * 1024;
+
+    /** Copies pictures (from the picker or Share) into the inbox. Returns how many were copied. */
+    static int addPictures(Context c, List<Uri> uris) {
+        if (uris == null) return 0;
+        File dir = inbox(c);
+        int n = 0;
+        long now = System.currentTimeMillis();
+        for (Uri u : uris) {
+            if (u == null || n >= 2000) continue;
+            String type = c.getContentResolver().getType(u);
+            if (type != null && !type.startsWith("image/")) continue;
+            String ext = type != null && type.endsWith("png") ? ".png" : type != null && type.endsWith("webp") ? ".webp" : ".jpg";
+            File out = new File(dir, "shot_" + now + "_" + n + ext);
+            try (InputStream in = c.getContentResolver().openInputStream(u); OutputStream o = new FileOutputStream(out)) {
+                if (in == null) continue;
+                byte[] buf = new byte[65536];
+                long total = 0;
+                int r;
+                while ((r = in.read(buf)) > 0) {
+                    total += r;
+                    if (total > MAX_PICTURE) throw new Exception("too big");
+                    o.write(buf, 0, r);
+                }
+                n++;
+            } catch (Exception e) {
+                out.delete();
+            }
+        }
+        return n;
+    }
+
+    private boolean inInbox(String key) {
+        try {
+            String p = Uri.parse(key).getPath();
+            if (p == null) return false;
+            File f = new File(p).getCanonicalFile();
+            return f.getParentFile() != null && f.getParentFile().equals(inbox(ctx).getCanonicalFile());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** A picture may be read only when it is inside a folder you picked, or one you chose or shared yourself. */
     boolean allowed(String key) {
+        if (key != null && key.startsWith("file://")) return inInbox(key);
         if (key == null || !key.startsWith("content://")) return false;
         JSONArray all = folders();
         for (int i = 0; i < all.length(); i++) {
@@ -132,6 +189,19 @@ final class ScreenshotReader {
     /** Every picture in the picked folders (and their sub-folders): [{k, n, f, m, s}], newest first is not guaranteed. */
     JSONArray list() throws JSONException {
         JSONArray out = new JSONArray();
+        File[] mine = inbox(ctx).listFiles();
+        if (mine != null) {
+            for (File f : mine) {
+                if (!f.isFile()) continue;
+                JSONObject o = new JSONObject();
+                o.put("k", Uri.fromFile(f).toString());
+                o.put("n", f.getName());
+                o.put("f", "Chosen pictures");
+                o.put("m", f.lastModified());
+                o.put("s", f.length());
+                out.put(o);
+            }
+        }
         ContentResolver cr = ctx.getContentResolver();
         JSONArray all = folders();
         for (int i = 0; i < all.length() && !stop; i++) {
@@ -261,18 +331,23 @@ final class ScreenshotReader {
         Bitmap bm = BitmapFactory.decodeByteArray(data, 0, data.length, o);
         if (bm == null) throw new Exception("could not open the picture");
         try {
-            Text text = Tasks.await(recognizer().process(InputImage.fromBitmap(bm, 0)), 30, TimeUnit.SECONDS);
-            StringBuilder out = new StringBuilder();
-            for (Text.TextBlock block : text.getTextBlocks()) {
-                for (Text.Line line : block.getLines()) {
-                    String t = line.getText();
-                    if (t != null && !t.trim().isEmpty()) out.append(t.trim()).append('\n');
-                }
-            }
-            return out.toString().trim();
+            return textOf(bm);
         } finally {
             bm.recycle();
         }
+    }
+
+    /** The text in a bitmap (a video frame or a picture), lines joined with newlines; "" when none. */
+    String textOf(Bitmap bm) throws Exception {
+        Text text = Tasks.await(recognizer().process(InputImage.fromBitmap(bm, 0)), 30, TimeUnit.SECONDS);
+        StringBuilder out = new StringBuilder();
+        for (Text.TextBlock block : text.getTextBlocks()) {
+            for (Text.Line line : block.getLines()) {
+                String t = line.getText();
+                if (t != null && !t.trim().isEmpty()) out.append(t.trim()).append('\n');
+            }
+        }
+        return out.toString().trim();
     }
 
     /** A small preview (data: URL), so you can see which screenshot a name came from. */

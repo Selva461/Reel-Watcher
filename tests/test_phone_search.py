@@ -114,8 +114,8 @@ def test_ask_screen_topics_did_you_mean_and_marks(phone):
     assert phone.evaluate("document.documentElement.scrollWidth") <= 390
     # the shelf search box takes the same operators
     phone.goto(phone.url.split("#")[0] + "#/")
-    phone.fill("#q", "password -manager")
-    assert phone.locator("#list .list-item").count() == 2
+    phone.fill("#tq", "password -manager")
+    phone.wait_for_function("() => document.querySelectorAll('#results a.list-item').length === 2")
 
 
 def test_big_library_stays_fast(phone):

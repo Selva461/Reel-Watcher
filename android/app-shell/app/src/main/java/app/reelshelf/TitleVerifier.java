@@ -197,6 +197,8 @@ final class TitleVerifier {
         Map<String, String> ext = new HashMap<>();
         int rank;             // position in the source's own answer (0 = its best guess)
         boolean adult;
+        int runtime;          // minutes (a movie's length, or one episode's)
+        int episodes;
         double score;
         double titleScore;
 
@@ -215,6 +217,8 @@ final class TitleVerifier {
             if (!genres.isEmpty()) f.put("genres", new JSONArray(genres));
             if (!poster.isEmpty()) f.put("poster", poster);
             if (!overview.isEmpty()) f.put("overview", overview.length() > 1500 ? overview.substring(0, 1500) : overview);
+            if (runtime > 0) f.put("runtime", runtime);
+            if (episodes > 0) f.put("episodes", episodes);
             JSONArray aka = new JSONArray();
             for (String n : names) if (!TitleMatch.norm(n).equals(TitleMatch.norm(title)) && aka.length() < 8) aka.put(n);
             if (aka.length() > 0) f.put("aka", aka);
@@ -362,6 +366,29 @@ final class TitleVerifier {
         return "";
     }
 
+    /** Wikidata "duration" (P2047) in minutes, or 0. */
+    static int wdMinutes(JSONObject claims) {
+        JSONArray a = claims.optJSONArray("P2047");
+        if (a == null) return 0;
+        for (int i = 0; i < a.length(); i++) {
+            JSONObject v = a.optJSONObject(i) == null ? null : a.optJSONObject(i).optJSONObject("mainsnak");
+            JSONObject dv = v == null ? null : v.optJSONObject("datavalue");
+            JSONObject vo = dv == null ? null : dv.optJSONObject("value");
+            if (vo == null) continue;
+            double n;
+            try {
+                n = Double.parseDouble(vo.optString("amount").replace("+", ""));
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            String unit = vo.optString("unit");
+            if (unit.endsWith("/Q7727")) return (int) Math.round(n);          // minutes
+            if (unit.endsWith("/Q25235")) return (int) Math.round(n * 60);    // hours
+            if (unit.endsWith("/Q11574")) return (int) Math.round(n / 60);    // seconds
+        }
+        return 0;
+    }
+
     private static List<String> wdIds(JSONObject claims, String prop) {
         List<String> out = new ArrayList<>();
         JSONArray a = claims.optJSONArray(prop);
@@ -426,6 +453,7 @@ final class TitleVerifier {
             if (mal.isEmpty()) mal = wdFirstId(claims, "P4087");
             if (!mal.isEmpty()) m.ext.put("mal", mal);
             m.url = "https://www.wikidata.org/wiki/" + id;
+            m.runtime = wdMinutes(claims);
             m.rank = rank++;
             List<String> g = wdIds(claims, "P136");
             m.ext.put("_genres", String.join("|", g.subList(0, Math.min(5, g.size()))));
@@ -461,7 +489,7 @@ final class TitleVerifier {
             + "anime:Page(perPage:5){media(search:$s,type:ANIME,sort:SEARCH_MATCH){...f}}"
             + "manga:Page(perPage:5){media(search:$s,type:MANGA,sort:SEARCH_MATCH){...f}}}"
             + "fragment f on Media{id idMal type format title{romaji english native} synonyms startDate{year} countryOfOrigin "
-            + "genres coverImage{large} description(asHtml:false) siteUrl isAdult}";
+            + "genres coverImage{large} description(asHtml:false) siteUrl isAdult duration episodes}";
 
     static String anilistType(String type, String format, String country) {
         if ("ANIME".equals(type)) {
@@ -528,6 +556,8 @@ final class TitleVerifier {
                 m.overview = d.equals("null") ? "" : d.replaceAll("<[^>]+>", "").trim();
                 m.url = o.optString("siteUrl");
                 m.adult = o.optBoolean("isAdult");
+                m.runtime = o.optInt("duration", 0);
+                m.episodes = o.optInt("episodes", 0);
                 m.ext.put("anilist", m.id);
                 long mal = o.optLong("idMal", 0);
                 if (mal > 0) m.ext.put("mal", String.valueOf(mal));
@@ -536,6 +566,66 @@ final class TitleVerifier {
             }
         }
         return out;
+    }
+
+    // ------------------------------------------------------------------ length (runtime) of a known title
+
+    /** {minutes, episodes} from the title's ids (TMDB, AniList, MyAnimeList); zeros when no source knows. */
+    int[] details(Map<String, String> ext) throws IOException, JSONException {
+        int[] out = {0, 0};
+        String tm = ext.get("tmdb");
+        if (tm != null && !tmdbKey.isEmpty() && tm.matches("(movie|tv)/\\d+")) {
+            Map<String, String> h = new HashMap<>();
+            String url = "https://api.themoviedb.org/3/" + tm + "?language=en-US";
+            if (tmdbKey.startsWith("eyJ")) h.put("Authorization", "Bearer " + tmdbKey);
+            else url += "&api_key=" + q(tmdbKey);
+            String body = call(url, null, h);
+            if (!body.isEmpty()) {
+                JSONObject o = new JSONObject(body);
+                if (tm.startsWith("movie/")) out[0] = o.optInt("runtime", 0);
+                else {
+                    JSONArray rt = o.optJSONArray("episode_run_time");
+                    if (rt != null && rt.length() > 0) out[0] = rt.optInt(0, 0);
+                    JSONObject last = o.optJSONObject("last_episode_to_air");
+                    if (out[0] == 0 && last != null) out[0] = last.optInt("runtime", 0);
+                    out[1] = o.optInt("number_of_episodes", 0);
+                }
+            }
+        }
+        String an = ext.get("anilist");
+        if (out[0] == 0 && an != null && an.matches("\\d+")) {
+            JSONObject body = new JSONObject();
+            body.put("query", "query($i:Int){Media(id:$i){duration episodes}}");
+            body.put("variables", new JSONObject().put("i", Long.parseLong(an)));
+            String s = call("https://graphql.anilist.co", body.toString(), null);
+            JSONObject d = s.isEmpty() ? null : new JSONObject(s).optJSONObject("data");
+            JSONObject md = d == null ? null : d.optJSONObject("Media");
+            if (md != null) {
+                out[0] = md.optInt("duration", 0);
+                if (out[1] == 0) out[1] = md.optInt("episodes", 0);
+            }
+        }
+        String mal = ext.get("mal");
+        if (out[0] == 0 && mal != null && mal.matches("\\d+")) {
+            String s = call("https://api.jikan.moe/v4/anime/" + mal, null, null);
+            JSONObject o = s.isEmpty() ? null : new JSONObject(s).optJSONObject("data");
+            if (o != null) {
+                out[0] = jikanMinutes(o.optString("duration"));
+                if (out[1] == 0) out[1] = o.optInt("episodes", 0);
+            }
+        }
+        return out;
+    }
+
+    /** Jikan's "1 hr 30 min" or "24 min per ep" to minutes. */
+    static int jikanMinutes(String d) {
+        if (d == null) return 0;
+        java.util.regex.Matcher h = java.util.regex.Pattern.compile("(\\d+)\\s*hr").matcher(d);
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+)\\s*min").matcher(d);
+        int t = 0;
+        if (h.find()) t += Integer.parseInt(h.group(1)) * 60;
+        if (m.find()) t += Integer.parseInt(m.group(1));
+        return t;
     }
 
     // ------------------------------------------------------------------ Jikan (MyAnimeList, no key)
@@ -843,6 +933,17 @@ final class TitleVerifier {
         double conf = Math.min(1, best.score + (agree.isEmpty() ? 0 : 0.08));
         Match merged = combine(best, agree);
         if (merged.source.equals("wikidata") || merged.genres.isEmpty()) wikidataGenres(merged);
+        if (merged.runtime == 0 && merged.group().equals("watch")) {  // the length, for "under 1.5 hours" searches
+            try {
+                int[] d = details(merged.ext);
+                merged.runtime = d[0];
+                if (merged.episodes == 0) merged.episodes = d[1];
+            } catch (Stopped e) {
+                throw e;
+            } catch (Exception ignored) {
+                // no length: the title is still verified
+            }
+        }
         Set<String> by = new LinkedHashSet<>();
         by.add(best.source);
         for (Match m : agree) by.add(m.source);
@@ -880,7 +981,11 @@ final class TitleVerifier {
         m.ext = new HashMap<>(best.ext);
         m.score = best.score;
         m.titleScore = best.titleScore;
+        m.runtime = best.runtime;
+        m.episodes = best.episodes;
         for (Match a : agree) {
+            if (m.runtime == 0) m.runtime = a.runtime;
+            if (m.episodes == 0) m.episodes = a.episodes;
             if (m.year == 0) m.year = a.year;
             if (m.lang.isEmpty()) m.lang = a.lang;
             if (m.country.isEmpty()) m.country = a.country;

@@ -15,6 +15,13 @@ const Verify = (() => {
     const n = { verified: 0, review: 0, notFound: 0, skipped: 0 };
     for (const [id, r] of Object.entries(results || {})) {
       const m = Catalog.get(db, id);
+      if (m && r && r.verdict === "details") {  // only the length of a title checked before
+        if (Number(r.runtime) > 0) m.runtime = Math.round(Number(r.runtime));
+        if (Number(r.episodes) > 0 && !m.episodes) m.episodes = Math.round(Number(r.episodes));
+        m.runtime_tried = r.checked_at || Date.now();
+        n.lengths = (n.lengths || 0) + 1;
+        continue;
+      }
       if (!m || !r || (m.verified && m.verified !== "unverified")) { n.skipped++; continue; }  // gone, or you decided already
       const check = { verdict: r.verdict, confidence: Number(r.confidence) || 0, by: String(r.by || ""), note: String(r.note || ""), at: r.checked_at || Date.now() };
       if (r.verdict === "verified" && r.facts) {
@@ -70,6 +77,9 @@ const Verify = (() => {
       review: list.filter((m) => m.verified === "conflict").length,
       notFound: list.filter((m) => (!m.verified || m.verified === "unverified") && m.checked_at).length,
       verified: list.filter((m) => m.verified === "verified").length,
+      // checked before lengths were kept: the next Process looks up how long they are (for "under 1.5 hours")
+      lengths: list.filter((m) => m.verified === "verified" && !(m.runtime > 0) && !m.runtime_tried && m.ext && (m.ext.tmdb || m.ext.anilist || m.ext.mal)
+        && (typeof Catalog === "undefined" || Catalog.typeInfo(db, m.type).group === "watch")).length,
     };
   }
 
@@ -96,7 +106,8 @@ const Verify = (() => {
   function start() {
     if (job && !job.finished) return;
     if (!settings.tmdbKey) toast("No TMDB key: movies are checked on Wikidata. Add a free key in Settings for posters and genres.");
-    job = { done: 0, total: counts(db).waiting, finished: false };
+    const c0 = counts(db);
+    job = { done: 0, total: c0.waiting || c0.lengths, finished: false };
     onProgress.verify = (d, t) => { job.done = d; job.total = t; paint(); };
     phone("verifyNow").then((s) => { job.sum = JSON.parse(s || "{}"); })
       .catch((e) => { job.error = e.message; })
@@ -131,7 +142,7 @@ const Verify = (() => {
     const pct = running && job.total ? Math.round((job.done / job.total) * 100) : 0;
     const todo = (db.media || []).filter((m) => m.verified === "conflict" || ((!m.verified || m.verified === "unverified") && m.checked_at));
     const night = (() => { try { return JSON.parse(sync("nightlyInfo") || "{}"); } catch (e) { return {}; } })();
-    $app.innerHTML = `${header("Check titles online", "#/watch")}
+    $app.innerHTML = `${header("Check titles online", "#/inbox")}
       <div class="grid3">
         <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.waiting}</strong><span class="small muted">to check</span></div>
         <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.verified}</strong><span class="small muted">verified</span></div>
@@ -139,7 +150,7 @@ const Verify = (() => {
       </div>
       ${running ? `<div class="card stack"><strong>Checking ${Math.min(job.done + 1, job.total)} of ${job.total}</strong><span class="bar"><span style="width:${pct}%"></span></span>
           <span class="small muted">You can leave the app: it keeps checking, with a notification to stop it.</span><button class="btn block" id="vstop">Stop</button></div>`
-        : `<button class="btn primary block" id="vgo" ${c.waiting ? "" : "disabled"}>${c.waiting ? `Process: check ${plural(c.waiting, "title")} online` : "Nothing new to check"}</button>`}
+        : `<button class="btn primary block" id="vgo" ${c.waiting || c.lengths ? "" : "disabled"}>${c.waiting ? `Process: check ${plural(c.waiting, "title")} online` : c.lengths ? `Process: find how long ${plural(c.lengths, "title")} run` : "Nothing new to check"}</button>`}
       ${job && job.finished ? `<div class="card stack"><strong>${job.error ? esc(job.error) : job.sum && job.sum.offline ? "No internet: try again on Wi-Fi or mobile data" : job.sum && job.sum.stopped ? "Paused" : "Done"}</strong>
           ${job.applied ? `<span class="small muted">${job.applied.verified} verified, ${job.applied.review} to pick, ${job.applied.notFound} not found</span>` : ""}</div>` : ""}
       <p class="hint">Movies and series: ${settings.tmdbKey ? "TMDB (your key) and Wikidata" : "Wikidata (add a free TMDB key in Settings for posters and genres)"}. Anime: AniList and MyAnimeList. Manga: AniList and MangaDex.
