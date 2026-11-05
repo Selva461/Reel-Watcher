@@ -98,6 +98,7 @@ public class MainActivity extends Activity implements Host {
         web.loadUrl(LOCAL_PAGE);
         WorkService.STOP_HOOKS.add(stopHook);
         NightRun.schedule(this);  // the nightly run (on unless switched off in Settings)
+        if (NightRun.prefs(this).getBoolean("nightly_check", false)) NightlyCheck.schedule(this, true);  // drops the old Wi-Fi + charger rule
     }
 
     /** The built-in page (not a web site) is showing: only it may use window.RN. */

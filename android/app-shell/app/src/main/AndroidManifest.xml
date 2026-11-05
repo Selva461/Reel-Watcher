@@ -61,6 +61,17 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="image/*" />
             </intent-filter>
+            <!-- reel videos (Instagram's own Download, screen recordings) shared from the gallery, to read the whole reel -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
         </activity>
         <!-- the optional nightly online check of watchlist titles: Wi-Fi + charging + phone idle, off by default -->
         <service

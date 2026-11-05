@@ -51,4 +51,22 @@ public class WebLookupTest {
         assertEquals(0, new WebLookup((url, body, h) -> { urls.add(url); return null; }).search("  \n ").length());
         assertTrue(urls.isEmpty());
     }
+
+    @Test
+    public void aQuoteIsLookedUpOnWikiquoteAsOneExactPhrase() throws Exception {
+        List<String> urls = new ArrayList<>();
+        WebLookup w = new WebLookup((url, body, h) -> {
+            urls.add(url);
+            return new TitleVerifier.Res(200, url.contains("Nobody") ? "{\"query\":{\"search\":[]}}"
+                    : "{\"query\":{\"search\":[{\"title\":\"The Dark Knight (film)\",\"snippet\":\"<span class=\\\"searchmatch\\\">Why so serious</span>?\"}]}}", 0);
+        });
+        org.json.JSONObject r = w.quote("Why so serious? Let's put a smile on that face, said the man in the purple suit at the party");
+        assertTrue(r.getBoolean("found"));
+        assertEquals("The Dark Knight (film)", r.getString("page"));
+        assertEquals("https://en.wikiquote.org/wiki/The_Dark_Knight_(film)", r.getString("url"));
+        assertEquals("Why so serious?", r.getString("snippet"));
+        assertTrue(urls.get(0).startsWith("https://en.wikiquote.org/w/api.php?"));
+        assertTrue(urls.get(0).contains("srsearch=%22Why+so+serious+Let%27s+put+a+smile+on+that+face+said+the%22"));  // 12 words, one phrase
+        assertFalse(w.quote("Nobody ever said this line anywhere").getBoolean("found"));
+    }
 }

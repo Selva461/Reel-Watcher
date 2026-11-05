@@ -38,7 +38,7 @@ final class ReelVideo {
 
     static final long MAX_VIDEO = 60L * 1024 * 1024;
     private static final long FRAME_EVERY_US = 2_000_000L;
-    private static final int MAX_FRAMES = 60;      // 2 minutes of frames
+    private static final int MAX_FRAMES = 90;      // 3 minutes of frames: a whole reel
     private static final long MAX_AUDIO_US = 180_000_000L;  // 3 minutes of speech
     private static final int RATE = 16000;
 
@@ -52,19 +52,49 @@ final class ReelVideo {
         File f = new File(ctx.getCacheDir(), "reel-video.mp4");
         try {
             fetch(url, f, stop);
-            JSONObject o = new JSONObject();
-            long us = durationUs(f);
-            o.put("seconds", us / 1_000_000L);
-            o.put("screen", screenText(f, us, ocr, stop));
-            byte[] pcm = decodePcm(f, stop);
-            boolean haveModel = speechModel != null;
-            o.put("speechModel", haveModel);
-            o.put("speech", haveModel && pcm.length > 0 ? vosk(pcm, speechModel, stop) : "");
-            o.put("media", saveMedia(ctx, f, us, pcm));
-            return o;
+            return analyse(ctx, ocr, speechModel, f, stop);
         } finally {
             f.delete();
         }
+    }
+
+    /**
+     * Reads a reel video that is on the phone (saved with Instagram's own Download, a screen recording, or shared to
+     * Reel Shelf). The whole video: frames for the text on screen, speech to text, key frames and sound for the AI.
+     * Copied to the app's cache while it is read, then the copy is deleted; the original is never changed.
+     */
+    static JSONObject readLocal(Context ctx, ScreenshotReader ocr, File speechModel, android.net.Uri uri, Stop stop) throws Exception {
+        File f = new File(ctx.getCacheDir(), "reel-video-local.mp4");
+        try {
+            try (InputStream in = ctx.getContentResolver().openInputStream(uri); OutputStream out = new FileOutputStream(f)) {
+                if (in == null) throw new IOException("Could not open the video");
+                byte[] buf = new byte[65536];
+                long total = 0;
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    if (stop.now()) throw new IOException("stopped");
+                    total += n;
+                    if (total > ScreenshotReader.MAX_VIDEO_FILE) throw new IOException("video too big (over 500 MB)");
+                    out.write(buf, 0, n);
+                }
+            }
+            return analyse(ctx, ocr, speechModel, f, stop);
+        } finally {
+            f.delete();
+        }
+    }
+
+    private static JSONObject analyse(Context ctx, ScreenshotReader ocr, File speechModel, File f, Stop stop) throws Exception {
+        JSONObject o = new JSONObject();
+        long us = durationUs(f);
+        o.put("seconds", us / 1_000_000L);
+        o.put("screen", screenText(f, us, ocr, stop));
+        byte[] pcm = decodePcm(f, stop);
+        boolean haveModel = speechModel != null;
+        o.put("speechModel", haveModel);
+        o.put("speech", haveModel && pcm.length > 0 ? vosk(pcm, speechModel, stop) : "");
+        o.put("media", saveMedia(ctx, f, us, pcm));
+        return o;
     }
 
     interface Stop {

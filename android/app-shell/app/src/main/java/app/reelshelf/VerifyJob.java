@@ -16,6 +16,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * One run of the online check, used by the Process button (app open) and by the optional nightly check.
@@ -30,6 +31,10 @@ final class VerifyJob {
     static final long RETRY_NOT_FOUND_MS = 30L * 86400_000L;
     static final Object LOCK = new Object();
     private static final AtomicBoolean RUNNING = new AtomicBoolean(false);
+    /** Titles checked at the same time (Avles: about 10; data use does not matter). */
+    static final int WORKERS = 10;
+    /** No service answered for this many titles in a row: offline, stop. */
+    static final int OFFLINE_AFTER = 10;
 
     interface Progress {
         void at(int done, int total, String title);
@@ -42,6 +47,7 @@ final class VerifyJob {
     private final File dir;
     private final TitleVerifier verifier;
     private final AtomicBoolean stop;
+    int workers = WORKERS;
 
     VerifyJob(File dir, TitleVerifier verifier, AtomicBoolean stop) {
         this.dir = dir;
@@ -66,8 +72,8 @@ final class VerifyJob {
         if (!tmp.renameTo(f)) throw new IOException("Could not save " + f.getName());
     }
 
-    /** Answers from before 1.3.4 (no seasons, ratings or close matches kept) are asked again, not reused. */
-    static final int CACHE_VERSION = 3;
+    /** Answers from before 1.3.5 (one source was enough) are asked again, not reused. */
+    static final int CACHE_VERSION = 4;
 
     static String cacheKey(TitleVerifier.Candidate c) {
         return TitleMatch.clean(c.title) + "|" + c.type + "|" + (c.year > 0 ? c.year : "") + "|" + c.lang;
@@ -119,12 +125,6 @@ final class VerifyJob {
     /** Summary: {checked, verified, review, notFound, left, offline, stopped}. limit 0 = all; budgetMs 0 = no time limit. */
     JSONObject run(int limit, long budgetMs, Progress progress) throws JSONException {
         JSONObject sum = new JSONObject();
-        int checked = 0;
-        int verified = 0;
-        int review = 0;
-        int notFound = 0;
-        boolean stopped = false;
-        boolean offline = false;
         if (!RUNNING.compareAndSet(false, true)) {
             sum.put("busy", true);
             return sum;
@@ -137,27 +137,45 @@ final class VerifyJob {
             synchronized (LOCK) {
                 all = readJson(f);
             }
-            JSONObject rs = all.optJSONObject("results");
-            if (rs == null) all.put("results", rs = new JSONObject());
-            JSONObject cache = all.optJSONObject("cache");
-            if (cache == null) all.put("cache", cache = new JSONObject());
+            JSONObject rs0 = all.optJSONObject("results");
+            if (rs0 == null) all.put("results", rs0 = new JSONObject());
+            JSONObject cache0 = all.optJSONObject("cache");
+            if (cache0 == null) all.put("cache", cache0 = new JSONObject());
+            final JSONObject rs = rs0;
+            final JSONObject cache = cache0;
             List<TitleVerifier.Candidate> todo = pending(db, all, System.currentTimeMillis());
             int total = limit > 0 ? Math.min(limit, todo.size()) : todo.size();
-            int offlineInARow = 0;
-            int unsaved = 0;
-            for (int i = 0; i < total; i++) {
-                if (stop.get() || (budgetMs > 0 && System.currentTimeMillis() - t0 > budgetMs)) {
-                    stopped = true;
-                    break;
-                }
-                TitleVerifier.Candidate c = todo.get(i);
-                if (progress != null) progress.at(i, total, c.title);
+            // the same title seen in several screenshots is looked up once, by one worker, and shared with the rest
+            Map<String, List<TitleVerifier.Candidate>> byKey = new java.util.LinkedHashMap<>();
+            for (TitleVerifier.Candidate c : todo.subList(0, total)) {
+                List<TitleVerifier.Candidate> l = byKey.get(cacheKey(c));
+                if (l == null) byKey.put(cacheKey(c), l = new ArrayList<>());
+                l.add(c);
+            }
+            List<List<TitleVerifier.Candidate>> groups = new ArrayList<>(byKey.values());
+            int offlineAfter = Math.max(1, Math.min(OFFLINE_AFTER, groups.size()));
+            AtomicInteger checked = new AtomicInteger();
+            AtomicInteger verified = new AtomicInteger();
+            AtomicInteger review = new AtomicInteger();
+            AtomicInteger notFound = new AtomicInteger();
+            AtomicInteger offlineInARow = new AtomicInteger();
+            AtomicInteger unsaved = new AtomicInteger();
+            AtomicBoolean stopped = new AtomicBoolean();
+            AtomicBoolean offline = new AtomicBoolean();
+            AtomicInteger done = new AtomicInteger();
+            parallel(groups.size(), () -> stopped.get() || offline.get() || timeUp(t0, budgetMs, stopped), i -> {
+                List<TitleVerifier.Candidate> group = groups.get(i);
+                TitleVerifier.Candidate c = group.get(0);
                 String key = cacheKey(c);
                 JSONObject res = null;
-                JSONObject hit = cache.optJSONObject(key);
+                JSONObject hit;
+                synchronized (all) {
+                    hit = cache.optJSONObject(key);
+                    if (hit != null) hit = new JSONObject(hit.toString());
+                }
                 if (hit != null && hit.optInt("v") == CACHE_VERSION && !("not_found".equals(hit.optString("verdict"))
                         && System.currentTimeMillis() - hit.optLong("checked_at") > RETRY_NOT_FOUND_MS)) {
-                    res = new JSONObject(hit.toString());
+                    res = hit;
                     res.put("id", c.id);
                     res.put("updated_at", c.updatedAt);
                     res.put("cached", true);
@@ -166,8 +184,8 @@ final class VerifyJob {
                     try {
                         res = verifier.verify(c);
                     } catch (TitleVerifier.Stopped e) {
-                        stopped = true;
-                        break;
+                        stopped.set(true);
+                        return;
                     } catch (Exception e) {
                         res = null;
                     }
@@ -177,41 +195,49 @@ final class VerifyJob {
                         keep.remove("updated_at");
                         if (!"not_found".equals(keep.optString("verdict"))) keep.remove("choices");  // the close ones: for the phone AI
                         keep.put("v", CACHE_VERSION);
-                        cache.put(key, keep);
+                        synchronized (all) {
+                            cache.put(key, keep);
+                        }
                     }
                 }
-                if (res == null) {  // no service answered: probably offline; stop after a few in a row
-                    if (++offlineInARow >= 3) {
-                        offline = true;
-                        break;
+                if (res == null) {  // no service answered: probably offline; stop after a run of them
+                    if (offlineInARow.incrementAndGet() >= offlineAfter) offline.set(true);
+                    return;
+                }
+                offlineInARow.set(0);
+                for (int g = 0; g < group.size(); g++) {
+                    TitleVerifier.Candidate one = group.get(g);
+                    JSONObject mine = res;
+                    if (g > 0) {  // a twin: the same answer, marked as coming from the cache
+                        mine = new JSONObject(res.toString());
+                        mine.put("id", one.id);
+                        mine.put("updated_at", one.updatedAt);
+                        mine.put("cached", true);
                     }
-                    continue;
+                    synchronized (all) {
+                        rs.put(one.id, mine);
+                    }
+                    checked.incrementAndGet();
+                    String v = mine.optString("verdict");
+                    if (v.equals("verified")) verified.incrementAndGet();
+                    else if (v.equals("conflict")) review.incrementAndGet();
+                    else notFound.incrementAndGet();
                 }
-                offlineInARow = 0;
-                rs.put(c.id, res);
-                checked++;
-                String v = res.optString("verdict");
-                if (v.equals("verified")) verified++;
-                else if (v.equals("conflict")) review++;
-                else notFound++;
-                if (++unsaved >= 10) {
-                    save(f, all);
-                    unsaved = 0;
-                }
-            }
+                if (progress != null) progress.at(done.addAndGet(group.size()), total, c.title);
+                if (unsaved.incrementAndGet() % 10 == 0) save(f, all);
+            });
+            if (stop.get()) stopped.set(true);
             // titles checked before 1.3.4 have no seasons or rating yet (some no length): looked up once
-            int lengths = 0;
-            if (!stopped && !offline) {
+            AtomicInteger lengths = new AtomicInteger();
+            if (!stopped.get() && !offline.get()) {
                 List<String[]> need = needDetails(db, rs);
-                int failedInARow = 0;
-                for (String[] n : need) {
-                    if (stop.get() || (budgetMs > 0 && System.currentTimeMillis() - t0 > budgetMs)) {
-                        stopped = true;
-                        break;
-                    }
-                    if (limit > 0 && checked + lengths >= limit) break;
-                    JSONObject m = media(db, n[0]);
-                    if (m == null) continue;
+                int room = limit > 0 ? Math.max(0, limit - checked.get()) : need.size();
+                AtomicInteger failedInARow = new AtomicInteger();
+                AtomicBoolean gaveUp = new AtomicBoolean();
+                parallel(Math.min(room, need.size()), () -> stopped.get() || gaveUp.get() || timeUp(t0, budgetMs, stopped), i -> {
+                    String id = need.get(i)[0];
+                    JSONObject m = media(db, id);
+                    if (m == null) return;
                     Map<String, String> ext = new HashMap<>();
                     JSONObject e = m.optJSONObject("ext");
                     if (e != null) for (Iterator<String> it = e.keys(); it.hasNext(); ) {
@@ -221,13 +247,13 @@ final class VerifyJob {
                     TitleVerifier.Details d;
                     try {
                         d = verifier.details(ext, m.optString("type"));
-                        failedInARow = 0;
+                        failedInARow.set(0);
                     } catch (TitleVerifier.Stopped x) {
-                        stopped = true;
-                        break;
+                        stopped.set(true);
+                        return;
                     } catch (Exception x) {
-                        if (++failedInARow >= 3) break;
-                        continue;
+                        if (failedInARow.incrementAndGet() >= OFFLINE_AFTER) gaveUp.set(true);
+                        return;
                     }
                     JSONObject r = new JSONObject();
                     r.put("verdict", "details");
@@ -235,30 +261,76 @@ final class VerifyJob {
                     r.put("episodes", d.episodes);
                     if (d.rating > 0) r.put("rating", new JSONObject().put("score", d.rating).put("by", d.ratingBy).put("votes", d.votes));
                     if (d.seasons.length() > 0) r.put("seasons", d.seasons);
+                    if (d.seasons.length() > 0 && !d.seasonsBy.isEmpty()) r.put("seasons_by", d.seasonsBy);
                     if (!d.imdb.isEmpty()) r.put("imdb", d.imdb);
                     r.put("checked_at", System.currentTimeMillis());
-                    rs.put(n[0], r);
-                    lengths++;
-                    if (++unsaved >= 10) {
-                        save(f, all);
-                        unsaved = 0;
+                    synchronized (all) {
+                        rs.put(id, r);
                     }
-                }
+                    lengths.incrementAndGet();
+                    if (unsaved.incrementAndGet() % 10 == 0) save(f, all);
+                });
             }
-            sum.put("lengths", lengths);
+            if (stop.get()) stopped.set(true);
+            sum.put("lengths", lengths.get());
             save(f, all);
-            if (progress != null) progress.at(checked, total, "");
-            sum.put("checked", checked);
-            sum.put("verified", verified);
-            sum.put("review", review);
-            sum.put("notFound", notFound);
-            sum.put("left", Math.max(0, todo.size() - checked));
-            sum.put("offline", offline);
-            sum.put("stopped", stopped);
+            if (progress != null) progress.at(checked.get(), total, "");
+            sum.put("checked", checked.get());
+            sum.put("verified", verified.get());
+            sum.put("review", review.get());
+            sum.put("notFound", notFound.get());
+            sum.put("left", Math.max(0, todo.size() - checked.get()));
+            sum.put("offline", offline.get());
+            sum.put("stopped", stopped.get());
             return sum;
         } finally {
             RUNNING.set(false);
         }
+    }
+
+    interface Task {
+        void run(int i) throws JSONException;
+    }
+
+    interface Halt {
+        boolean now();
+    }
+
+    /** Runs task(0..n-1) on {@link #workers} threads at once (each service keeps its own speed limit in TitleVerifier). */
+    private void parallel(int n, Halt halt, Task task) {
+        AtomicInteger next = new AtomicInteger();
+        Runnable worker = () -> {
+            for (int i; !stop.get() && !halt.now() && (i = next.getAndIncrement()) < n; ) {
+                try {
+                    task.run(i);
+                } catch (Exception ignored) {
+                    // one title's broken answer does not stop the others
+                }
+            }
+        };
+        int k = Math.max(1, Math.min(workers, n));
+        List<Thread> threads = new ArrayList<>();
+        for (int t = 0; t < k; t++) {
+            Thread th = new Thread(worker, "title-check-" + t);
+            threads.add(th);
+            th.start();
+        }
+        for (Thread th : threads) {
+            try {
+                th.join();
+            } catch (InterruptedException e) {
+                stop.set(true);
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private boolean timeUp(long t0, long budgetMs, AtomicBoolean stopped) {
+        if (stop.get() || (budgetMs > 0 && System.currentTimeMillis() - t0 > budgetMs)) {
+            stopped.set(true);
+            return true;
+        }
+        return false;
     }
 
     /** Checked titles to watch that have an id but were never given seasons and a rating (details_at): [[id]]. */
@@ -290,12 +362,14 @@ final class VerifyJob {
     }
 
     private static void save(File f, JSONObject all) {
-        trim(all.optJSONObject("cache"), 5000);
-        synchronized (LOCK) {
-            try {
-                writeJson(f, all);
-            } catch (IOException ignored) {
-                // the next run looks these titles up again
+        synchronized (all) {  // the titles being checked add to it meanwhile
+            trim(all.optJSONObject("cache"), 5000);
+            synchronized (LOCK) {
+                try {
+                    writeJson(f, all);
+                } catch (IOException ignored) {
+                    // the next run looks these titles up again
+                }
             }
         }
     }

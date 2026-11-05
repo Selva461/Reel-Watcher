@@ -29,14 +29,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Manga: AniList and MangaDex. When none of them finds it, Wikipedia's search (which forgives misspelt names) is
  * asked, and its pages are read through Wikidata. Matching is plain maths (TitleMatch), no AI.
  * Nothing is left for you to check: the best match is picked automatically and its official name replaces the one
- * read from the screenshot. It is "verified" when a second source agrees, or the name alone matches strongly
- * ({@link #AUTO}); close calls (remakes, an anime and its manga) go to the one more sources agree on. Weaker matches
- * are "not_found" and are tried again later; nothing is renamed on a guess.
+ * read from the screenshot. It is "verified" only when two independent sources agree on it (name, year and kind,
+ * or a shared database id); close calls (remakes, an anime and its manga) go to the one more sources agree on.
+ * Anything only one source has is "not_found" and is tried again later; nothing is renamed on a guess.
  * Pure Java (no Android classes) so it is tested on a computer; the network is behind {@link Http}.
  */
 final class TitleVerifier {
     static final double REVIEW = 0.55;
-    /** One source alone is trusted from this score (the name is close, and the year, kind and language fit). */
+    /** Below this best score, Wikipedia's search (which forgives misspellings) is asked as well. */
     static final double AUTO = 0.75;
 
     // ------------------------------------------------------------------ network
@@ -113,17 +113,21 @@ final class TitleVerifier {
         }
     };
 
-    /** Polite gaps between calls to each service (their published limits, with room to spare). */
+    /**
+     * Polite gaps between calls to each service (their published limits, with room to spare). Shared by every title
+     * being checked at the same time, so 10 at once never go faster than this: AniList 90 a minute (it says 30 when
+     * busy), Jikan 3 a second and 60 a minute, MangaDex 5 a second, TMDB about 40 a second, Wikimedia asks for calm.
+     */
     private static final Map<String, Long> GAP = new HashMap<>();
 
     static {
         GAP.put("api.jikan.moe", 1200L);
         GAP.put("graphql.anilist.co", 2100L);
-        GAP.put("api.mangadex.org", 300L);
-        GAP.put("www.wikidata.org", 300L);
-        GAP.put("en.wikipedia.org", 300L);
-        GAP.put("www.omdbapi.com", 300L);
-        GAP.put("api.themoviedb.org", 120L);
+        GAP.put("api.mangadex.org", 250L);
+        GAP.put("www.wikidata.org", 150L);
+        GAP.put("en.wikipedia.org", 150L);
+        GAP.put("www.omdbapi.com", 200L);
+        GAP.put("api.themoviedb.org", 50L);
     }
 
     private final Http http;
@@ -132,7 +136,8 @@ final class TitleVerifier {
     /** Your own free OMDb key (Settings), for IMDb ratings; empty = no IMDb rating. Sent only to omdbapi.com. */
     String omdbKey = "";
     private final AtomicBoolean stop;
-    private final Map<String, Long> lastCall = new HashMap<>();
+    /** The next moment each service may be called (a queue of slots, safe for several titles checked at once). */
+    private final Map<String, Long> nextSlot = new HashMap<>();
     /** Services that failed for network reasons in this run (so one title's failure is not a "not found"). */
     int networkFailures;
 
@@ -154,20 +159,31 @@ final class TitleVerifier {
         for (int attempt = 0; attempt < 3; attempt++) {
             if (stop.get()) throw new Stopped();
             long gap = GAP.containsKey(host) ? GAP.get(host) : 300L;
-            Long last = lastCall.get(host);
-            long wait = last == null ? 0 : last + gap - clock.now();
+            long wait;
+            synchronized (nextSlot) {  // take the next free slot for this service
+                long now = clock.now();
+                Long next = nextSlot.get(host);
+                long at = next == null ? now : Math.max(now, next);
+                nextSlot.put(host, at + gap);
+                wait = at - now;
+            }
             try {
                 if (wait > 0) clock.sleep(wait);
             } catch (InterruptedException e) {
                 throw new Stopped();
             }
-            lastCall.put(host, clock.now());
             Res r = http.send(url, body, headers == null ? new HashMap<>() : headers);
             if (r.code == 200) return r.body;
             if (r.code == 404) return "";
-            if (r.code == 429 || r.code >= 500) {  // busy: wait as asked (at most 30 s) and try again
+            if (r.code == 429 || r.code >= 500) {  // busy: everyone waits as asked (at most 30 s), then this one tries again
+                long back = Math.min(30000, Math.max(r.retryAfterMs, 2000L * (attempt + 1)));
+                synchronized (nextSlot) {
+                    long until = clock.now() + back;
+                    Long next = nextSlot.get(host);
+                    if (next == null || next < until) nextSlot.put(host, until);
+                }
                 try {
-                    clock.sleep(Math.min(30000, Math.max(r.retryAfterMs, 2000L * (attempt + 1))));
+                    clock.sleep(back);
                 } catch (InterruptedException e) {
                     throw new Stopped();
                 }
@@ -212,6 +228,8 @@ final class TitleVerifier {
         String ratingBy = "";
         int votes;
         JSONArray seasons;    // [{n, episodes, year, title}] for series and anime with more than one season
+        String seasonsBy = "";  // where the seasons came from, and who agreed ("TMDB, checked with Wikidata")
+        int sources = 1;      // independent services that agree on it (set for choices)
         double score;
         double titleScore;
 
@@ -234,6 +252,7 @@ final class TitleVerifier {
             if (episodes > 0) f.put("episodes", episodes);
             if (rating > 0) f.put("rating", new JSONObject().put("score", rating).put("by", ratingBy).put("votes", votes));
             if (seasons != null && seasons.length() > 0) f.put("seasons", seasons);
+            if (seasons != null && seasons.length() > 0 && !seasonsBy.isEmpty()) f.put("seasons_by", seasonsBy);
             JSONArray aka = new JSONArray();
             for (String n : names) if (!TitleMatch.norm(n).equals(TitleMatch.norm(title)) && aka.length() < 8) aka.put(n);
             if (aka.length() > 0) f.put("aka", aka);
@@ -253,6 +272,7 @@ final class TitleVerifier {
             c.put("poster", poster);
             c.put("url", url);
             c.put("score", Math.round(score * 100) / 100.0);
+            c.put("sources", sources);  // independent services that have it (2 or more = it really exists)
             c.put("facts", facts());
             return c;
         }
@@ -624,6 +644,8 @@ final class TitleVerifier {
      * Rating: IMDb (through OMDb, only with your own free OMDb key) for movies and series, MyAnimeList for anime, else
      * TMDB, else AniList. Seasons: TMDB's season list, or for anime the AniList chain of prequels and sequels.
      * Uses the ids found when the title was checked. Each service is optional: what one cannot give, the next may.
+     * Seasons are checked against a second service (Wikidata's number of seasons, or AniList / MyAnimeList's episodes
+     * of the first season) and seasonsBy says who agreed, who did not, or that only one service had them.
      */
     Details details(Map<String, String> ext, String type) throws IOException, JSONException {
         Details d = new Details();
@@ -662,11 +684,16 @@ final class TitleVerifier {
                 if (id.matches("tt\\d+")) imdb = id;
             }
         }
+        boolean fromTmdb = d.seasons.length() > 0;
+        int anilistFirst = 0;  // AniList's episodes, when its entry is the first season
+        int anilistEps = 0;
         String an = ext.get("anilist");
         double anilistScore = 0;
         if (an != null && an.matches("\\d+")) {
             JSONObject md = anilistNode(Long.parseLong(an));
             if (md != null) {
+                anilistEps = md.optInt("episodes", 0);
+                if (isSeason(md) && nextSeason(md, "PREQUEL") == 0) anilistFirst = anilistEps;
                 if (d.runtime == 0) d.runtime = md.optInt("duration", 0);
                 if (d.episodes == 0) d.episodes = md.optInt("episodes", 0);
                 anilistScore = md.optInt("averageScore", 0) / 10.0;
@@ -674,10 +701,12 @@ final class TitleVerifier {
             }
         }
         String mal = ext.get("mal");
+        int malEps = 0;
         if (mal != null && mal.matches("\\d+") && (anime || d.runtime == 0)) {
             String s = call("https://api.jikan.moe/v4/anime/" + mal, null, null);
             JSONObject o = s.isEmpty() ? null : new JSONObject(s).optJSONObject("data");
             if (o != null) {
+                malEps = o.optInt("episodes", 0);
                 if (d.runtime == 0) d.runtime = jikanMinutes(o.optString("duration"));
                 if (d.episodes == 0) d.episodes = o.optInt("episodes", 0);
                 double sc = o.optDouble("score", 0);
@@ -693,7 +722,61 @@ final class TitleVerifier {
         if (d.rating == 0 && tmdbScore > 0 && tmdbVotes >= 10) rate(d, tmdbScore, "TMDB", tmdbVotes);
         if (d.rating == 0 && anilistScore > 0) rate(d, anilistScore, "AniList", 0);
         if (!imdb.isEmpty()) d.imdb = imdb;
+        if (d.seasons.length() > 0) d.seasonsBy = seasonsCheck(d.seasons, fromTmdb, anime, anilistFirst, anilistEps, malEps, ext.get("wikidata"));
         return d;
+    }
+
+    /**
+     * Avles: one source may be wrong. TMDB's seasons are compared with Wikidata's number of seasons (series) or with
+     * AniList / MyAnimeList's episodes of season 1 (anime); AniList's season chain with MyAnimeList's episodes of the
+     * same entry. Says who agreed, what the other one said, or "(one source)" when nobody else had it.
+     */
+    String seasonsCheck(JSONArray seasons, boolean fromTmdb, boolean anime, int anilistFirst, int anilistEps, int malEps, String wd)
+            throws IOException, JSONException {
+        String from = fromTmdb ? "TMDB" : "AniList";
+        String other = "";
+        int theirs = 0;
+        int ours = 0;
+        String what = "";
+        if (fromTmdb && anime && (anilistFirst > 0 || malEps > 0)) {
+            other = anilistFirst > 0 ? "AniList" : "MyAnimeList";
+            theirs = anilistFirst > 0 ? anilistFirst : malEps;
+            ours = seasons.optJSONObject(0).optInt("episodes", 0);
+            what = " episodes in season 1";
+        } else if (!fromTmdb && anilistEps > 0 && malEps > 0) {
+            other = "MyAnimeList";
+            theirs = malEps;
+            ours = anilistEps;
+            what = " episodes";
+        } else if (fromTmdb && wd != null && wd.matches("Q\\d+")) {
+            theirs = wikidataCount(wd, "P2437");
+            if (theirs > 0) {
+                other = "Wikidata";
+                ours = seasons.length();
+                what = theirs == 1 ? " season" : " seasons";
+            }
+        }
+        if (other.isEmpty()) return from + " (one source)";
+        if (theirs == ours) return from + ", checked with " + other;
+        return from + " (" + other + " says " + theirs + what + ")";
+    }
+
+    /** A whole-number fact of a Wikidata item (P2437 = number of seasons), or 0. */
+    private int wikidataCount(String id, String prop) throws IOException, JSONException {
+        String e = call("https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims&ids=" + q(id), null, null);
+        JSONObject ent = e.isEmpty() ? null : new JSONObject(e).optJSONObject("entities");
+        JSONObject it = ent == null ? null : ent.optJSONObject(id);
+        JSONObject claims = it == null ? null : it.optJSONObject("claims");
+        JSONArray c = claims == null ? null : claims.optJSONArray(prop);
+        if (c == null) return 0;
+        for (int i = 0; i < c.length(); i++) {
+            JSONObject v = c.optJSONObject(i).optJSONObject("mainsnak");
+            JSONObject dv = v == null ? null : v.optJSONObject("datavalue");
+            JSONObject val = dv == null ? null : dv.optJSONObject("value");
+            int n = val == null ? 0 : (int) parseNum(val.optString("amount").replace("+", ""));
+            if (n > 0) return n;
+        }
+        return 0;
     }
 
     static final class Details {
@@ -704,6 +787,7 @@ final class TitleVerifier {
         int votes;
         String imdb = "";
         JSONArray seasons = new JSONArray();
+        String seasonsBy = "";
     }
 
     private static void rate(Details d, double score, String by, int votes) {
@@ -1021,20 +1105,40 @@ final class TitleVerifier {
         }
     }
 
-    /** A second service that can confirm a title of this kind. */
-    String confirmer(Match best) {
+    /** Independent services that can confirm a title of this kind, best first (Wikipedia and Wikidata count as one). */
+    List<String> confirmers(Match best) {
+        boolean read = best.group().equals("read");
+        boolean anime = best.type.startsWith("anime");
+        List<String> out = new ArrayList<>();
         switch (best.source) {
-            case "tmdb": return "wikidata";
+            case "tmdb":
+                out.add("wikidata");
+                out.add("wikipedia");
+                if (anime) out.add("jikan-anime");
+                break;
             case "wikidata":
             case "wikipedia":
-                if (best.group().equals("read")) return "anilist-manga";
-                if (best.type.startsWith("anime")) return "anilist-anime";
-                return tmdbKey.isEmpty() ? "" : "tmdb";
-            case "anilist": return best.group().equals("read") ? "mangadex" : "jikan-anime";
-            case "jikan": return "anilist";
-            case "mangadex": return "anilist-manga";
-            default: return "";
+                if (read) out.add("anilist-manga");
+                else if (anime) { out.add("jikan-anime"); out.add("anilist-anime"); }
+                if (!tmdbKey.isEmpty() && !read) out.add("tmdb");
+                break;
+            case "anilist":
+                if (read) out.add("mangadex");
+                else out.add("jikan-anime");
+                out.add("wikidata");
+                break;
+            case "jikan":
+                out.add(read ? "anilist-manga" : "anilist-anime");
+                out.add("wikidata");
+                break;
+            case "mangadex":
+                out.add("anilist-manga");
+                out.add("wikidata");
+                break;
+            default:
+                break;
         }
+        return out;
     }
 
     /**
@@ -1052,11 +1156,14 @@ final class TitleVerifier {
             return verdict(r, "not_found", 0, "", null, new ArrayList<>(), "No free database is used for this category yet");
         List<Match> all = new ArrayList<>();
         Set<String> asked = new LinkedHashSet<>();
+        Set<String> askedFor = new java.util.HashSet<>();  // "source|query": the same question is never asked twice
         int failed = 0;
         int tried = 0;
         for (String src : firstSources(c)) {
             for (String qy : queries.subList(0, Math.min(2, queries.size()))) {
+                if (clearlyFound(all)) break;  // a near-exact name with the right year and kind: no need to ask more
                 tried++;
+                askedFor.add(src + "|" + qy);
                 try {
                     for (Match m : ask(src, qy)) { score(c, m); all.add(m); }
                     asked.add(src);
@@ -1073,26 +1180,9 @@ final class TitleVerifier {
         }
         all.sort((a, b) -> Double.compare(b.score, a.score));
         Match best = all.isEmpty() ? null : all.get(0);
-        if (best != null && best.score >= REVIEW) {
-            String conf = confirmer(best);
-            String key = conf.replace("-anime", "").replace("-manga", "");
-            boolean have = false;
-            for (Match m : all) if (!m.source.equals(best.source) && sameTitle(best, m)) { have = true; break; }
-            if (!have && !conf.isEmpty() && !asked.contains(conf) && !asked.contains(key)) {
-                String qy = best.title.isEmpty() ? queries.get(0) : best.title;
-                try {
-                    for (Match m : ask(conf, qy)) { score(c, m); all.add(m); }
-                } catch (Stopped e) {
-                    throw e;
-                } catch (Exception ignored) {
-                    // one confirming source down: the strict rules below still apply
-                }
-                all.sort((a, b) -> Double.compare(b.score, a.score));
-                best = all.get(0);
-            }
-        }
         if ((best == null || best.score < AUTO) && !asked.contains("wikipedia")) {  // last try: Wikipedia forgives misspellings
             for (String qy : queries.subList(0, Math.min(2, queries.size()))) {
+                askedFor.add("wikipedia|" + qy);
                 try {
                     for (Match m : ask("wikipedia", qy)) { score(c, m); all.add(m); }
                     asked.add("wikipedia");
@@ -1104,6 +1194,28 @@ final class TitleVerifier {
             }
             all.sort((a, b) -> Double.compare(b.score, a.score));
             best = all.isEmpty() ? null : all.get(0);
+        }
+        // a second, independent source must agree (name, year and kind, or a shared database id): asked until one does
+        if (best != null && best.score >= REVIEW && agreeing(best, all).isEmpty()) {
+            String qy = best.title.isEmpty() ? queries.get(0) : best.title;
+            int extra = 0;
+            for (String conf : confirmers(best)) {
+                if (extra >= 2 || !agreeing(best, all).isEmpty()) break;
+                String base = conf.replace("-anime", "").replace("-manga", "");
+                if (askedFor.contains(conf + "|" + qy) || askedFor.contains(base + "|" + qy)) continue;
+                askedFor.add(conf + "|" + qy);
+                extra++;
+                try {
+                    for (Match m : ask(conf, qy)) { score(c, m); all.add(m); }
+                    asked.add(conf);
+                } catch (Stopped e) {
+                    throw e;
+                } catch (Exception ignored) {
+                    // that source is down: the next one may still confirm it
+                }
+            }
+            all.sort((a, b) -> Double.compare(b.score, a.score));
+            best = all.get(0);
         }
         if (best == null || best.score < REVIEW) {
             return verdict(r, "not_found", best == null ? 0 : best.score, String.join("+", asked), null, top(all, null, 3),
@@ -1137,6 +1249,7 @@ final class TitleVerifier {
                 merged.ratingBy = d.ratingBy;
                 merged.votes = d.votes;
                 merged.seasons = d.seasons;
+                merged.seasonsBy = d.seasonsBy;
                 if (!d.imdb.isEmpty()) merged.ext.putIfAbsent("imdb", d.imdb);
             } catch (Stopped e) {
                 throw e;
@@ -1147,13 +1260,19 @@ final class TitleVerifier {
         Set<String> by = new LinkedHashSet<>();
         by.add(best.source);
         for (Match m : agree) by.add(m.source);
-        if (agree.isEmpty() && conf < AUTO) {  // one source, and not close enough to rename it on that alone
+        if (agree.isEmpty()) {  // Avles: one source may be wrong; it must exist in two independent places
             return verdict(r, "not_found", conf, String.join("+", asked), null, top(all, best, 3),
-                    "Closest online: " + best.title + (best.year > 0 ? " (" + best.year + ")" : "") + ", not close enough to be sure");
+                    "Only " + best.source + " has " + best.title + (best.year > 0 ? " (" + best.year + ")" : "") + "; a second source has to agree");
         }
-        String note = agree.isEmpty() ? "Found on " + best.source : "Confirmed by " + String.join(" and ", by);
+        String note = "Confirmed by " + String.join(" and ", by);
         if (rival != null) note += "; picked over " + rival.title + (rival.year > 0 ? " (" + rival.year + ")" : "") + ", which fewer sources agree on";
         return verdict(r, "verified", conf, String.join("+", by), merged, top(all, best, 4), note);
+    }
+
+    /** One answer is already a near-exact match: the other first sources and spellings are not asked (faster). */
+    private static boolean clearlyFound(List<Match> all) {
+        for (Match m : all) if (m.score >= 0.95 && m.titleScore >= 0.97) return true;
+        return false;
     }
 
     /** Matches from other services that describe the same title (Wikipedia and Wikidata count as one service). */
@@ -1208,6 +1327,7 @@ final class TitleVerifier {
     }
 
     private static List<Match> top(List<Match> all, Match best, int n) {
+        for (Match m : all) m.sources = 1 + agreeing(m, all).size();
         List<Match> out = new ArrayList<>();
         if (best != null) out.add(best);
         for (Match m : all) {

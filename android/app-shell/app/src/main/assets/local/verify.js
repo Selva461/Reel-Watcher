@@ -1,7 +1,7 @@
 /* Reel Shelf: checking watchlist titles online (stage 3). The phone (Java) does the lookups in free databases:
    TMDB (movies and series, with your own free key) or Wikidata (no key), AniList and Jikan (anime), MangaDex (manga).
    Answers wait in a file until this page applies them with Catalog.verify, so nothing is ever overwritten.
-   Runs when you tap Process (app open), or at night if you switch that on (Wi-Fi + charging + phone not in use).
+   Runs when you tap Process (app open), or at night if you switch that on (phone not in use, battery at 40% or more, any internet).
    Nothing waits for you: the phone picks the best match itself and its official name replaces the one read from the
    screenshot. When no source matches closely enough, the phone AI (if downloaded) reads the closest matches and a web
    search for the name, and picks one or none. Titles still not found keep their name and are tried again later.
@@ -38,7 +38,8 @@ const Verify = (() => {
         n.skipped++;
       } else {
         m.checked_at = check.at;  // stays "unverified"; tried again in 30 days or when it is seen again
-        m.check = { ...check, choices: (r.choices || []).filter((c) => c && c.facts).slice(0, 3) };  // for the phone AI to pick from
+        // close matches that two independent sources have, for the phone AI to pick from (one source is never enough)
+        m.check = { ...check, choices: (r.choices || []).filter((c) => c && c.facts && Number(c.sources) >= 2).slice(0, 3) };
         delete m.ai_at;
         n.notFound++;
       }
@@ -48,10 +49,11 @@ const Verify = (() => {
 
   /** Once per change of rules. 2 (1.3.3): titles that waited for you to pick, or were not found under the old rules,
       are checked again (now with Wikipedia and automatic picking). 3 (1.3.4): comment lines saved as titles ("View 4
-      replies", "12 likes Reply", usernames) are deleted. Returns how many changed. Does not save. */
+      replies", "12 likes Reply", usernames) are deleted. 4 (1.3.5): titles confirmed by one source only are checked
+      again, since two independent sources must agree now. Returns how many changed. Does not save. */
   function migrate(db) {
     const rules = db.verify_rules || 0;
-    if (rules >= 3) return 0;
+    if (rules >= 4) return 0;
     let n = 0;
     if (rules < 2) for (const m of db.media || []) {
       if (m.verified === "conflict" || ((!m.verified || m.verified === "unverified") && m.checked_at)) {
@@ -61,12 +63,22 @@ const Verify = (() => {
         n++;
       }
     }
-    if (typeof Titles !== "undefined") {
+    if (rules < 4) for (const m of db.media || []) {
+      const by = String(m.verified_by || "");
+      if (m.verified === "verified" && by && !/\+/.test(by) && !["you", "phone AI"].includes(by)) {
+        m.verified = "unverified";
+        delete m.checked_at;
+        delete m.check;
+        n++;
+      }
+      if ((m.seasons || []).length && !m.seasons_by) delete m.details_at;  // seasons looked up again, checked with a second source
+    }
+    if (rules < 3 && typeof Titles !== "undefined") {
       const before = (db.media || []).length;
       db.media = (db.media || []).filter((m) => m.verified === "verified" || !Titles.isChrome(m.title));
       n += before - db.media.length;
     }
-    db.verify_rules = 3;
+    db.verify_rules = 4;
     return n;
   }
 
@@ -131,6 +143,7 @@ Answer with the number of the right title, or 0 if none of them is it. Answer wi
       // checked before seasons and ratings were kept: the next Process looks them up once
       lengths: list.filter((m) => m.verified === "verified" && !m.details_at && m.ext && (m.ext.tmdb || m.ext.anilist || m.ext.mal)
         && (typeof Catalog === "undefined" || Catalog.typeInfo(db, m.type).group === "watch")).length,
+      quotes: typeof Quotes === "undefined" ? 0 : Quotes.unchecked(db, now).length,
     };
   }
 
@@ -161,13 +174,23 @@ Answer with the number of the right title, or 0 if none of them is it. Answer wi
     if (!settings.tmdbKey) toast("No TMDB key: movies are checked on Wikidata. Add a free key in Settings for posters and genres.");
     const c0 = counts(db);
     job = { done: 0, total: c0.waiting || c0.lengths, finished: false };
+    settings.verifyRunning = true;  // if the app is closed mid-way (an update, the phone restarting) it carries on next time
+    saveSettings();
     onProgress.verify = (d, t) => { job.done = d; job.total = t; paint(); };
     phone("verifyNow").then((s) => { job.sum = JSON.parse(s || "{}"); })
       .catch((e) => { job.error = e.message; })
       .finally(async () => {
         job.applied = onOpen(true);
         try { job.ai = await aiPick(); } catch (e) { job.ai = 0; }
+        if (typeof Quotes !== "undefined" && Quotes.unchecked(db).length && !(job.sum && job.sum.offline)) {
+          job.step = "quotes";
+          paint();
+          job.quotes = await Quotes.checkOnline(db, (t) => phone("quoteCheck", t), { stop: () => !!(job.sum && job.sum.stopped) });
+          saveDb();
+        }
         job.finished = true;
+        settings.verifyRunning = false;
+        saveSettings();
         paint();
       });
     paint();
@@ -184,14 +207,15 @@ Answer with the number of the right title, or 0 if none of them is it. Answer wi
         <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.verified}</strong><span class="small muted">verified</span></div>
         <div class="card stack" style="gap:2px"><strong style="font-size:22px">${c.notFound}</strong><span class="small muted">not found yet</span></div>
       </div>
-      ${running ? `<div class="card stack"><strong>Checking ${Math.min(job.done + 1, job.total)} of ${job.total}</strong><span class="bar"><span style="width:${pct}%"></span></span>
+      ${running ? `<div class="card stack"><strong>${job.step === "quotes" ? "Looking up quotes on Wikiquote" : `Checking ${Math.min(job.done + 1, job.total)} of ${job.total}`}</strong><span class="bar"><span style="width:${pct}%"></span></span>
           <span class="small muted">You can leave the app: it keeps checking, with a notification to stop it.</span><button class="btn block" id="vstop">Stop</button></div>`
-        : `<button class="btn primary block" id="vgo" ${c.waiting || c.lengths ? "" : "disabled"}>${c.waiting ? `Process: check ${plural(c.waiting, "title")} online` : c.lengths ? `Process: seasons and ratings for ${plural(c.lengths, "title")}` : "Nothing new to check"}</button>`}
+        : `<button class="btn primary block" id="vgo" ${c.waiting || c.lengths || c.quotes ? "" : "disabled"}>${c.waiting ? `Process: check ${plural(c.waiting, "title")} online` : c.lengths ? `Process: seasons and ratings for ${plural(c.lengths, "title")}` : c.quotes ? `Process: look up ${plural(c.quotes, "quote")} online` : "Nothing new to check"}</button>`}
       ${job && job.finished ? `<div class="card stack"><strong>${job.error ? esc(job.error) : job.sum && job.sum.offline ? "No internet: try again on Wi-Fi or mobile data" : job.sum && job.sum.stopped ? "Paused" : "Done"}</strong>
-          ${job.applied ? `<span class="small muted">${job.applied.verified} verified and renamed${job.ai ? `, ${job.ai} picked by the phone AI` : ""}, ${Math.max(0, job.applied.notFound - (job.ai || 0))} not found</span>` : ""}</div>` : ""}
-      <p class="hint">Movies and series: ${settings.tmdbKey ? "TMDB (your key) and Wikidata" : "Wikidata (add a free TMDB key in Settings for posters and genres)"}. Anime: AniList and MyAnimeList. Manga: AniList and MangaDex. Names none of them find are searched on Wikipedia.
-        The best match is picked for you and the title takes its official name. It is verified when a second source agrees, or the name is a close match on its own; anything less keeps the name read and is tried again in 30 days.</p>
-      <p class="hint">Nightly check: ${night.on ? "on (Wi-Fi, charging, phone not in use)" : "off"}${night.last ? ` · last night: ${night.last.checked || 0} checked` : ""}. Change it in <a href="#/settings">Settings</a>.</p>
+          ${job.applied ? `<span class="small muted">${job.applied.verified} verified and renamed${job.ai ? `, ${job.ai} picked by the phone AI` : ""}, ${Math.max(0, job.applied.notFound - (job.ai || 0))} not found</span>` : ""}
+          ${job.quotes !== undefined ? `<span class="small muted">Quotes: ${job.quotes} found on Wikiquote</span>` : ""}</div>` : ""}
+      <p class="hint">Movies and series: ${settings.tmdbKey ? "TMDB (your key) and Wikidata" : "Wikidata (add a free TMDB key in Settings for posters and genres)"}. Anime: AniList and MyAnimeList. Manga: AniList and MangaDex. Names none of them find are searched on Wikipedia. Quotes from your screenshots are looked up on Wikiquote (only their first words are sent).
+        The best match is picked for you and the title takes its official name, but only when two independent sources agree on its name, year and kind. One source is never enough: the name read stays and it is tried again in 30 days.${settings.tmdbKey ? "" : " Without a TMDB key, movies and series have only one source (Wikidata), so they cannot be confirmed."}</p>
+      <p class="hint">Nightly check: ${night.on ? "on (phone not in use, battery 40%+)" : "off"}${night.last ? ` · last night: ${night.last.checked || 0} checked` : ""}. Change it in <a href="#/settings">Settings</a>.</p>
 `;
     bind("#vgo", "click", start);
     bind("#vstop", "click", () => sync("stopVerify"));
@@ -206,6 +230,12 @@ Answer with the number of the right title, or 0 if none of them is it. Answer wi
 
   function paint() { if (location.hash === "#/check") screen(); }
 
+  /** The app was closed while checking (an update installs by closing it): carries on by itself. */
+  function resume() {
+    if (settings.verifyRunning && !(job && !job.finished) && (counts(db).waiting || counts(db).lengths)) { start(); return true; }
+    return false;
+  }
+
   /** The Settings section: your own TMDB key (stays on this phone) and the nightly switch. */
   function settingsHtml() {
     const night = (() => { try { return JSON.parse(sync("nightlyInfo") || "{}"); } catch (e) { return {}; } })();
@@ -216,7 +246,7 @@ Answer with the number of the right title, or 0 if none of them is it. Answer wi
       <label class="field">OMDb API key, for IMDb ratings (free, optional)<input class="input" id="omdbkey" type="password" autocomplete="off" spellcheck="false" value="${esc(settings.omdbKey || "")}" placeholder="Paste your OMDb key"></label>
       <div class="grid2"><button class="btn" id="omdbsave" aria-label="Save OMDb key">Save key</button><button class="btn" id="omdbget">Get a free key</button></div>
       <p class="hint">IMDb has no free way to read its ratings; OMDb gives them with a free key (1,000 titles a day). Without it, movies show the TMDB score and anime the MyAnimeList score. The key stays on this phone and is only sent to OMDb.</p>
-      <div class="opt"><span class="grow stack" style="gap:2px"><strong>Check new titles every night</strong><span class="small muted">Only on Wi-Fi, while charging and not in use, like a WhatsApp backup. Only new titles. Off by default.</span></span>
+      <div class="opt"><span class="grow stack" style="gap:2px"><strong>Check new titles every night</strong><span class="small muted">When the phone is not in use and the battery is at 40% or more. Mobile data is fine. Only new titles. Off by default.</span></span>
         <button class="switch" role="switch" id="nightly" aria-checked="${!!night.on}" aria-label="Check new titles every night"><span></span></button></div>
       ${night.last ? `<p class="hint">Last night: ${night.last.checked || 0} checked, ${night.last.verified || 0} verified${night.last.left ? `, ${night.last.left} left for the next night` : ""}.</p>` : ""}
       <a class="btn block" href="#/check">Check titles now</a></div>`;
@@ -229,7 +259,7 @@ Answer with the number of the right title, or 0 if none of them is it. Answer wi
     bind("#nightly", "click", (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; sync("setNightly", on); toast(on ? "Nightly check on" : "Nightly check off"); redraw(); });
   }
 
-  return { cardHtml, apply, migrate, aiPrompt, aiNumber, aiTodo, counts, onOpen, screen, settingsHtml, bindSettings, start, get job() { return job; } };
+  return { resume, cardHtml, apply, migrate, aiPrompt, aiNumber, aiTodo, counts, onOpen, screen, settingsHtml, bindSettings, start, get job() { return job; } };
 })();
 
 if (typeof module !== "undefined") module.exports = Verify;

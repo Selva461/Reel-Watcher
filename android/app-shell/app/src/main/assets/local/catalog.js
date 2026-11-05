@@ -232,6 +232,7 @@ const Catalog = (() => {
     if (d && Array.isArray(d.seasons) && d.seasons.length) {
       m.seasons = d.seasons.slice(0, 40).map((x) => ({ n: Math.round(Number(x.n) || 0), episodes: Math.max(0, Math.round(Number(x.episodes) || 0)),
         year: toYear(x.year) || null, title: clean(x.title || "", 120) })).filter((x) => x.n > 0);
+      if (d.seasons_by) m.seasons_by = clean(d.seasons_by, 80); else delete m.seasons_by;
     }
     if (d && /^tt\d+$/.test(d.imdb || "")) m.ext = { ...(m.ext || {}), imdb: d.imdb };
   }
@@ -246,7 +247,7 @@ const Catalog = (() => {
     for (const s of drop.sources || []) if (!keep.sources.some((x) => sourceKey(x) === sourceKey(s))) keep.sources.push(s);
     keep.aka = uniq([...(keep.aka || []), drop.title, ...(drop.aka || [])]).filter((t) => normTitle(t) !== normTitle(keep.title));
     keep.genres = uniq([...(keep.genres || []), ...(drop.genres || [])]);
-    for (const k of ["year", "language", "original_title", "country", "poster", "overview", "runtime", "episodes", "rating", "seasons", "details_at"]) if (!keep[k] && drop[k]) keep[k] = drop[k];
+    for (const k of ["year", "language", "original_title", "country", "poster", "overview", "runtime", "episodes", "rating", "seasons", "seasons_by", "details_at"]) if (!keep[k] && drop[k]) keep[k] = drop[k];
     keep.ext = { ...(drop.ext || {}), ...(keep.ext || {}) };
     keep.confidence = Math.max(keep.confidence || 0, drop.confidence || 0);
     if (drop.status && drop.status !== "want" && keep.status === "want") keep.status = drop.status;

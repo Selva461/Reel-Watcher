@@ -29,7 +29,7 @@ import java.util.function.Consumer;
  * and checks titles online. It shows the usual notification with Stop and ends by itself.
  */
 public class NightRun extends BroadcastReceiver {
-    static final String ON = "night_on", HOUR = "night_hour", MIN_BATTERY = "night_min_battery", CHARGING_ONLY = "night_charging_only";
+    static final String ON = "night_on", HOUR = "night_hour", MIN_BATTERY = "night_min_battery";
     /** Battery temperature (°C) above which the run pauses for the night, so the phone and its battery stay cool. */
     static final int HOT_C = 40;
     private static final String ACTION = "app.reelshelf.NIGHT_RUN";
@@ -44,11 +44,6 @@ public class NightRun extends BroadcastReceiver {
 
     static int hour(Context c) {
         return prefs(c).getInt(HOUR, 0);
-    }
-
-    /** Only while the phone is charging (on unless switched off in Settings): easiest on a worn battery. */
-    static boolean chargingOnly(Context c) {
-        return prefs(c).getBoolean(CHARGING_ONLY, true);
     }
 
     /** Battery temperature in °C, or -1. */
@@ -106,8 +101,7 @@ public class NightRun extends BroadcastReceiver {
         schedule(c);  // the next night, whatever happens tonight
         if (!on(c)) return;
         int[] b = battery(c);
-        if (b[1] == 0 && chargingOnly(c)) return;  // not on the charger tonight: skipped
-        if (b[0] >= 0 && b[0] < minBattery(c) && b[1] == 0) return;  // too low tonight: skipped
+        if (b[0] >= 0 && b[0] < minBattery(c)) return;  // Avles: battery is the only rule (no charger or Wi-Fi needed)
         if (temperature(c) >= HOT_C) return;  // already warm: skipped
         WorkService.startNight(c);
     }
@@ -153,13 +147,11 @@ public class NightRun extends BroadcastReceiver {
             ui.postDelayed(this::watchBattery, 60_000);
         }
 
-        /** Stops the run when the battery falls well below the chosen level and the phone is not charging. */
+        /** Stops the run when the battery falls below the chosen level (40% unless changed), or the phone gets hot. */
         private void watchBattery() {
             if (done) return;
             int[] b = battery(ctx);
-            int floor = Math.max(15, minBattery(ctx) - 20);
-            boolean unplugged = b[1] == 0 && chargingOnly(ctx);
-            if ((b[0] >= 0 && b[0] < floor && b[1] == 0) || unplugged || temperature(ctx) >= HOT_C + 2) {
+            if ((b[0] >= 0 && b[0] < minBattery(ctx)) || temperature(ctx) >= HOT_C + 2) {
                 callPage("window.stopAllWork && stopAllWork()");
                 ui.postDelayed(this::nightDone, 5000);
                 return;

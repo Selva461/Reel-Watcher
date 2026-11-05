@@ -39,7 +39,7 @@ public class TitleVerifierTest {
         }
 
         @Override
-        public TitleVerifier.Res send(String url, String body, Map<String, String> headers) throws IOException {
+        public synchronized TitleVerifier.Res send(String url, String body, Map<String, String> headers) throws IOException {
             calls.add(url);
             bodies.add(body == null ? "" : body);
             if (offline) throw new IOException("no network");
@@ -54,7 +54,7 @@ public class TitleVerifierTest {
             return new TitleVerifier.Res(200, "{\"results\":[],\"data\":[]}", 0);
         }
 
-        int count(String part) {
+        synchronized int count(String part) {
             int n = 0;
             for (String c : calls) if (c.contains(part)) n++;
             return n;
@@ -65,11 +65,11 @@ public class TitleVerifierTest {
         long t = 1_800_000_000_000L;
         long slept;
 
-        public long now() {
+        public synchronized long now() {
             return t;
         }
 
-        public void sleep(long ms) {
+        public synchronized void sleep(long ms) {
             t += ms;
             slept += ms;
         }
@@ -99,6 +99,12 @@ public class TitleVerifierTest {
         JSONArray a = new JSONArray();
         for (String id : ids) a.put(new JSONObject().put("id", id));
         return new JSONObject().put("search", a).toString();
+    }
+
+    /** Wikidata also has this film (the second, independent source a title needs). */
+    static FakeNet withWd(FakeNet net, String qid, String label, String year, String tmdbMovieId) throws Exception {
+        return net.on("wbsearchentities", wdSearch(qid)).on("wbgetentities", new JSONObject().put("entities", new JSONObject()
+                .put(qid, wdEntity(label, "Q11424", year, "Q1860", tmdbMovieId))).toString());
     }
 
     static JSONObject claim(String prop, Object value) throws Exception {
@@ -182,13 +188,14 @@ public class TitleVerifierTest {
 
     @Test
     public void aRemakeWithoutAYearGoesToTheOneMoreSourcesAgreeOn() throws Exception {
-        // TMDB alone cannot tell the two Dunes apart: its own ranking decides, and the note names the other one
+        // TMDB alone is one source: nothing is renamed on it
         FakeNet net0 = new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(438631, "Dune", "2021-09-15", "en", "/d21.jpg", 878),
                 tmdbMovie(841, "Dune", "1984-12-14", "en", "/d84.jpg", 878)));
         JSONObject r0 = new TitleVerifier(net0, new FakeClock(), "k", null).verify(cand("DUNE", "movie", 0));
-        assertEquals("verified", r0.getString("verdict"));
-        assertEquals(2021, r0.getJSONObject("facts").getInt("year"));
-        assertTrue(r0.getString("note"), r0.getString("note").contains("picked over Dune (1984)"));
+        assertEquals("not_found", r0.getString("verdict"));  // only TMDB has it: one source is never enough
+        assertFalse(r0.has("facts"));
+        assertTrue(r0.getString("note"), r0.getString("note").contains("a second source has to agree"));
+        assertTrue(r0.getJSONArray("choices").toString().contains("\"sources\":1"));
 
         // Wikidata knows only the 1984 film by that name: two sources agree, so that one is picked, with no question
         FakeNet net = new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(438631, "Dune", "2021-09-15", "en", "/d21.jpg", 878),
@@ -202,24 +209,25 @@ public class TitleVerifierTest {
         assertEquals("Dune", r.getJSONObject("facts").getString("title"));  // the official name, not "DUNE"
         assertTrue(r.getString("by").contains("wikidata"));
 
-        // with the year seen on the screenshot it is clear
-        FakeNet net2 = new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(438631, "Dune", "2021-09-15", "en", "/d21.jpg", 878),
-                tmdbMovie(841, "Dune", "1984-12-14", "en", "/d84.jpg", 878)));
+        // with the year seen on the screenshot it is clear, and Wikidata agrees
+        FakeNet net2 = withWd(new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(438631, "Dune", "2021-09-15", "en", "/d21.jpg", 878),
+                tmdbMovie(841, "Dune", "1984-12-14", "en", "/d84.jpg", 878))), "Q114819", "Dune", "1984", "841");
         JSONObject r2 = new TitleVerifier(net2, new FakeClock(), "k", null).verify(cand("Dune", "movie", 1984));
         assertEquals("verified", r2.getString("verdict"));
         assertEquals(1984, r2.getJSONObject("facts").getInt("year"));
     }
 
     @Test
-    public void withoutATmdbKeyMoviesAreCheckedOnWikidata() throws Exception {
+    public void withoutATmdbKeyMoviesAreFoundOnWikidataButNotConfirmed() throws Exception {
         FakeNet net = new FakeNet().on("wbsearchentities", wdSearch("Q1", "Q2"))
                 .on("wbgetentities&format=json&props=labels|aliases|claims", new JSONObject().put("entities", new JSONObject()
                         .put("Q1", wdEntity("Vikram", "Q11424", "2022", "Q5885", null))
                         .put("Q2", new JSONObject().put("labels", new JSONObject()).put("claims", claim("P31", new JSONObject().put("id", "Q5"))))).toString());
         JSONObject r = new TitleVerifier(net, new FakeClock(), "", null).verify(cand("Vikram", "movie", 2022));
         assertEquals(0, net.count("themoviedb"));
-        assertEquals("verified", r.getString("verdict"));  // exact name, right year, nothing else fits
-        assertEquals("ta", r.getJSONObject("facts").getString("language"));
+        // Wikidata alone is one source: without a TMDB key there is no second one for films, so it is not renamed
+        assertEquals("not_found", r.getString("verdict"));
+        assertTrue(r.getString("note").contains("a second source has to agree"));
     }
 
     // ------------------------------------------------------------------ anime and manga
@@ -259,7 +267,8 @@ public class TitleVerifierTest {
     public void anAnimeAndItsMangaAreNotMixedUpWhenAShowWasSeen() throws Exception {
         FakeNet net = new FakeNet().on("graphql.anilist.co", anilist(
                 anilistMedia(1, 33, "ANIME", "TV", "Berserk", "Kenpuu Denki Berserk", 1997, "JP", "Action"),
-                anilistMedia(2, 2, "MANGA", "MANGA", "Berserk", "Berserk", 1989, "JP", "Action")));
+                anilistMedia(2, 2, "MANGA", "MANGA", "Berserk", "Berserk", 1989, "JP", "Action")))
+                .on("api.jikan.moe/v4/anime", "{\"data\":[{\"mal_id\":33,\"title\":\"Kenpuu Denki Berserk\",\"title_english\":\"Berserk\",\"type\":\"TV\",\"year\":1997}]}");
         JSONObject r = new TitleVerifier(net, new FakeClock(), "", null).verify(cand("Berserk", "anime", 0));
         assertEquals("anime", r.getJSONObject("facts").getString("type"));
     }
@@ -281,7 +290,8 @@ public class TitleVerifierTest {
 
     @Test
     public void aBusyServiceIsWaitedForPolitely() throws Exception {
-        FakeNet net = new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(27205, "Inception", "2010-07-15", "en", "/i.jpg", 28)));
+        FakeNet net = withWd(new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(27205, "Inception", "2010-07-15", "en", "/i.jpg", 28))),
+                "Q25188", "Inception", "2010", "27205");
         net.busyFirst = 1;
         FakeClock clock = new FakeClock();
         JSONObject r = new TitleVerifier(net, clock, "k", null).verify(cand("Inception", "movie", 2010));
@@ -310,7 +320,8 @@ public class TitleVerifierTest {
                 .put(entry("m-no", "Zzqx", "unverified", now - 50).put("checked_at", now - 20));  // looked up lately, nothing found
         writeDb(dir, media);
         String before = new String(java.nio.file.Files.readAllBytes(new File(dir, "reels.json").toPath()), "UTF-8");
-        FakeNet net = new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(27205, "Inception", "2010-07-15", "en", "/i.jpg", 28)));
+        FakeNet net = withWd(new FakeNet().on("themoviedb.org", tmdb(tmdbMovie(27205, "Inception", "2010-07-15", "en", "/i.jpg", 28))),
+                "Q25188", "Inception", "2010", "27205");
         TitleVerifier v = new TitleVerifier(net, new FakeClock(), "k", null);
         List<int[]> prog = new ArrayList<>();
         JSONObject sum = new VerifyJob(dir, v, new AtomicBoolean()).run(0, 0, (d, t, title) -> prog.add(new int[]{d, t}));
@@ -380,8 +391,8 @@ public class TitleVerifierTest {
 
     @Test
     public void aVerifiedMovieGetsItsLength() throws Exception {
-        FakeNet net = new FakeNet().on("3/movie/27205?", "{\"runtime\":148}")
-                .on("search/multi", tmdb(tmdbMovie(27205, "Inception", "2010-07-15", "en", "/i.jpg", 28)));
+        FakeNet net = withWd(new FakeNet().on("3/movie/27205?", "{\"runtime\":148}")
+                .on("search/multi", tmdb(tmdbMovie(27205, "Inception", "2010-07-15", "en", "/i.jpg", 28))), "Q25188", "Inception", "2010", "27205");
         TitleVerifier v = new TitleVerifier(net, new FakeClock(), "k", null);
         TitleVerifier.Candidate c = TitleVerifier.Candidate.from(new JSONObject().put("id", "m1").put("title", "Inception").put("type", "movie").put("year", 2010));
         JSONObject r = v.verify(c);
@@ -417,18 +428,19 @@ public class TitleVerifierTest {
                         .put("pageprops", new JSONObject().put("wikibase_item", "Q13417189"))))).toString();
         JSONObject person = new JSONObject().put("labels", new JSONObject().put("en", new JSONObject().put("value", "Christopher Nolan")))
                 .put("claims", new JSONObject().put("P31", claim("P31", new JSONObject().put("id", "Q5")).getJSONArray("P31")));
-        FakeNet net = new FakeNet()  // Wikidata's label search does not know the misspelling
+        FakeNet net = new FakeNet()  // neither TMDB nor Wikidata's label search knows the misspelling
+                .on("query=Interstellar", tmdb(tmdbMovie(157336, "Interstellar", "2014-11-05", "en", "/s.jpg", 878)))
                 .on("en.wikipedia.org", page)
                 .on("wbgetentities", new JSONObject().put("entities", new JSONObject()
                         .put("Q13417189", wdEntity("Interstellar", "Q11424", "2014", "Q1860", "157336")).put("Q25191", person)).toString());
-        JSONObject r = new TitleVerifier(net, new FakeClock(), "", null).verify(cand("Intersteller", "movie", 0));
+        JSONObject r = new TitleVerifier(net, new FakeClock(), "k", null).verify(cand("Intersteller", "movie", 0));
         assertEquals("verified", r.getString("verdict"));
         JSONObject f = r.getJSONObject("facts");
         assertEquals("Interstellar", f.getString("title"));
         assertEquals(2014, f.getInt("year"));
         assertEquals("movie/157336", f.getJSONObject("ext").getString("tmdb"));
         assertEquals("https://en.wikipedia.org/wiki/Interstellar_(film)", f.getJSONObject("ext").getString("wikipedia"));
-        assertEquals("wikipedia", r.getString("by"));
+        assertEquals("wikipedia+tmdb", r.getString("by"));  // found on Wikipedia, confirmed by TMDB
         assertEquals(1, net.count("en.wikipedia.org"));  // asked once, only after the others found nothing
     }
 
@@ -485,6 +497,7 @@ public class TitleVerifierTest {
         assertEquals("MyAnimeList", d.ratingBy);
         assertEquals(1234567, d.votes);
         assertEquals(0, net.count("omdbapi"));
+        assertEquals("AniList, checked with MyAnimeList", d.seasonsBy);  // both say 25 episodes for this entry
     }
 
     @Test
@@ -505,6 +518,7 @@ public class TitleVerifierTest {
         assertEquals(8.4, noKey.rating, 0.001);
         assertEquals("tt4574334", noKey.imdb);
         assertEquals(0, net.count("omdbapi"));
+        assertEquals("TMDB (one source)", noKey.seasonsBy);
 
         v.omdbKey = "my-omdb";
         TitleVerifier.Details d = v.details(ext, "series");
@@ -514,18 +528,116 @@ public class TitleVerifierTest {
         for (String c : net.calls) if (!c.contains("omdbapi.com")) assertFalse(c.contains("my-omdb"));  // the key goes to OMDb only
     }
 
+    private static String wdSeasons(String id, int n) throws Exception {
+        JSONObject snak = new JSONObject().put("datavalue", new JSONObject().put("value", new JSONObject().put("amount", "+" + n)));
+        return new JSONObject().put("entities", new JSONObject().put(id, new JSONObject().put("claims", new JSONObject()
+                .put("P2437", new JSONArray().put(new JSONObject().put("mainsnak", snak)))))).toString();
+    }
+
+    @Test
+    public void seasonsAreCheckedWithASecondSource() throws Exception {
+        String tv = "{\"seasons\":[{\"season_number\":1,\"episode_count\":8},{\"season_number\":2,\"episode_count\":9}]}";
+        Map<String, String> ext = new java.util.HashMap<>();
+        ext.put("tmdb", "tv/66732");
+        ext.put("wikidata", "Q19865210");
+        FakeNet same = new FakeNet().on("3/tv/66732?", tv).on("wbgetentities", wdSeasons("Q19865210", 2));
+        assertEquals("TMDB, checked with Wikidata", new TitleVerifier(same, new FakeClock(), "k", null).details(ext, "series").seasonsBy);
+        FakeNet differs = new FakeNet().on("3/tv/66732?", tv).on("wbgetentities", wdSeasons("Q19865210", 3));
+        TitleVerifier.Details d = new TitleVerifier(differs, new FakeClock(), "k", null).details(ext, "series");
+        assertEquals("TMDB (Wikidata says 3 seasons)", d.seasonsBy);
+        assertEquals(2, d.seasons.length());  // still shown, with the disagreement said out loud
+
+        // Anime on TMDB often lumps every episode into season 1: AniList's first season says otherwise
+        String lumped = "{\"seasons\":[{\"season_number\":1,\"episode_count\":66}]}";
+        Map<String, String> an = new java.util.HashMap<>();
+        an.put("tmdb", "tv/1429");
+        an.put("anilist", "16498");
+        FakeNet aot = new FakeNet().on("3/tv/1429?", lumped).on("\"i\":16498", alNode(16498, "TV", 25, 2013, "Attack on Titan", 0, 20958));
+        assertEquals("TMDB (AniList says 25 episodes in season 1)", new TitleVerifier(aot, new FakeClock(), "k", null).details(an, "anime").seasonsBy);
+    }
+
     @Test
     public void aVerifiedTitleCarriesItsRatingAndSeasons() throws Exception {
         String tv = "{\"episode_run_time\":[50],\"number_of_episodes\":17,\"vote_average\":8.4,\"vote_count\":5000,"
                 + "\"seasons\":[{\"season_number\":1,\"episode_count\":8,\"air_date\":\"2016-07-15\"},{\"season_number\":2,\"episode_count\":9,\"air_date\":\"2017-10-27\"}]}";
         JSONObject show = new JSONObject().put("id", 66732).put("media_type", "tv").put("name", "Stranger Things").put("first_air_date", "2016-07-15")
                 .put("original_language", "en").put("genre_ids", new JSONArray()).put("poster_path", "/s.jpg");
-        FakeNet net = new FakeNet().on("3/tv/66732?", tv).on("search/multi", new JSONObject().put("results", new JSONArray().put(show)).toString());
+        FakeNet net = new FakeNet().on("3/tv/66732?", tv).on("search/multi", new JSONObject().put("results", new JSONArray().put(show)).toString())
+                .on("wbsearchentities", wdSearch("Q19865210")).on("wbgetentities", new JSONObject().put("entities", new JSONObject()
+                        .put("Q19865210", wdEntity("Stranger Things", "Q5398426", "2016", "Q1860", null))).toString());
         JSONObject r = new TitleVerifier(net, new FakeClock(), "k", null).verify(cand("STRANGER THINGS", "series", 0));
         assertEquals("verified", r.getString("verdict"));
         JSONObject f = r.getJSONObject("facts");
         assertEquals("Stranger Things", f.getString("title"));
         assertEquals(8.4, f.getJSONObject("rating").getDouble("score"), 0.001);
         assertEquals(2, f.getJSONArray("seasons").length());
+        assertEquals("TMDB (one source)", f.getString("seasons_by"));  // Wikidata has no number of seasons for it here
+    }
+
+    @Test
+    public void tenTitlesAreCheckedAtOnceButEachServiceKeepsItsPace() throws Exception {
+        File dir = tmp.newFolder();
+        long now = System.currentTimeMillis();
+        JSONArray media = new JSONArray();
+        String[] names = {"Arrival", "Heat", "Alien", "Zodiac", "Memento", "Prisoners", "Sicario", "Gravity", "Inception", "Whiplash",
+                "Parasite", "Oldboy", "Amelie", "Rocky", "Jaws", "Vertigo", "Psycho", "Fargo", "Se7en", "Up"};
+        for (int i = 0; i < 20; i++) media.put(entry("m-" + i, names[i], "unverified", now - i));
+        writeDb(dir, media);
+        java.util.concurrent.atomic.AtomicInteger inFlight = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger most = new java.util.concurrent.atomic.AtomicInteger();
+        Map<String, List<Long>> at = new java.util.concurrent.ConcurrentHashMap<>();
+        Map<String, String> qNames = new java.util.concurrent.ConcurrentHashMap<>();
+        TitleVerifier.Http slow = (url, body, headers) -> {  // every answer takes 120 ms, like a phone network
+            String host = url.replaceFirst("^https?://", "").split("[/?:]", 2)[0];
+            at.computeIfAbsent(host, k -> java.util.Collections.synchronizedList(new ArrayList<>())).add(System.nanoTime() / 1_000_000);
+            most.accumulateAndGet(inFlight.incrementAndGet(), Math::max);
+            try {
+                Thread.sleep(120);
+            } catch (InterruptedException e) {
+                throw new IOException(e);
+            } finally {
+                inFlight.decrementAndGet();
+            }
+            if (url.contains("themoviedb.org")) {
+                if (!url.contains("query=")) return new TitleVerifier.Res(200, "{\"runtime\":100}", 0);
+                String n = java.net.URLDecoder.decode(url.replaceAll(".*query=([^&]*).*", "$1"), java.nio.charset.StandardCharsets.UTF_8);
+                try {
+                    return new TitleVerifier.Res(200, tmdb(tmdbMovie(100 + Math.abs(n.hashCode() % 1000), n, "2001-01-01", "en", "/p.jpg", 18)), 0);
+                } catch (Exception e) {
+                    throw new IOException(e);
+                }
+            }
+            try {  // Wikidata has each film too, with the same TMDB id: the second source
+                if (url.contains("wbsearchentities")) {
+                    String n = java.net.URLDecoder.decode(url.replaceAll(".*search=([^&]*).*", "$1"), java.nio.charset.StandardCharsets.UTF_8);
+                    String q = "Q" + (100 + Math.abs(n.hashCode() % 1000));
+                    qNames.put(q, n);
+                    return new TitleVerifier.Res(200, wdSearch(q), 0);
+                }
+                if (url.contains("wbgetentities") && url.contains("claims")) {
+                    String q = java.net.URLDecoder.decode(url.replaceAll(".*ids=([^&]*).*", "$1"), java.nio.charset.StandardCharsets.UTF_8);
+                    return new TitleVerifier.Res(200, new JSONObject().put("entities", new JSONObject()
+                            .put(q, wdEntity(qNames.get(q), "Q11424", "2001", "Q1860", q.substring(1)))).toString(), 0);
+                }
+            } catch (Exception e) {
+                throw new IOException(e);
+            }
+            return new TitleVerifier.Res(200, "{\"search\":[],\"results\":[]}", 0);
+        };
+        long t0 = System.nanoTime();
+        JSONObject sum = new VerifyJob(dir, new TitleVerifier(slow, TitleVerifier.REAL_CLOCK, "k", null), new AtomicBoolean()).run(0, 0, null);
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertEquals(20, sum.getInt("checked"));
+        assertEquals(20, sum.getInt("verified"));
+        assertTrue("several at once: " + most.get(), most.get() >= 3);  // as many as the services' paces allow
+        assertEquals(0, at.containsKey("graphql.anilist.co") ? at.get("graphql.anilist.co").size() : 0);  // clear matches skip AniList
+        // one by one: 4 calls of 120 ms per title = 9.6 s; at once it is bound only by Wikidata's pace (40 x 150 ms)
+        assertTrue("faster than one by one: " + ms + " ms", ms < 20 * 4 * 120 * 3 / 4);
+        for (Map.Entry<String, List<Long>> e : at.entrySet()) {  // never faster than the service's own pace
+            List<Long> t = new ArrayList<>(e.getValue());
+            java.util.Collections.sort(t);
+            long gap = e.getKey().contains("themoviedb") ? 50 : 150;
+            for (int i = 1; i < t.size(); i++) assertTrue(e.getKey() + " " + (t.get(i) - t.get(i - 1)) + " ms", t.get(i) - t.get(i - 1) >= gap - 5);
+        }
     }
 }

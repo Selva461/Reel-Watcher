@@ -678,6 +678,70 @@ final class LocalBridge {
         });
     }
 
+    // ------------------------------------------------------------------ reel videos on the phone (the whole reel)
+
+    /** The folders you picked for reel videos: [{uri, name}]. */
+    @JavascriptInterface
+    public String videoFolders() {
+        if (!ok()) return "[]";
+        return shots.foldersOf(ScreenshotReader.VIDEO_FOLDERS).toString();
+    }
+
+    /** Android's folder picker, for where Instagram's Download or screen recordings put reels. Calls back with {uri, name}. */
+    @JavascriptInterface
+    public void addVideoFolder(int id) {
+        if (!ok()) return;
+        act.runOnUiThread(() -> act.pickFolder(uri -> {
+            if (uri == null) {
+                done(id, false, "cancelled");
+                return;
+            }
+            try {
+                done(id, true, shots.addFolderTo(ScreenshotReader.VIDEO_FOLDERS, uri).toString());
+            } catch (Exception e) {
+                done(id, false, "Could not keep access to that folder: " + e.getMessage());
+            }
+        }));
+    }
+
+    @JavascriptInterface
+    public void removeVideoFolder(String uri) {
+        if (!ok() || uri == null) return;
+        shots.removeFolderFrom(ScreenshotReader.VIDEO_FOLDERS, uri);
+    }
+
+    /** Every video in the picked folders and the shared ones: [{k, n, f, m, s}]. */
+    @JavascriptInterface
+    public void listVideos(int id) {
+        if (!ok()) return;
+        shots.allow();
+        ocr.execute(() -> {
+            try {
+                done(id, true, shots.listVideos().toString());
+            } catch (Exception e) {
+                done(id, false, "Could not list the folder: " + e.getMessage());
+            }
+        });
+    }
+
+    /** Reads one whole reel video from the phone: {screen, speech, seconds, speechModel, media}. Only picked or shared ones. */
+    @JavascriptInterface
+    public void readLocalVideo(int id, String key) {
+        if (!ok()) return;
+        if (!shots.videoAllowed(key)) {
+            done(id, false, "Only videos in a folder you picked, or shared to Reel Shelf, can be read");
+            return;
+        }
+        shots.allow();
+        ocr.execute(() -> {
+            try {
+                done(id, true, ReelVideo.readLocal(act.ctx(), shots, SpeechModel.dir(act.ctx()), Uri.parse(key), shots::stopped).toString());
+            } catch (Throwable e) {
+                done(id, false, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            }
+        });
+    }
+
     /** Pick pictures (for example a reel's comments) and get their text back, read on the phone. Nothing is kept. */
     @JavascriptInterface
     public void readPictures(int id) {
@@ -719,6 +783,19 @@ final class LocalBridge {
                 done(id, true, new WebLookup(TitleVerifier.NET).search(question).toString());
             } catch (Exception e) {
                 done(id, false, e.getMessage() == null ? "The search did not work" : e.getMessage());
+            }
+        });
+    }
+
+    /** A quote's first words to Wikiquote's search (part of Process, like the title check). {found, page, url, snippet}. */
+    @JavascriptInterface
+    public void quoteCheck(int id, String text) {
+        if (!ok()) return;
+        net.execute(() -> {
+            try {
+                done(id, true, new WebLookup(TitleVerifier.NET).quote(text).toString());
+            } catch (Exception e) {
+                done(id, false, e.getMessage() == null ? "The quote check did not work" : e.getMessage());
             }
         });
     }
@@ -893,7 +970,7 @@ final class LocalBridge {
         return VerifyJob.take(act.ctx().getFilesDir());
     }
 
-    /** The nightly check (Wi-Fi + charging + phone not in use). Off unless you switch it on. */
+    /** The nightly check (phone not in use, battery at 40% or more, any internet). Off unless you switch it on. */
     @JavascriptInterface
     public void setNightly(boolean on) {
         if (!ok()) return;
@@ -957,17 +1034,11 @@ final class LocalBridge {
         try {
             Context c = act.ctx();
             android.app.AlarmManager am = (android.app.AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
-            return new JSONObject().put("on", NightRun.on(c)).put("hour", NightRun.hour(c)).put("minBattery", NightRun.minBattery(c)).put("chargingOnly", NightRun.chargingOnly(c))
+            return new JSONObject().put("on", NightRun.on(c)).put("hour", NightRun.hour(c)).put("minBattery", NightRun.minBattery(c))
                     .put("exact", Build.VERSION.SDK_INT < 31 || (am != null && am.canScheduleExactAlarms())).toString();
         } catch (JSONException e) {
             return "{}";
         }
-    }
-
-    @JavascriptInterface
-    public void setNightCharging(boolean only) {
-        if (!ok()) return;
-        NightRun.prefs(act.ctx()).edit().putBoolean(NightRun.CHARGING_ONLY, only).apply();
     }
 
     @JavascriptInterface

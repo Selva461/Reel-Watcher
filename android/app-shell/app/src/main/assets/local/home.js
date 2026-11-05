@@ -11,6 +11,7 @@ const UI = {
   gear: SVG('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
   play: SVG('<path d="M7 5l12 7-12 7z" fill="currentColor"/>'),
   five: SVG('<path d="M15 4H9l-1 7c1-.7 2.2-1 3.5-1a4.5 4.5 0 1 1-4.3 5.8"/>'),
+  film: SVG('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/>'),
   image: SVG('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>'),
   comment: SVG('<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/>'),
   plus: SVG('<path d="M12 5v14M5 12h14"/>'),
@@ -171,7 +172,9 @@ function reelHit(h, q) {
 }
 
 function quoteRow(x) {
-  return `<div class="list-item"><span class="grow stack" style="gap:4px"><span>“${esc(x.text)}”</span>${x.from ? `<span class="small muted">${esc(x.from)}</span>` : ""}</span>
+  const o = x.online;
+  const tag = !o ? "" : o.found ? `<span class="tag ok">${o.twice ? "Confirmed" : "Wikiquote"}: ${esc(o.page)}</span>` : `<span class="tag">Not found online</span>`;
+  return `<div class="list-item"><span class="grow stack" style="gap:4px"><span>“${esc(x.text)}”</span>${x.from ? `<span class="small muted">${esc(x.from)}</span>` : ""}${tag ? `<span class="tagrow">${tag}</span>` : ""}</span>
     <button class="icon-btn" data-copy="${esc(x.id)}" aria-label="Copy">${UI.copy}</button></div>`;
 }
 function copyQuote(id) {
@@ -297,10 +300,11 @@ function inboxScreen() {
       ${running ? tile("goRun", UI.play, "Working", "#/run") : todo.length ? tile("start", UI.play, `Start ${todo.length}`) : tile("goRun", UI.play, "Start", "#/run")}
       ${!running && todo.length > 5 ? tile("try5", UI.five, "Try 5") : ""}
       ${tile("shots", UI.image, "Screenshots", "#/shots")}
+      ${tile("videos", UI.film, "Videos")}
       ${tile("comments", UI.comment, "Comments")}
       ${tile("add", UI.plus, "Add", "#/add")}
     </div>
-    ${nr.on !== undefined ? `<a class="list-item" href="#/settings" style="align-items:center">${UI.moon}<span class="grow small">${nr.on ? `${String(nr.hour).padStart(2, "0")}:00 · ${nr.chargingOnly !== false ? "charging" : `>${nr.minBattery}%`} · ≤ ${settings.nightMax || 200}` : "Off"}</span></a>` : ""}
+    ${nr.on !== undefined ? `<a class="list-item" href="#/settings" style="align-items:center">${UI.moon}<span class="grow small">${nr.on ? `${String(nr.hour).padStart(2, "0")}:00 · ${nr.minBattery ? `≥ ${nr.minBattery}%` : "any battery"} · ≤ ${settings.nightMax || 200}` : "Off"}</span></a>` : ""}
     ${Verify.cardHtml()}
     ${(db.inbox || []).length ? `<a class="card accent" href="#/file"><span class="grow"><strong>${plural(db.inbox.length, "Meta AI answer")}</strong></span>${ICON.chev}</a>` : ""}
     ${failed.length ? `<details class="stack"><summary class="label">Could not finish · ${failed.length}</summary><div class="stack" style="margin-top:8px">${failed.slice(0, 40).map(reelRow).join("")}</div></details>` : ""}
@@ -312,7 +316,17 @@ function inboxScreen() {
   bind("#start", "click", () => { settings.rereadOk = true; saveSettings(); startRun(); });
   bind("#try5", "click", () => startRun(todo.slice().sort(byUsefulThenNewest).slice(0, 5).map((r) => r.code)));
   bind("#comments", "click", commentsFromPictures);
+  bind("#videos", "click", addVideoFolder);
   bind("#batch", "click", askMetaBatch);
+}
+
+/** Where Instagram's own Download (or screen recordings) puts reels: picked once, then every new video there is read whole. */
+function addVideoFolder() {
+  phone("addVideoFolder").then(async (f) => {
+    const n = await scanVideos();
+    toast(`${JSON.parse(f || "{}").name || "Folder"}: ${plural(n, "new reel video")}. Start reads them whole.`);
+    render();
+  }).catch((e) => { if (e.message !== "cancelled") toast(e.message); });
 }
 
 /** Comment screenshots: choose them, they are read on the phone and filed under the reel they belong to. */

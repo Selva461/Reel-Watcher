@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The optional nightly online check (off until you switch it on in Settings), like WhatsApp's night backup.
- * Android runs it about once a day, only when the phone is charging, on Wi-Fi and not being used.
+ * Android runs it about once a day, when the phone is not being used and the battery is at 40% or more (any internet).
  * It only looks at titles that were never checked, stops when Android asks, and never runs AI.
  * This is the one thing Reel Shelf does while closed, and only because you turned it on.
  */
@@ -34,8 +34,7 @@ public class NightlyCheck extends JobService {
             return;
         }
         JobInfo job = new JobInfo.Builder(JOB_ID, new ComponentName(ctx, NightlyCheck.class))
-                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_UNMETERED)  // Wi-Fi, never mobile data
-                .setRequiresCharging(true)
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)       // Wi-Fi or mobile data; no charger needed
                 .setRequiresDeviceIdle(true)                            // screen off, not in use: at night
                 .setPeriodic(24L * 3600_000L)
                 .setPersisted(true)                                     // still on after a restart
@@ -69,6 +68,8 @@ public class NightlyCheck extends JobService {
     public boolean onStartJob(JobParameters params) {
         SharedPreferences p = getSharedPreferences("reelshelf", MODE_PRIVATE);
         if (!p.getBoolean("nightly_check", false) || VerifyJob.running()) return false;
+        int level = NightRun.battery(this)[0];
+        if (level >= 0 && level < NightRun.minBattery(this)) return false;  // battery is the only rule: below 40%, not tonight
         stop.set(false);
         thread = new Thread(() -> {
             try {
@@ -89,7 +90,7 @@ public class NightlyCheck extends JobService {
 
     @Override
     public boolean onStopJob(JobParameters params) {
-        stop.set(true);  // Android wants the phone back (unplugged, Wi-Fi gone, screen on)
+        stop.set(true);  // Android wants the phone back (screen on, no internet)
         return true;     // try again later
     }
 }
