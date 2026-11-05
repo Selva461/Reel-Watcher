@@ -1,8 +1,9 @@
 """The watchlist's online check in the phone app (assets/local/verify.js), with the Java side faked.
 
 The lookups themselves (TMDB, Wikidata, AniList, Jikan, MangaDex, fuzzy matching, the nightly job) are tested in
-android/app-shell/app/src/test (JUnit). Here: answers are applied to the watchlist, unsure titles are shown for you to
-pick, the TMDB key and nightly switch in Settings. No network."""
+android/app-shell/app/src/test (JUnit). Here: answers are applied to the watchlist and titles take their official
+names with nothing left for you to pick, old "pick one" titles are checked again, the TMDB key and nightly switch in
+Settings. No network."""
 import json
 
 from test_phone_app import db_of, phone, site  # noqa: F401  (pytest fixtures)
@@ -29,11 +30,9 @@ def facts(title, year, lang, typ="movie", **kw):
 ANSWERS = {
     "m-inceptoin": {"verdict": "verified", "confidence": 0.97, "by": "tmdb+wikidata", "note": "Confirmed by tmdb and wikidata",
                     "facts": facts("Inception", 2010, "en"), "choices": []},
-    "m-dune": {"verdict": "conflict", "confidence": 0.9, "by": "tmdb", "note": "More than one title fits: pick the right one",
-               "choices": [{"source": "tmdb", "title": "Dune", "year": 2021, "type": "movie", "language": "en", "score": 0.95,
-                            "poster": "https://image.tmdb.org/t/p/w342/d21.jpg", "facts": facts("Dune", 2021, "en", ext={"tmdb": "movie/438631"})},
-                           {"source": "tmdb", "title": "Dune", "year": 1984, "type": "movie", "language": "en", "score": 0.94,
-                            "poster": "https://image.tmdb.org/t/p/w342/d84.jpg", "facts": facts("Dune", 1984, "en", ext={"tmdb": "movie/841"})}]},
+    "m-dune": {"verdict": "verified", "confidence": 0.98, "by": "tmdb+wikidata",
+               "note": "Confirmed by tmdb and wikidata; picked over Dune (2021), which fewer sources agree on",
+               "facts": facts("Dune", 1984, "en", ext={"tmdb": "movie/841"}), "choices": []},
     "m-zzq": {"verdict": "not_found", "confidence": 0.2, "by": "tmdb", "note": "Nothing online matched well enough", "checked_at": 5, "choices": []},
 }
 
@@ -43,33 +42,38 @@ def start_db():
                                                            media("m-zzq", "zzq vvx"), media("m-heat", "Heat", verified="verified")]})
 
 
-def test_process_checks_titles_and_unsure_ones_are_yours_to_pick(phone):
+def test_process_checks_titles_and_renames_them_with_nothing_for_you_to_pick(phone):
     phone.route("https://image.tmdb.org/**", lambda r: r.fulfill(status=200, content_type="image/png", body=PNG))
     phone.open_with({"db": start_db(), "verifyAnswers": ANSWERS})
     phone.goto(phone.url.split("#")[0] + "#/inbox")
     phone.get_by_role("link", name="Look up online").click()
     phone.get_by_role("button", name="Process: check 3 titles online").click()
-    phone.get_by_text("1 verified, 1 to pick, 1 not found").wait_for()
+    phone.get_by_text("2 verified and renamed, 1 not found").wait_for()
     assert ["verifyNow"] in phone.rn()["calls"]
     d = {m["id"]: m for m in db_of(phone)["media"]}
     inc = d["m-inceptoin"]
     assert inc["verified"] == "verified" and inc["title"] == "Inception" and inc["year"] == 2010 and inc["language"] == "en"
     assert "Inceptoin" in inc["aka"] and inc["poster"].startswith("https://image.tmdb.org/")
-    assert d["m-dune"]["verified"] == "conflict" and d["m-dune"]["title"] == "DUNE"  # nothing guessed
+    dune = d["m-dune"]  # the official name, picked by the phone, not "DUNE" from the screenshot
+    assert dune["verified"] == "verified" and dune["title"] == "Dune" and dune["year"] == 1984 and dune["ext"]["tmdb"] == "movie/841"
+    assert "picked over Dune (2021)" in dune["check"]["note"]
     assert d["m-zzq"]["verified"] == "unverified" and d["m-zzq"]["checked_at"] == 5  # not retried every time
     assert d["m-heat"]["verified"] == "verified"
+    # nothing waits for you
+    assert phone.locator("[data-pick], [data-keep], [data-retitle]").count() == 0
+    assert phone.get_by_text("Need you").count() == 0
 
-    # pick the 1984 film
-    phone.locator("[data-pick='m-dune'][data-i='1']").click()
-    dune = {m["id"]: m for m in db_of(phone)["media"]}["m-dune"]
-    assert dune["verified"] == "verified" and dune["year"] == 1984 and dune["verified_by"] == "you" and dune["ext"]["tmdb"] == "movie/841"
 
-    # the one not found: type the right name and it goes back in the queue
-    phone.locator("[data-retitle='m-zzq'] input").fill("Zodiac")
-    phone.locator("[data-retitle='m-zzq'] button").click()
-    z = {m["id"]: m for m in db_of(phone)["media"]}["m-zzq"]
-    assert z["title"] == "Zodiac" and z["verified"] == "unverified" and "checked_at" not in z
-    phone.get_by_role("button", name="Process: check 1 title online").wait_for()
+def test_titles_left_to_pick_before_the_update_are_checked_again(phone):
+    old = json.dumps({"reels": [], "inbox": [], "media": [
+        media("m-dune", "DUNE", verified="conflict", review={"choices": [], "note": "pick"}),
+        media("m-zzq", "zzq vvx", checked_at=5), media("m-heat", "Heat", verified="verified")]})
+    phone.open_with({"db": old}, "#/check")
+    phone.get_by_role("button", name="Process: check 2 titles online").wait_for()
+    d = {m["id"]: m for m in db_of(phone)["media"]}
+    assert d["m-dune"]["verified"] == "unverified" and "review" not in d["m-dune"]
+    assert "checked_at" not in d["m-zzq"] and d["m-heat"]["verified"] == "verified"
+    assert db_of(phone)["verify_rules"] == 2
 
 
 def test_answers_from_the_night_are_applied_when_the_app_opens(phone):
@@ -97,7 +101,7 @@ def test_tmdb_key_and_nightly_switch_in_settings(phone):
 
 def test_hostile_titles_are_shown_as_text(phone):
     bad = '<img src=x onerror="window.__pwned=1">'
-    ans = {"m-dune": {**ANSWERS["m-dune"], "choices": [{**ANSWERS["m-dune"]["choices"][0], "title": bad, "poster": ""}]}}
-    phone.open_with({"db": start_db(), "verifyPending": ans}, "#/check")
+    ans = {"m-dune": {**ANSWERS["m-dune"], "facts": facts(bad, 1984, "en", poster="")}}
+    phone.open_with({"db": start_db(), "verifyPending": ans}, "#/")
     phone.get_by_text(bad).first.wait_for()
     assert phone.evaluate("window.__pwned") is None

@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -25,14 +26,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Checks watchlist titles against free online databases and fills in year, language, genres and poster.
  * Movies and series: TMDB (with your own free key) or Wikidata (no key). Anime: AniList and Jikan (MyAnimeList).
- * Manga: AniList and MangaDex. Matching is plain maths (TitleMatch), no AI.
- * A title is "verified" only when the match is strong and a second source agrees (or the name is an exact,
- * unique match). Close calls (remakes, an anime and its manga) become "conflict" with choices for you to pick.
+ * Manga: AniList and MangaDex. When none of them finds it, Wikipedia's search (which forgives misspelt names) is
+ * asked, and its pages are read through Wikidata. Matching is plain maths (TitleMatch), no AI.
+ * Nothing is left for you to check: the best match is picked automatically and its official name replaces the one
+ * read from the screenshot. It is "verified" when a second source agrees, or the name alone matches strongly
+ * ({@link #AUTO}); close calls (remakes, an anime and its manga) go to the one more sources agree on. Weaker matches
+ * are "not_found" and are tried again later; nothing is renamed on a guess.
  * Pure Java (no Android classes) so it is tested on a computer; the network is behind {@link Http}.
  */
 final class TitleVerifier {
-    static final double VERIFIED = 0.85;
     static final double REVIEW = 0.55;
+    /** One source alone is trusted from this score (the name is close, and the year, kind and language fit). */
+    static final double AUTO = 0.75;
 
     // ------------------------------------------------------------------ network
 
@@ -116,6 +121,7 @@ final class TitleVerifier {
         GAP.put("graphql.anilist.co", 2100L);
         GAP.put("api.mangadex.org", 300L);
         GAP.put("www.wikidata.org", 300L);
+        GAP.put("en.wikipedia.org", 300L);
         GAP.put("api.themoviedb.org", 120L);
     }
 
@@ -410,6 +416,39 @@ final class TitleVerifier {
         if (hits == null || hits.length() == 0) return out;
         List<String> ids = new ArrayList<>();
         for (int i = 0; i < hits.length(); i++) ids.add(hits.getJSONObject(i).optString("id"));
+        return wdEntities(ids, query, "wikidata", new HashMap<>());
+    }
+
+    /**
+     * Wikipedia's own search, for names Wikidata's label search misses (misspelt or partly read). Its best pages are
+     * read through their Wikidata items, so the facts are the same; the link points to the Wikipedia article.
+     */
+    List<Match> wikipedia(String query) throws IOException, JSONException {
+        String s = call("https://en.wikipedia.org/w/api.php?action=query&format=json&redirects=1&generator=search&gsrlimit=5&gsrsearch="
+                + q(query) + "&prop=pageprops%7Cinfo&ppprop=wikibase_item&inprop=url", null, null);
+        JSONObject qo = s.isEmpty() ? null : new JSONObject(s).optJSONObject("query");
+        JSONObject pages = qo == null ? null : qo.optJSONObject("pages");
+        if (pages == null) return new ArrayList<>();
+        List<JSONObject> list = new ArrayList<>();
+        for (Iterator<String> it = pages.keys(); it.hasNext(); ) list.add(pages.getJSONObject(it.next()));
+        list.sort((a, b) -> Integer.compare(a.optInt("index", 99), b.optInt("index", 99)));
+        List<String> ids = new ArrayList<>();
+        Map<String, String> links = new HashMap<>();
+        for (JSONObject p : list) {
+            JSONObject pp = p.optJSONObject("pageprops");
+            String id = pp == null ? "" : pp.optString("wikibase_item");
+            if (!id.matches("Q\\d+") || ids.contains(id)) continue;
+            ids.add(id);
+            String link = p.optString("fullurl");
+            if (link.startsWith("https://en.wikipedia.org/")) links.put(id, link);
+        }
+        if (ids.isEmpty()) return new ArrayList<>();
+        return wdEntities(ids, query, "wikipedia", links);
+    }
+
+    /** Reads Wikidata items (in this order) into matches; items that are not a title (a person, a city) are skipped. */
+    private List<Match> wdEntities(List<String> ids, String query, String source, Map<String, String> links) throws IOException, JSONException {
+        List<Match> out = new ArrayList<>();
         String e = call("https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=labels|aliases|claims&languages=en&ids="
                 + q(String.join("|", ids)), null, null);
         JSONObject ents = e.isEmpty() ? null : new JSONObject(e).optJSONObject("entities");
@@ -424,7 +463,7 @@ final class TitleVerifier {
             for (String inst : wdIds(claims, "P31")) if (WD_KIND.containsKey(inst)) { kind = WD_KIND.get(inst); break; }
             if (kind.isEmpty()) continue;  // a person, a song, a city...: not a title
             Match m = new Match();
-            m.source = "wikidata";
+            m.source = source;
             m.id = id;
             m.type = kind;
             JSONObject lab = en.optJSONObject("labels");
@@ -452,7 +491,8 @@ final class TitleVerifier {
             String mal = wdFirstId(claims, "P4086");
             if (mal.isEmpty()) mal = wdFirstId(claims, "P4087");
             if (!mal.isEmpty()) m.ext.put("mal", mal);
-            m.url = "https://www.wikidata.org/wiki/" + id;
+            m.url = links.containsKey(id) ? links.get(id) : "https://www.wikidata.org/wiki/" + id;
+            if (links.containsKey(id)) m.ext.put("wikipedia", links.get(id));  // where the official name came from
             m.runtime = wdMinutes(claims);
             m.rank = rank++;
             List<String> g = wdIds(claims, "P136");
@@ -824,6 +864,7 @@ final class TitleVerifier {
         switch (source) {
             case "tmdb": return tmdb(query);
             case "wikidata": return wikidata(query);
+            case "wikipedia": return wikipedia(query);
             case "anilist-anime": return anilist(query, "anime");
             case "anilist-manga": return anilist(query, "manga");
             case "anilist": return anilist(query, "both");
@@ -854,6 +895,7 @@ final class TitleVerifier {
         switch (best.source) {
             case "tmdb": return "wikidata";
             case "wikidata":
+            case "wikipedia":
                 if (best.group().equals("read")) return "anilist-manga";
                 if (best.type.startsWith("anime")) return "anilist-anime";
                 return tmdbKey.isEmpty() ? "" : "tmdb";
@@ -918,21 +960,43 @@ final class TitleVerifier {
                 best = all.get(0);
             }
         }
+        if ((best == null || best.score < AUTO) && !asked.contains("wikipedia")) {  // last try: Wikipedia forgives misspellings
+            for (String qy : queries.subList(0, Math.min(2, queries.size()))) {
+                try {
+                    for (Match m : ask("wikipedia", qy)) { score(c, m); all.add(m); }
+                    asked.add("wikipedia");
+                } catch (Stopped e) {
+                    throw e;
+                } catch (Exception ignored) {
+                    // Wikipedia down: the other answers still count
+                }
+            }
+            all.sort((a, b) -> Double.compare(b.score, a.score));
+            best = all.isEmpty() ? null : all.get(0);
+        }
         if (best == null || best.score < REVIEW) {
             return verdict(r, "not_found", best == null ? 0 : best.score, String.join("+", asked), null, top(all, null, 3),
                     "Nothing online matched well enough");
         }
         // the best title, with what the agreeing sources add
-        List<Match> agree = new ArrayList<>();
-        for (Match m : all) if (m != best && !m.source.equals(best.source) && sameTitle(best, m)) agree.add(m);
+        List<Match> agree = agreeing(best, all);
         Match rival = null;
         for (Match m : all) {
             if (m == best || agree.contains(m) || sameTitle(best, m)) continue;
             if (m.score >= best.score - 0.05 && m.score >= 0.7) { rival = m; break; }
         }
+        if (rival != null) {  // two titles fit about as well (a remake, an anime and its manga): more sources decide
+            List<Match> rivalAgree = agreeing(rival, all);
+            if (rivalAgree.size() > agree.size()) {
+                Match was = best;
+                best = rival;
+                agree = rivalAgree;
+                rival = was;
+            }
+        }
         double conf = Math.min(1, best.score + (agree.isEmpty() ? 0 : 0.08));
         Match merged = combine(best, agree);
-        if (merged.source.equals("wikidata") || merged.genres.isEmpty()) wikidataGenres(merged);
+        if (family(merged.source).equals("wikidata") || merged.genres.isEmpty()) wikidataGenres(merged);
         if (merged.runtime == 0 && merged.group().equals("watch")) {  // the length, for "under 1.5 hours" searches
             try {
                 int[] d = details(merged.ext);
@@ -947,19 +1011,25 @@ final class TitleVerifier {
         Set<String> by = new LinkedHashSet<>();
         by.add(best.source);
         for (Match m : agree) by.add(m.source);
-        String verdict;
-        String note;
-        if (rival != null) {
-            verdict = "conflict";
-            note = "More than one title fits: pick the right one";
-        } else if (conf >= VERIFIED && (!agree.isEmpty() || best.titleScore >= 0.97)) {
-            verdict = "verified";
-            note = agree.isEmpty() ? "Exact name match on " + best.source : "Confirmed by " + String.join(" and ", by);
-        } else {
-            verdict = "conflict";
-            note = conf >= VERIFIED ? "Only one source found it: check it is right" : "Close but not certain: check it is right";
+        if (agree.isEmpty() && conf < AUTO) {  // one source, and not close enough to rename it on that alone
+            return verdict(r, "not_found", conf, String.join("+", asked), null, top(all, best, 3),
+                    "Closest online: " + best.title + (best.year > 0 ? " (" + best.year + ")" : "") + ", not close enough to be sure");
         }
-        return verdict(r, verdict, conf, String.join("+", by), merged, top(all, best, 4), note);
+        String note = agree.isEmpty() ? "Found on " + best.source : "Confirmed by " + String.join(" and ", by);
+        if (rival != null) note += "; picked over " + rival.title + (rival.year > 0 ? " (" + rival.year + ")" : "") + ", which fewer sources agree on";
+        return verdict(r, "verified", conf, String.join("+", by), merged, top(all, best, 4), note);
+    }
+
+    /** Matches from other services that describe the same title (Wikipedia and Wikidata count as one service). */
+    private static List<Match> agreeing(Match best, List<Match> all) {
+        List<Match> out = new ArrayList<>();
+        for (Match m : all) if (m != best && !family(m.source).equals(family(best.source)) && sameTitle(best, m)) out.add(m);
+        return out;
+    }
+
+    /** Wikipedia's answers are read through Wikidata, so the two are one source. */
+    static String family(String source) {
+        return "wikipedia".equals(source) ? "wikidata" : source;
     }
 
     /** The best match, with year, language, genres, poster and ids filled in from the sources that agree. */
@@ -995,7 +1065,7 @@ final class TitleVerifier {
             for (String g : a.genres) if (m.genres.size() < 8 && !m.genres.contains(g)) m.genres.add(g);
             for (Map.Entry<String, String> e : a.ext.entrySet()) if (!e.getKey().startsWith("_")) m.ext.putIfAbsent(e.getKey(), e.getValue());
             // Wikidata knows "film" or "series"; the movie databases know "anime" or "K-drama": keep the finer one
-            if (m.source.equals("wikidata") && !a.type.isEmpty()) m.type = a.type;
+            if (family(m.source).equals("wikidata") && !a.type.isEmpty()) m.type = a.type;
         }
         if (!m.ext.containsKey("_genres") && best.ext.containsKey("_genres")) m.ext.put("_genres", best.ext.get("_genres"));
         return m;

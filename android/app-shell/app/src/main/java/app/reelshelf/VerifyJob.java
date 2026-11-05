@@ -66,6 +66,9 @@ final class VerifyJob {
         if (!tmp.renameTo(f)) throw new IOException("Could not save " + f.getName());
     }
 
+    /** Answers from before titles were picked automatically (1.3.3) are asked again, not reused. */
+    static final int CACHE_VERSION = 2;
+
     static String cacheKey(TitleVerifier.Candidate c) {
         return TitleMatch.clean(c.title) + "|" + c.type + "|" + (c.year > 0 ? c.year : "") + "|" + c.lang;
     }
@@ -152,7 +155,7 @@ final class VerifyJob {
                 String key = cacheKey(c);
                 JSONObject res = null;
                 JSONObject hit = cache.optJSONObject(key);
-                if (hit != null && !("not_found".equals(hit.optString("verdict"))
+                if (hit != null && hit.optInt("v") == CACHE_VERSION && !("not_found".equals(hit.optString("verdict"))
                         && System.currentTimeMillis() - hit.optLong("checked_at") > RETRY_NOT_FOUND_MS)) {
                     res = new JSONObject(hit.toString());
                     res.put("id", c.id);
@@ -172,7 +175,8 @@ final class VerifyJob {
                         JSONObject keep = new JSONObject(res.toString());
                         keep.remove("id");
                         keep.remove("updated_at");
-                        if (!"conflict".equals(keep.optString("verdict"))) keep.remove("choices");
+                        keep.remove("choices");
+                        keep.put("v", CACHE_VERSION);
                         cache.put(key, keep);
                     }
                 }

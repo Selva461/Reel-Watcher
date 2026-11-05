@@ -60,6 +60,8 @@ const Shots = (() => {
     saveDb();
     save();
     paint();
+    // the new titles are checked online and renamed to their official names right away, without a tap
+    if (job.added && !job.stop && typeof Verify !== "undefined" && Verify.counts(db).waiting) Verify.start();
   }
 
   /** Reel captions (and YouTube transcripts): the same rules, only for reels that look like they are about a title. */
