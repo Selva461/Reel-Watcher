@@ -90,7 +90,7 @@ const MODELS = [
     url: "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm",
     size: 3.66e9, note: "Free, about 3.7 GB. Same as E2B but more accurate, about twice as slow. Needs 8 GB of RAM or more." },
 ];
-const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en", tmdbKey: "", metaAi: false };
+const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en", tmdbKey: "", metaAi: false, webLookup: false };
 let settings = { ...DEFAULTS };
 function loadSettings() { try { settings = { ...DEFAULTS, ...JSON.parse(sync("getSettings") || "{}") }; } catch (e) { settings = { ...DEFAULTS }; } }
 function saveSettings() { sync("setSettings", JSON.stringify(settings)); }
@@ -764,7 +764,7 @@ let lastAsk = { q: "", answer: null, results: [] };
 
 function askScreen() {
   const fromUrl = (location.hash.match(/[?&]q=([^&]*)/) || [])[1];
-  if (fromUrl !== undefined) { const q = decodeURIComponent(fromUrl); if (q !== lastAsk.q) lastAsk = { q, answer: null, results: [] }; }
+  if (fromUrl !== undefined) { const q = decodeURIComponent(fromUrl); if (q !== lastAsk.q) lastAsk = { q, answer: null, results: [], web: null }; }
   const ready = !!modelInfo().ready;
   const q = lastAsk.q;
   const results = q ? Lib.find(db.reels, q, 8) : [];
@@ -776,7 +776,11 @@ function askScreen() {
     ${!q ? `<p class="hint">Search everything you saved, like a search engine for what you learned. It works without any AI: it ranks your notes by the words you type, allows typos and similar words (phone, mobile, android), and shows the lines that answer it. Use "exact words", -word to leave a word out, and #tag to keep one tag.</p>${libraryOverview()}` : ""}
     ${fix ? `<p class="small">Did you mean <a href="#/ask?q=${enc(fix)}" id="fix">${esc(fix)}</a>?</p>` : ""}
     ${q && !results.length ? `<div class="empty">Nothing in your library about that yet.</div>` : ""}
-    ${lastAsk.answer ? `<div class="card stack"><span class="label">Answer from your notes${lastAsk.answer.by ? ` (${esc(lastAsk.answer.by)})` : ""}</span><p class="pre">${esc(lastAsk.answer.text).replace(/\[(\d{1,2})\]/g, (m, i) => results[i - 1] ? `<a href="#/r/${enc(results[i - 1].reel.code)}">[${i}]</a>` : m)}</p></div>` : ""}
+    ${q && settings.webLookup && !lastAsk.web ? `<button class="btn block" id="webAsk">${UI.globe} Look it up online</button>` : ""}
+    ${q && !settings.webLookup && !results.length ? `<p class="hint">Switch on "Look things up online" in <a href="#/settings">Settings</a> to search Wikipedia and DuckDuckGo.</p>` : ""}
+    ${lastAsk.answer ? `<div class="card stack"><span class="label">Answer from your notes${lastAsk.answer.by ? ` (${esc(lastAsk.answer.by)})` : ""}</span><p class="pre">${esc(lastAsk.answer.text).replace(/\[(\d{1,2})\]/g, (m, i) => results[i - 1] ? `<a href="#/r/${enc(results[i - 1].reel.code)}">[${i}]</a>` : m)
+      .replace(/\[W(\d)\]/g, (m, i) => lastAsk.web && lastAsk.web[i - 1] ? `<a href="#" data-url="${esc(lastAsk.web[i - 1].url)}">[W${i}]</a>` : m)}</p></div>` : ""}
+    ${lastAsk.web ? webHtml(lastAsk.web) : ""}
     ${results.length ? `<div class="grid2">${ready ? `<button class="btn primary" id="aiAns">Answer with phone AI</button>` : ""}<button class="btn" id="copyAsk">Ask any AI with these notes</button></div>` : ""}
     <div class="stack">${results.map((x, i) => {
       const r = x.reel;
@@ -788,6 +792,9 @@ function askScreen() {
     }).join("")}</div>`;
   const input = document.getElementById("aq");
   document.getElementById("askf").addEventListener("submit", (e) => { e.preventDefault(); const nq = input.value.trim(); lastAsk = { q: nq, answer: null, results: [] }; if (location.hash === `#/ask?q=${enc(nq)}`) askScreen(); else location.hash = `#/ask?q=${enc(nq)}`; });
+  bind("[data-url]", "click", (e, a) => { e.preventDefault(); sync("openUrl", a.dataset.url); });
+  bind("#webAsk", "click", (e, b) => webAsk(q, results, b));
+  if (q && settings.webLookup && !results.length && !lastAsk.web && !lastAsk.webTried) { lastAsk.webTried = true; webAsk(q, results, document.getElementById("webAsk")); }
   bind("#copyAsk", "click", () => { const t = Notes.answerPrompt(q, results.slice(0, 6)); sync("copy", t); sync("shareText", t, "Ask an AI"); toast("Question and your notes copied"); });
   bind("#aiAns", "click", async (e, b) => {
     b.disabled = true;
@@ -801,6 +808,33 @@ function askScreen() {
     sync("stopModel");
     if (location.hash.startsWith("#/ask")) askScreen();
   });
+}
+
+/** What the web lookup found, each with its link. */
+function webHtml(web) {
+  if (!web.length) return `<div class="empty">Nothing found online either.</div>`;
+  return `<div class="label">Online · ${web.length}</div><div class="stack">${web.map((w, i) => `<a class="card stack" href="#" data-url="${esc(w.url)}" style="gap:6px">
+    <span class="row between"><strong class="clamp">[W${i + 1}] ${esc(w.title)}</strong><span class="tag">${esc(w.source)}</span></span>
+    <span class="small soft clamp">${esc(w.text)}</span><span class="small muted clamp">${esc(w.url)}</span></a>`).join("")}</div>`;
+}
+
+/** Your question (only the question) to Wikipedia and DuckDuckGo; then, with the phone AI, one answer with sources. */
+async function webAsk(q, results, b) {
+  if (b) { b.disabled = true; b.textContent = "Searching online..."; }
+  try {
+    lastAsk.web = JSON.parse(await phone("webSearch", q) || "[]");
+  } catch (err) { toast(err.message); if (b) { b.disabled = false; b.innerHTML = `${UI.globe} Look it up online`; } return; }
+  if (lastAsk.web.length && modelInfo().ready) {
+    if (location.hash.startsWith("#/ask")) askScreen();
+    sync("allowWork");
+    try {
+      const out = JSON.parse(await phone("generate", Notes.webAnswerPrompt(q, results.slice(0, 4), lastAsk.web),
+        JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: "You answer only from the notes and web results you are given, briefly, citing them like [1] or [W1].", maxTokens: settings.maxTokens, temperature: 0.1 })));
+      lastAsk.answer = { text: out.text, by: "on-phone AI, with web results" };
+    } catch (err) { toast(err.message === "stopped" ? "Stopped" : err.message); }
+    sync("stopModel");
+  }
+  if (location.hash.startsWith("#/ask")) askScreen();
 }
 
 function askMeta(r) {
@@ -1001,6 +1035,9 @@ function settingsScreen() {
   const seg = (key, opts) => `<div class="seg">${opts.map(([v, l]) => `<button data-set="${key}" data-val="${esc(JSON.stringify(v))}" aria-pressed="${settings[key] === v}">${l}</button>`).join("")}</div>`;
   $app.innerHTML = `${header("Settings", "#/")}
     ${speechHtml()}
+    <div class="stack"><h2>Look things up online</h2>
+      <label class="row" style="gap:10px"><input type="checkbox" id="webon" ${settings.webLookup ? "checked" : ""}><span>When my notes do not have the answer, search Wikipedia and DuckDuckGo</span></label>
+      <p class="hint">Only your question is sent (no notes, no account, no AI service). Answers show their links. Off by default.</p></div>
     <div class="stack"><h2>On-phone AI</h2>
       <div class="card stack">
         <div class="row between"><strong>${esc(m ? m.name : settings.modelFile)}</strong><span class="tag ${info.ready ? "ok" : "warn"}" id="mstate">${info.ready ? "Ready" : dl ? "Downloading" : info.partial ? "Paused" : "Not downloaded"}</span></div>
@@ -1067,6 +1104,7 @@ function settingsScreen() {
   bind("#lextra", "change", (e, el) => { settings.localExtra = el.value.slice(0, 2000); saveSettings(); toast("Saved"); });
   bindNightSettings();
   bind("#metaon", "change", (e, el) => { settings.metaAi = el.checked; saveSettings(); });
+  bind("#webon", "change", (e, el) => { settings.webLookup = el.checked; saveSettings(); });
   bind("#savep", "click", () => { settings.prompt = document.getElementById("prompt").value.slice(0, 8000) || Notes.META_PROMPT; saveSettings(); toast("Prompt saved"); });
   bind("#resetp", "click", () => { settings.prompt = Notes.META_PROMPT; saveSettings(); settingsScreen(); toast("Prompt reset"); });
   const stamp = () => new Date().toISOString().slice(0, 10);

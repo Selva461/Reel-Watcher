@@ -20,6 +20,7 @@ const UI = {
   copy: SVG('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>'),
   close: SVG('<path d="M6 6l12 12M18 6L6 18"/>'),
   insta: SVG('<rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1" fill="currentColor"/>'),
+  globe: SVG('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>'),
   ask: SVG('<path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/><circle cx="12" cy="12" r="9"/>'),
 };
 
@@ -136,12 +137,20 @@ function paintLibrary() {
     }
     if (!sections.length) rows.push(nothingHtml(q, res));
   }
+  if (q && looksLikeQuestion(q, res)) rows.unshift(`<a class="btn block" id="askq" href="#/ask?q=${enc(q)}">${UI.ask} Answer this</a>`);
   box.innerHTML = rows.join("");
   box.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", (e) => { e.preventDefault(); copyQuote(b.dataset.copy); }));
   const mb = box.querySelector("#more");
   if (mb) mb.addEventListener("click", () => { lib.more++; paintLibrary(); });
   const ai = box.querySelector("#aisearch");
   if (ai) ai.addEventListener("click", () => aiSearch(q, ai));
+}
+
+/** A question ("how do I...", "what is...?") or words that found nothing: offer an answer from the notes (and online, if on). */
+function looksLikeQuestion(q, res) {
+  if (res.p.structured) return false;
+  return /\?\s*$/.test(q) || /^(how|what|why|who|when|where|which|is|are|can|does|do|should|explain|tell me)\b/i.test(q)
+    || (!res.media.length && !res.reels.length && !res.quotes.length);
 }
 
 function sectionScore([label, , n], q) {

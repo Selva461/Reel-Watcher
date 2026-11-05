@@ -57,6 +57,7 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
     downloadSpeech: (id) => { st.calls.push(["speechDownload"]); keep(); later(() => rnProgress("speech", 20e6, 40e6)); later(() => { st.speech = true; keep(); rnDone(id, true, "ready"); }); },
     deleteSpeech: () => { st.speech = false; keep(); },
     addShotPictures: (id) => later(() => rnDone(id, false, "cancelled")),
+    webSearch: (id, q) => { st.calls.push(["webSearch", q]); keep(); later(() => st.web ? rnDone(id, true, JSON.stringify(st.web)) : rnDone(id, false, "No internet, or the search services did not answer")); },
     listen: (id) => { st.calls.push(["listen"]); later(() => st.said ? rnDone(id, true, st.said) : rnDone(id, false, "cancelled")) },
     readPictures: (id) => later(() => st.pictureText ? rnDone(id, true, st.pictureText) : rnDone(id, false, "cancelled")),
     readCoverText: (id, url) => { st.calls.push(["cover", url]); keep(); later(() => rnDone(id, true, st.coverText || "")); },

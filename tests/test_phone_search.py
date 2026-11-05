@@ -141,3 +141,32 @@ def test_big_library_stays_fast(phone):
     assert ms["groups"] >= 5
     assert ms["queries"] < 3000, ms   # four searches over 3000 reels, with the index already built
     assert ms["build"] + ms["topics"] < 8000, ms
+
+
+WEB = [{"title": "Rust (programming language)", "url": "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+        "text": "Rust is a general-purpose programming language emphasizing performance, type safety and concurrency.", "source": "Wikipedia"},
+       {"title": "Rust", "url": "https://duckduckgo.com/Rust", "text": "Rust is a language by Mozilla.", "source": "DuckDuckGo"}]
+
+
+def test_look_it_up_online_only_when_switched_on_with_sources(phone):
+    db = json.dumps({"reels": [], "inbox": []})
+    phone.open_with({"db": db, "web": WEB}, "#/ask?q=what%20is%20rust")
+    phone.get_by_text("Nothing in your library about that yet.").wait_for()
+    phone.get_by_text('Switch on "Look things up online"').wait_for()
+    assert not [c for c in phone.rn()["calls"] if c[0] == "webSearch"]  # off by default: nothing is sent
+    # switched on, with the phone AI: only the question goes out, and the answer cites the web results
+    phone.open_with({"db": db, "web": WEB, "settings": json.dumps({"webLookup": True}), "model": {"ready": True, "partial": 0, "installed": []},
+                     "answers": ["Rust is a programming language focused on safety [W1]."]}, "#/ask?q=what%20is%20rust")
+    phone.get_by_text("Online · 2").wait_for()
+    phone.locator(".pre a", has_text="[W1]").wait_for()
+    calls = phone.rn()["calls"]
+    assert ["webSearch", "what is rust"] in calls
+    gen = [c for c in calls if c[0] == "generate"][-1]
+    assert "[W1] Rust (programming language) (Wikipedia)" in gen[1] and "do not guess" in gen[1]
+    phone.locator(".pre a", has_text="[W1]").click()
+    assert "https://en.wikipedia.org/wiki/Rust_(programming_language)" in phone.rn()["opened"]
+    # from the Library search box: a question offers an answer
+    phone.goto(phone.url.split("#")[0] + "#/")
+    phone.locator("#tq").fill("what is rust?")
+    phone.get_by_role("link", name="Answer this").click()
+    phone.wait_for_url("**#/ask?q=*")
