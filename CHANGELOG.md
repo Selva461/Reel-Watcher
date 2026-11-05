@@ -5,6 +5,13 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.2
+- Look things up online (Settings, off by default): when your notes do not answer a question, Reel Shelf searches
+  Wikipedia and DuckDuckGo (free, no key, no account, not AI). Only your question is sent, never your notes. With the
+  phone AI, you get one answer that cites your notes [1] and the web [W1]; every web result shows its link.
+- In Library, a question ("how do I...", "what is...?") shows "Answer this".
+- No new Android permission (the app already uses the internet).
+
 ## 1.3.1
 - Fix: Play Protect blocked 1.3.0 ("App blocked to protect your device ... can request access to sensitive data").
   The cause was the new Accessibility helper ("Read while I scroll"): Play Protect blocks apps installed from outside

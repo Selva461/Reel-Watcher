@@ -603,6 +603,15 @@ const Notes = (() => {
       `Question: ${question}\n\nMy notes:\n\n${src}`;
   }
 
+  /** The question with your notes [1].. and what the web lookup found [W1].. (Wikipedia, DuckDuckGo). */
+  function webAnswerPrompt(question, results, web) {
+    const notes = results.map((x, i) => `[${i + 1}] ${format(x.reel.notes || {}) || (x.reel.caption || "").slice(0, 800)}`).join("\n\n");
+    const found = web.map((w, i) => `[W${i + 1}] ${w.title} (${w.source}): ${w.text}`).join("\n\n");
+    return `Answer my question briefly and accurately. Use my notes first; use the web results only for what my notes do not ` +
+      `cover. After each fact, write where it came from, like [1] or [W1]. If neither answers it, say so; do not guess.\n\n` +
+      `Question: ${question}\n\n${notes ? `My notes:\n\n${notes}\n\n` : ""}Web results:\n\n${found}`;
+  }
+
   // ---------------------------------------------------------------- reading a reel's public page (caption, creator)
 
   function embedUrl(code) { return `https://www.instagram.com/p/${code}/embed/captioned/`; }
@@ -822,6 +831,6 @@ const Notes = (() => {
 
   return { reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, material, embedUrl, readPage,
     ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
-    YT_CLIENTS, condense, search, answerPrompt, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
+    YT_CLIENTS, condense, search, answerPrompt, webAnswerPrompt, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
     exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS };
 })();

@@ -707,6 +707,22 @@ final class LocalBridge {
         }));
     }
 
+    /**
+     * "Look it up online" (only when you switched it on in Settings): your question goes to Wikipedia and DuckDuckGo
+     * Instant Answers (free, no key, no account, not AI). Returns [{title, url, text, source}] JSON. Nothing else is sent.
+     */
+    @JavascriptInterface
+    public void webSearch(int id, String question) {
+        if (!ok()) return;
+        net.execute(() -> {
+            try {
+                done(id, true, new WebLookup(TitleVerifier.NET).search(question).toString());
+            } catch (Exception e) {
+                done(id, false, e.getMessage() == null ? "The search did not work" : e.getMessage());
+            }
+        });
+    }
+
     /** The search mic: what you said, as text. Android's own recognizer listens, not this app (no microphone permission). */
     @JavascriptInterface
     public void listen(int id) {
