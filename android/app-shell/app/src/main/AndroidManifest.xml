@@ -75,18 +75,6 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
-        <!-- "Read while I scroll": off until you switch it on in Accessibility settings; only reads Instagram's comment
-             screens while you scroll yourself, never taps or scrolls -->
-        <service
-            android:name=".CommentReader"
-            android:exported="true"
-            android:label="@string/comment_reader_label"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data android:name="android.accessibilityservice" android:resource="@xml/comment_reader" />
-        </service>
         <service
             android:name=".WorkService"
             android:exported="false"
