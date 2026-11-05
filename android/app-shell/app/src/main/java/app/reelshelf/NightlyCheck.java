@@ -49,9 +49,17 @@ public class NightlyCheck extends JobService {
     }
 
     static String tmdbKey(Context ctx) {
+        return setting(ctx, "tmdbKey");
+    }
+
+    static String omdbKey(Context ctx) {
+        return setting(ctx, "omdbKey");
+    }
+
+    private static String setting(Context ctx, String name) {
         SharedPreferences p = ctx.getSharedPreferences("reelshelf", Context.MODE_PRIVATE);
         try {
-            return new JSONObject(p.getString("local_settings", "{}")).optString("tmdbKey", "");
+            return new JSONObject(p.getString("local_settings", "{}")).optString(name, "");
         } catch (Exception e) {
             return "";
         }
@@ -65,6 +73,7 @@ public class NightlyCheck extends JobService {
         thread = new Thread(() -> {
             try {
                 TitleVerifier v = new TitleVerifier(TitleVerifier.NET, TitleVerifier.REAL_CLOCK, tmdbKey(this), stop);
+                v.omdbKey = omdbKey(this);
                 JSONObject sum = new VerifyJob(getFilesDir(), v, stop).run(0, BUDGET_MS, null);
                 sum.put("at", System.currentTimeMillis());
                 p.edit().putString("nightly_last", sum.toString()).apply();

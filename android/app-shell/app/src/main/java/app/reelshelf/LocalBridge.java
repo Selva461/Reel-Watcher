@@ -871,6 +871,7 @@ final class LocalBridge {
         verifyWork.execute(() -> {
             try {
                 TitleVerifier v = new TitleVerifier(TitleVerifier.NET, TitleVerifier.REAL_CLOCK, NightlyCheck.tmdbKey(act.ctx()), verifyStop);
+                v.omdbKey = NightlyCheck.omdbKey(act.ctx());
                 JSONObject sum = new VerifyJob(act.ctx().getFilesDir(), v, verifyStop).run(0, 0, (d, t, title) -> progress("verify", d, t));
                 done(id, true, sum.toString());
             } catch (Throwable e) {

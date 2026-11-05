@@ -42,3 +42,8 @@ nav.tabs .ico { position: relative; display: inline-flex; }
 .tile-btn#start, .tile-btn#goRun { background: var(--accent); color: var(--on-accent); }
 .tile-btn#start svg, .tile-btn#goRun svg { color: var(--on-accent); }
 #understood:empty { display: none; }
+
+/* a title's rating and seasons, like a movie app */
+.rating{display:flex;align-items:baseline;gap:6px}
+.rating strong{font-size:18px;color:var(--accent,#F2B544)}
+.list-item.season strong{min-width:34px}

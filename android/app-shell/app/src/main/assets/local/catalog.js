@@ -209,6 +209,7 @@ const Catalog = (() => {
     if (facts.genres && facts.genres.length) m.genres = uniq(facts.genres.map(genreName));
     if (Number(facts.runtime) > 0) m.runtime = Math.round(Number(facts.runtime));
     if (Number(facts.episodes) > 0) m.episodes = Math.round(Number(facts.episodes));
+    setDetails(m, facts);
     if (facts.aka) m.aka = uniq([...(m.aka || []), ...facts.aka]);
     m.aka = (m.aka || []).filter((a) => normTitle(a) !== normTitle(m.title));
     m.ext = { ...(m.ext || {}), ...Object.fromEntries(Object.entries(facts.ext || {}).filter(([, v]) => v).map(([k, v]) => [k, String(v)])) };
@@ -224,6 +225,17 @@ const Catalog = (() => {
     return m;
   }
 
+  /** Rating {score 0..10, by, votes} and seasons [{n, episodes, year, title}] from the online check (like a movie app). */
+  function setDetails(m, d) {
+    const r = d && d.rating;
+    if (r && Number(r.score) > 0 && Number(r.score) <= 10) m.rating = { score: Math.round(Number(r.score) * 10) / 10, by: clean(r.by || "", 30), votes: Math.max(0, Math.round(Number(r.votes) || 0)) };
+    if (d && Array.isArray(d.seasons) && d.seasons.length) {
+      m.seasons = d.seasons.slice(0, 40).map((x) => ({ n: Math.round(Number(x.n) || 0), episodes: Math.max(0, Math.round(Number(x.episodes) || 0)),
+        year: toYear(x.year) || null, title: clean(x.title || "", 120) })).filter((x) => x.n > 0);
+    }
+    if (d && /^tt\d+$/.test(d.imdb || "")) m.ext = { ...(m.ext || {}), imdb: d.imdb };
+  }
+
   /** Fold entry `fromId` into `intoId` (sources, names, genres). Returns the kept entry. */
   function merge(db, intoId, fromId) {
     const a = get(db, intoId);
@@ -234,7 +246,7 @@ const Catalog = (() => {
     for (const s of drop.sources || []) if (!keep.sources.some((x) => sourceKey(x) === sourceKey(s))) keep.sources.push(s);
     keep.aka = uniq([...(keep.aka || []), drop.title, ...(drop.aka || [])]).filter((t) => normTitle(t) !== normTitle(keep.title));
     keep.genres = uniq([...(keep.genres || []), ...(drop.genres || [])]);
-    for (const k of ["year", "language", "original_title", "country", "poster", "overview", "runtime", "episodes"]) if (!keep[k] && drop[k]) keep[k] = drop[k];
+    for (const k of ["year", "language", "original_title", "country", "poster", "overview", "runtime", "episodes", "rating", "seasons", "details_at"]) if (!keep[k] && drop[k]) keep[k] = drop[k];
     keep.ext = { ...(drop.ext || {}), ...(keep.ext || {}) };
     keep.confidence = Math.max(keep.confidence || 0, drop.confidence || 0);
     if (drop.status && drop.status !== "want" && keep.status === "want") keep.status = drop.status;
@@ -355,7 +367,7 @@ const Catalog = (() => {
   }
 
   return { BASE_TYPES, GROUPS, LANGS, STATUS, VERIFIED, types, typeInfo, typeId, addType, langCode, langName, normTitle, genreName,
-    findSame, add, addMany, verify, merge, update, remove, get, toVerify, fromSource, filter, facets, exportCsv };
+    setDetails, findSame, add, addMany, verify, merge, update, remove, get, toVerify, fromSource, filter, facets, exportCsv };
 })();
 
 if (typeof module !== "undefined") module.exports = Catalog;

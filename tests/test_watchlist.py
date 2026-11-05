@@ -94,9 +94,10 @@ def test_watchlist_screen_filters_and_detail(phone):
     phone.locator("#results a.list-item").first.click()
     phone.get_by_role("heading", name="Heat Two").wait_for()
     phone.get_by_role("button", name="Finished").click()
-    phone.get_by_role("button", name="It is right").click()
+    assert phone.get_by_role("button", name="It is right").count() == 0  # checking is the app's job, not yours
+    assert phone.get_by_role("button", name="Not a real title").count() == 0
     m = [x for x in db_of(phone)["media"] if x["title"] == "Heat Two"][0]
-    assert m["status"] == "done" and m["verified"] == "verified" and m["verified_by"] == "you"
+    assert m["status"] == "done"
     phone.get_by_role("link", name="Reel").first.click()  # the source reel opens
     phone.get_by_role("heading", name="Titles in this reel").wait_for()
 

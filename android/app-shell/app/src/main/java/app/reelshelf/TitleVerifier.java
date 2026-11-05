@@ -122,12 +122,15 @@ final class TitleVerifier {
         GAP.put("api.mangadex.org", 300L);
         GAP.put("www.wikidata.org", 300L);
         GAP.put("en.wikipedia.org", 300L);
+        GAP.put("www.omdbapi.com", 300L);
         GAP.put("api.themoviedb.org", 120L);
     }
 
     private final Http http;
     private final Clock clock;
     private final String tmdbKey;
+    /** Your own free OMDb key (Settings), for IMDb ratings; empty = no IMDb rating. Sent only to omdbapi.com. */
+    String omdbKey = "";
     private final AtomicBoolean stop;
     private final Map<String, Long> lastCall = new HashMap<>();
     /** Services that failed for network reasons in this run (so one title's failure is not a "not found"). */
@@ -205,6 +208,10 @@ final class TitleVerifier {
         boolean adult;
         int runtime;          // minutes (a movie's length, or one episode's)
         int episodes;
+        double rating;        // 0..10, from ratingBy (IMDb, MyAnimeList, TMDB or AniList)
+        String ratingBy = "";
+        int votes;
+        JSONArray seasons;    // [{n, episodes, year, title}] for series and anime with more than one season
         double score;
         double titleScore;
 
@@ -225,6 +232,8 @@ final class TitleVerifier {
             if (!overview.isEmpty()) f.put("overview", overview.length() > 1500 ? overview.substring(0, 1500) : overview);
             if (runtime > 0) f.put("runtime", runtime);
             if (episodes > 0) f.put("episodes", episodes);
+            if (rating > 0) f.put("rating", new JSONObject().put("score", rating).put("by", ratingBy).put("votes", votes));
+            if (seasons != null && seasons.length() > 0) f.put("seasons", seasons);
             JSONArray aka = new JSONArray();
             for (String n : names) if (!TitleMatch.norm(n).equals(TitleMatch.norm(title)) && aka.length() < 8) aka.put(n);
             if (aka.length() > 0) f.put("aka", aka);
@@ -610,49 +619,171 @@ final class TitleVerifier {
 
     // ------------------------------------------------------------------ length (runtime) of a known title
 
-    /** {minutes, episodes} from the title's ids (TMDB, AniList, MyAnimeList); zeros when no source knows. */
-    int[] details(Map<String, String> ext) throws IOException, JSONException {
-        int[] out = {0, 0};
+    /**
+     * What a movie app shows about one title: length, episodes, seasons (S1 · 25 eps, S2 · 25 eps...) and a rating.
+     * Rating: IMDb (through OMDb, only with your own free OMDb key) for movies and series, MyAnimeList for anime, else
+     * TMDB, else AniList. Seasons: TMDB's season list, or for anime the AniList chain of prequels and sequels.
+     * Uses the ids found when the title was checked. Each service is optional: what one cannot give, the next may.
+     */
+    Details details(Map<String, String> ext, String type) throws IOException, JSONException {
+        Details d = new Details();
+        boolean anime = type != null && type.startsWith("anime");
         String tm = ext.get("tmdb");
+        String imdb = ext.containsKey("imdb") ? ext.get("imdb") : "";
+        double tmdbScore = 0;
+        int tmdbVotes = 0;
         if (tm != null && !tmdbKey.isEmpty() && tm.matches("(movie|tv)/\\d+")) {
             Map<String, String> h = new HashMap<>();
-            String url = "https://api.themoviedb.org/3/" + tm + "?language=en-US";
+            String url = "https://api.themoviedb.org/3/" + tm + "?language=en-US&append_to_response=external_ids";
             if (tmdbKey.startsWith("eyJ")) h.put("Authorization", "Bearer " + tmdbKey);
             else url += "&api_key=" + q(tmdbKey);
             String body = call(url, null, h);
             if (!body.isEmpty()) {
                 JSONObject o = new JSONObject(body);
-                if (tm.startsWith("movie/")) out[0] = o.optInt("runtime", 0);
+                if (tm.startsWith("movie/")) d.runtime = o.optInt("runtime", 0);
                 else {
                     JSONArray rt = o.optJSONArray("episode_run_time");
-                    if (rt != null && rt.length() > 0) out[0] = rt.optInt(0, 0);
+                    if (rt != null && rt.length() > 0) d.runtime = rt.optInt(0, 0);
                     JSONObject last = o.optJSONObject("last_episode_to_air");
-                    if (out[0] == 0 && last != null) out[0] = last.optInt("runtime", 0);
-                    out[1] = o.optInt("number_of_episodes", 0);
+                    if (d.runtime == 0 && last != null) d.runtime = last.optInt("runtime", 0);
+                    d.episodes = o.optInt("number_of_episodes", 0);
+                    JSONArray ss = o.optJSONArray("seasons");
+                    if (ss != null) for (int i = 0; i < ss.length(); i++) {
+                        JSONObject x = ss.optJSONObject(i);
+                        if (x == null || x.optInt("season_number", 0) <= 0 || x.optInt("episode_count", 0) <= 0) continue;  // "Specials"
+                        d.seasons.put(season(x.optInt("season_number"), x.optInt("episode_count"), TitleMatch.yearIn(x.optString("air_date")), x.optString("name")));
+                    }
                 }
+                tmdbScore = o.optDouble("vote_average", 0);
+                tmdbVotes = o.optInt("vote_count", 0);
+                String id = o.optString("imdb_id");
+                JSONObject ex = o.optJSONObject("external_ids");
+                if (id.isEmpty() && ex != null) id = ex.optString("imdb_id");
+                if (id.matches("tt\\d+")) imdb = id;
             }
         }
         String an = ext.get("anilist");
-        if (out[0] == 0 && an != null && an.matches("\\d+")) {
-            JSONObject body = new JSONObject();
-            body.put("query", "query($i:Int){Media(id:$i){duration episodes}}");
-            body.put("variables", new JSONObject().put("i", Long.parseLong(an)));
-            String s = call("https://graphql.anilist.co", body.toString(), null);
-            JSONObject d = s.isEmpty() ? null : new JSONObject(s).optJSONObject("data");
-            JSONObject md = d == null ? null : d.optJSONObject("Media");
+        double anilistScore = 0;
+        if (an != null && an.matches("\\d+")) {
+            JSONObject md = anilistNode(Long.parseLong(an));
             if (md != null) {
-                out[0] = md.optInt("duration", 0);
-                if (out[1] == 0) out[1] = md.optInt("episodes", 0);
+                if (d.runtime == 0) d.runtime = md.optInt("duration", 0);
+                if (d.episodes == 0) d.episodes = md.optInt("episodes", 0);
+                anilistScore = md.optInt("averageScore", 0) / 10.0;
+                if (anime && d.seasons.length() == 0 && isSeason(md)) d.seasons = anilistSeasons(md);
             }
         }
         String mal = ext.get("mal");
-        if (out[0] == 0 && mal != null && mal.matches("\\d+")) {
+        if (mal != null && mal.matches("\\d+") && (anime || d.runtime == 0)) {
             String s = call("https://api.jikan.moe/v4/anime/" + mal, null, null);
             JSONObject o = s.isEmpty() ? null : new JSONObject(s).optJSONObject("data");
             if (o != null) {
-                out[0] = jikanMinutes(o.optString("duration"));
-                if (out[1] == 0) out[1] = o.optInt("episodes", 0);
+                if (d.runtime == 0) d.runtime = jikanMinutes(o.optString("duration"));
+                if (d.episodes == 0) d.episodes = o.optInt("episodes", 0);
+                double sc = o.optDouble("score", 0);
+                if (anime && sc > 0) rate(d, sc, "MyAnimeList", o.optInt("scored_by", 0));
             }
+        }
+        if (d.rating == 0 && !anime && !omdbKey.isEmpty() && imdb.matches("tt\\d+")) {
+            String s = call("https://www.omdbapi.com/?i=" + imdb + "&apikey=" + q(omdbKey), null, null);
+            JSONObject o = s.isEmpty() ? null : new JSONObject(s);
+            double sc = o == null ? 0 : parseNum(o.optString("imdbRating"));
+            if (sc > 0) rate(d, sc, "IMDb", (int) parseNum(o.optString("imdbVotes").replace(",", "")));
+        }
+        if (d.rating == 0 && tmdbScore > 0 && tmdbVotes >= 10) rate(d, tmdbScore, "TMDB", tmdbVotes);
+        if (d.rating == 0 && anilistScore > 0) rate(d, anilistScore, "AniList", 0);
+        if (!imdb.isEmpty()) d.imdb = imdb;
+        return d;
+    }
+
+    static final class Details {
+        int runtime;
+        int episodes;
+        double rating;
+        String ratingBy = "";
+        int votes;
+        String imdb = "";
+        JSONArray seasons = new JSONArray();
+    }
+
+    private static void rate(Details d, double score, String by, int votes) {
+        d.rating = Math.round(score * 10) / 10.0;
+        d.ratingBy = by;
+        d.votes = votes;
+    }
+
+    private static double parseNum(String s) {
+        try {
+            return Double.parseDouble(s);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private static JSONObject season(int n, int episodes, int year, String title) throws JSONException {
+        JSONObject o = new JSONObject().put("n", n).put("episodes", episodes);
+        if (year > 0) o.put("year", year);
+        if (title != null && !title.isEmpty()) o.put("title", title);
+        return o;
+    }
+
+    private static final String ANILIST_NODE = "query($i:Int){Media(id:$i){id format episodes duration averageScore seasonYear "
+            + "title{english romaji} relations{edges{relationType node{id type format}}}}}";
+
+    private JSONObject anilistNode(long id) throws IOException, JSONException {
+        JSONObject body = new JSONObject().put("query", ANILIST_NODE).put("variables", new JSONObject().put("i", id));
+        String s = call("https://graphql.anilist.co", body.toString(), null);
+        JSONObject data = s.isEmpty() ? null : new JSONObject(s).optJSONObject("data");
+        return data == null ? null : data.optJSONObject("Media");
+    }
+
+    /** A TV season (not a movie, special or recap). */
+    private static boolean isSeason(JSONObject md) {
+        String f = md.optString("format");
+        return f.equals("TV") || f.equals("ONA") || f.equals("TV_SHORT");
+    }
+
+    /** The id of the season before or after (relationType PREQUEL or SEQUEL), or 0. */
+    private static long nextSeason(JSONObject md, String rel) {
+        JSONObject r = md.optJSONObject("relations");
+        JSONArray edges = r == null ? null : r.optJSONArray("edges");
+        if (edges == null) return 0;
+        for (int i = 0; i < edges.length(); i++) {
+            JSONObject e = edges.optJSONObject(i);
+            JSONObject n = e == null ? null : e.optJSONObject("node");
+            if (n == null || !rel.equals(e.optString("relationType")) || !"ANIME".equals(n.optString("type")) || !isSeason(n)) continue;
+            return n.optLong("id");
+        }
+        return 0;
+    }
+
+    /** On AniList each anime season is its own entry: walks back to the first season, then forward (at most 8). */
+    private JSONArray anilistSeasons(JSONObject start) throws IOException, JSONException {
+        List<JSONObject> chain = new ArrayList<>();
+        chain.add(start);
+        Set<Long> seen = new LinkedHashSet<>();
+        seen.add(start.optLong("id"));
+        for (JSONObject cur = start; chain.size() < 8; ) {
+            long p = nextSeason(cur, "PREQUEL");
+            if (p == 0 || !seen.add(p)) break;
+            cur = anilistNode(p);
+            if (cur == null || !isSeason(cur)) break;
+            chain.add(0, cur);
+        }
+        for (JSONObject cur = start; chain.size() < 8; ) {
+            long n = nextSeason(cur, "SEQUEL");
+            if (n == 0 || !seen.add(n)) break;
+            cur = anilistNode(n);
+            if (cur == null || !isSeason(cur)) break;
+            chain.add(cur);
+        }
+        JSONArray out = new JSONArray();
+        for (int i = 0; i < chain.size(); i++) {
+            JSONObject c = chain.get(i);
+            JSONObject t = c.optJSONObject("title");
+            String name = t == null ? "" : t.optString("english", "");
+            if (name.isEmpty() || name.equals("null")) name = t == null ? "" : t.optString("romaji", "");
+            out.put(season(i + 1, c.optInt("episodes", 0), c.optInt("seasonYear", 0), name));
         }
         return out;
     }
@@ -997,11 +1128,16 @@ final class TitleVerifier {
         double conf = Math.min(1, best.score + (agree.isEmpty() ? 0 : 0.08));
         Match merged = combine(best, agree);
         if (family(merged.source).equals("wikidata") || merged.genres.isEmpty()) wikidataGenres(merged);
-        if (merged.runtime == 0 && merged.group().equals("watch")) {  // the length, for "under 1.5 hours" searches
+        if (merged.group().equals("watch")) {  // length, seasons and rating, like a movie app
             try {
-                int[] d = details(merged.ext);
-                merged.runtime = d[0];
-                if (merged.episodes == 0) merged.episodes = d[1];
+                Details d = details(merged.ext, merged.type);
+                if (merged.runtime == 0) merged.runtime = d.runtime;
+                if (merged.episodes == 0) merged.episodes = d.episodes;
+                merged.rating = d.rating;
+                merged.ratingBy = d.ratingBy;
+                merged.votes = d.votes;
+                merged.seasons = d.seasons;
+                if (!d.imdb.isEmpty()) merged.ext.putIfAbsent("imdb", d.imdb);
             } catch (Stopped e) {
                 throw e;
             } catch (Exception ignored) {

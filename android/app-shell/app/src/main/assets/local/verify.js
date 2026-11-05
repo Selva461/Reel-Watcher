@@ -3,11 +3,14 @@
    Answers wait in a file until this page applies them with Catalog.verify, so nothing is ever overwritten.
    Runs when you tap Process (app open), or at night if you switch that on (Wi-Fi + charging + phone not in use).
    Nothing waits for you: the phone picks the best match itself and its official name replaces the one read from the
-   screenshot. Titles no source matches closely enough keep their name and are tried again later. */
+   screenshot. When no source matches closely enough, the phone AI (if downloaded) reads the closest matches and a web
+   search for the name, and picks one or none. Titles still not found keep their name and are tried again later.
+   Each title also gets what a movie app shows: seasons with their episodes, and a rating. */
 "use strict";
 
 const Verify = (() => {
   const NOT_FOUND_RETRY = 30 * 86400e3;
+  const AI_PER_RUN = 20;
 
   // ---------------------------------------------------------------- pure part (tested in node and Chromium)
 
@@ -16,10 +19,11 @@ const Verify = (() => {
     const n = { verified: 0, review: 0, notFound: 0, skipped: 0 };
     for (const [id, r] of Object.entries(results || {})) {
       const m = Catalog.get(db, id);
-      if (m && r && r.verdict === "details") {  // only the length of a title checked before
+      if (m && r && r.verdict === "details") {  // seasons, rating and length of a title checked before
         if (Number(r.runtime) > 0) m.runtime = Math.round(Number(r.runtime));
         if (Number(r.episodes) > 0 && !m.episodes) m.episodes = Math.round(Number(r.episodes));
-        m.runtime_tried = r.checked_at || Date.now();
+        Catalog.setDetails(m, r);
+        m.details_at = r.checked_at || Date.now();
         n.lengths = (n.lengths || 0) + 1;
         continue;
       }
@@ -27,26 +31,29 @@ const Verify = (() => {
       const check = { verdict: r.verdict, confidence: Number(r.confidence) || 0, by: String(r.by || ""), note: String(r.note || ""), at: r.checked_at || Date.now() };
       if (r.verdict === "verified" && r.facts) {
         const kept = Catalog.verify(db, id, r.facts, "verified", r.by || "online");
-        if (kept) { kept.check = check; delete kept.review; }
+        if (kept) { kept.check = check; delete kept.review; kept.details_at = check.at; }
         n.verified++;
       } else if (r.verdict === "conflict") {  // an answer from before 1.3.3: asked again under the automatic rules
         delete m.checked_at;
         n.skipped++;
       } else {
         m.checked_at = check.at;  // stays "unverified"; tried again in 30 days or when it is seen again
-        m.check = check;
+        m.check = { ...check, choices: (r.choices || []).filter((c) => c && c.facts).slice(0, 3) };  // for the phone AI to pick from
+        delete m.ai_at;
         n.notFound++;
       }
     }
     return n;
   }
 
-  /** Once, on the update to 1.3.3: titles that waited for you to pick, or were not found under the old rules, are
-      checked again (now with Wikipedia and automatic picking). Returns how many. Does not save. */
+  /** Once per change of rules. 2 (1.3.3): titles that waited for you to pick, or were not found under the old rules,
+      are checked again (now with Wikipedia and automatic picking). 3 (1.3.4): comment lines saved as titles ("View 4
+      replies", "12 likes Reply", usernames) are deleted. Returns how many changed. Does not save. */
   function migrate(db) {
-    if ((db.verify_rules || 0) >= 2) return 0;
+    const rules = db.verify_rules || 0;
+    if (rules >= 3) return 0;
     let n = 0;
-    for (const m of db.media || []) {
+    if (rules < 2) for (const m of db.media || []) {
       if (m.verified === "conflict" || ((!m.verified || m.verified === "unverified") && m.checked_at)) {
         m.verified = "unverified";
         delete m.checked_at;
@@ -54,7 +61,63 @@ const Verify = (() => {
         n++;
       }
     }
-    db.verify_rules = 2;
+    if (typeof Titles !== "undefined") {
+      const before = (db.media || []).length;
+      db.media = (db.media || []).filter((m) => m.verified === "verified" || !Titles.isChrome(m.title));
+      n += before - db.media.length;
+    }
+    db.verify_rules = 3;
+    return n;
+  }
+
+  /** Titles not found that have close matches, not yet shown to the phone AI. */
+  function aiTodo(db) {
+    return (db.media || []).filter((m) => (!m.verified || m.verified === "unverified") && m.check && m.check.verdict === "not_found"
+      && (m.check.choices || []).length && !m.ai_at);
+  }
+
+  /** The question for the phone AI: the name as read, the closest matches online, and what a web search says. */
+  function aiPrompt(m, web) {
+    const seen = ((m.sources || [])[0] || {}).text || "";
+    const typ = typeof Catalog !== "undefined" ? Catalog.typeInfo(db, m.type).label : m.type;
+    const lines = (m.check.choices || []).map((c, i) => `${i + 1}. ${c.title} (${[c.year, c.type, c.language].filter(Boolean).join(", ")})`);
+    const w = (web || []).slice(0, 3).map((x) => `- ${x.source}: ${x.title}: ${String(x.text || "").slice(0, 240)}`);
+    return `A name was read from a screenshot: "${m.title}".${seen && seen !== m.title ? `\nText around it: "${seen.slice(0, 200)}"` : ""}
+It was guessed to be: ${typ}.
+Which of these real titles is it?
+${lines.join("\n")}${w.length ? `\nWeb search for the name:\n${w.join("\n")}` : ""}
+Answer with the number of the right title, or 0 if none of them is it. Answer with the number only.`;
+  }
+
+  /** The phone AI's number: 1..n, or 0 for none / an answer it could not give. */
+  function aiNumber(text, n) {
+    const k = parseInt((String(text || "").match(/\d+/) || ["0"])[0], 10);
+    return k >= 1 && k <= n ? k : 0;
+  }
+
+  /** Lets the phone AI pick for titles no database matched closely. Quiet: nothing is asked. Returns how many it renamed. */
+  async function aiPick() {
+    if (typeof modelInfo !== "function" || !modelInfo().ready) return 0;
+    const list = aiTodo(db).slice(0, AI_PER_RUN);
+    if (!list.length) return 0;
+    let n = 0;
+    sync("allowWork");
+    for (const m of list) {
+      let web = [];
+      try { web = JSON.parse(await phone("webSearch", `${m.title} ${Catalog.typeInfo(db, m.type).label}`) || "[]"); } catch (e) { web = []; }
+      let text = "";
+      try {
+        text = JSON.parse(await phone("generate", aiPrompt(m, web), JSON.stringify({ file: settings.modelFile, gpu: settings.gpu,
+          system: "You match a name read from a screenshot to a real movie, series, anime or manga. Answer with one number only.", maxTokens: 6, temperature: 0 }))).text;
+      } catch (e) { if (e.message === "stopped") break; continue; }
+      m.ai_at = Date.now();
+      const c = m.check.choices[aiNumber(text, m.check.choices.length) - 1];
+      if (!c) continue;
+      const kept = Catalog.verify(db, m.id, c.facts, "verified", "phone AI");
+      if (kept) { kept.check = { verdict: "verified", by: "phone AI", note: `Picked by the phone AI from ${c.source}${web.length ? " and a web search" : ""}`, at: Date.now() }; n++; }
+    }
+    sync("stopModel");
+    saveDb();
     return n;
   }
 
@@ -65,8 +128,8 @@ const Verify = (() => {
       waiting: waiting.length,
       notFound: list.filter((m) => (!m.verified || m.verified === "unverified") && m.checked_at).length,
       verified: list.filter((m) => m.verified === "verified").length,
-      // checked before lengths were kept: the next Process looks up how long they are (for "under 1.5 hours")
-      lengths: list.filter((m) => m.verified === "verified" && !(m.runtime > 0) && !m.runtime_tried && m.ext && (m.ext.tmdb || m.ext.anilist || m.ext.mal)
+      // checked before seasons and ratings were kept: the next Process looks them up once
+      lengths: list.filter((m) => m.verified === "verified" && !m.details_at && m.ext && (m.ext.tmdb || m.ext.anilist || m.ext.mal)
         && (typeof Catalog === "undefined" || Catalog.typeInfo(db, m.type).group === "watch")).length,
     };
   }
@@ -101,7 +164,12 @@ const Verify = (() => {
     onProgress.verify = (d, t) => { job.done = d; job.total = t; paint(); };
     phone("verifyNow").then((s) => { job.sum = JSON.parse(s || "{}"); })
       .catch((e) => { job.error = e.message; })
-      .finally(() => { job.finished = true; const n = onOpen(true); job.applied = n; paint(); });
+      .finally(async () => {
+        job.applied = onOpen(true);
+        try { job.ai = await aiPick(); } catch (e) { job.ai = 0; }
+        job.finished = true;
+        paint();
+      });
     paint();
   }
 
@@ -118,9 +186,9 @@ const Verify = (() => {
       </div>
       ${running ? `<div class="card stack"><strong>Checking ${Math.min(job.done + 1, job.total)} of ${job.total}</strong><span class="bar"><span style="width:${pct}%"></span></span>
           <span class="small muted">You can leave the app: it keeps checking, with a notification to stop it.</span><button class="btn block" id="vstop">Stop</button></div>`
-        : `<button class="btn primary block" id="vgo" ${c.waiting || c.lengths ? "" : "disabled"}>${c.waiting ? `Process: check ${plural(c.waiting, "title")} online` : c.lengths ? `Process: find how long ${plural(c.lengths, "title")} run` : "Nothing new to check"}</button>`}
+        : `<button class="btn primary block" id="vgo" ${c.waiting || c.lengths ? "" : "disabled"}>${c.waiting ? `Process: check ${plural(c.waiting, "title")} online` : c.lengths ? `Process: seasons and ratings for ${plural(c.lengths, "title")}` : "Nothing new to check"}</button>`}
       ${job && job.finished ? `<div class="card stack"><strong>${job.error ? esc(job.error) : job.sum && job.sum.offline ? "No internet: try again on Wi-Fi or mobile data" : job.sum && job.sum.stopped ? "Paused" : "Done"}</strong>
-          ${job.applied ? `<span class="small muted">${job.applied.verified} verified and renamed, ${job.applied.notFound} not found</span>` : ""}</div>` : ""}
+          ${job.applied ? `<span class="small muted">${job.applied.verified} verified and renamed${job.ai ? `, ${job.ai} picked by the phone AI` : ""}, ${Math.max(0, job.applied.notFound - (job.ai || 0))} not found</span>` : ""}</div>` : ""}
       <p class="hint">Movies and series: ${settings.tmdbKey ? "TMDB (your key) and Wikidata" : "Wikidata (add a free TMDB key in Settings for posters and genres)"}. Anime: AniList and MyAnimeList. Manga: AniList and MangaDex. Names none of them find are searched on Wikipedia.
         The best match is picked for you and the title takes its official name. It is verified when a second source agrees, or the name is a close match on its own; anything less keeps the name read and is tried again in 30 days.</p>
       <p class="hint">Nightly check: ${night.on ? "on (Wi-Fi, charging, phone not in use)" : "off"}${night.last ? ` · last night: ${night.last.checked || 0} checked` : ""}. Change it in <a href="#/settings">Settings</a>.</p>
@@ -145,6 +213,9 @@ const Verify = (() => {
       <label class="field">TMDB API key (free, optional)<input class="input" id="tmdbkey" type="password" autocomplete="off" spellcheck="false" value="${esc(settings.tmdbKey || "")}" placeholder="Paste your key or read access token"></label>
       <div class="grid2"><button class="btn" id="tmdbsave">Save key</button><button class="btn" id="tmdbget">Get a free key</button></div>
       <p class="hint">Without a key, movies and series are checked on Wikidata (no posters or genres). The key stays on this phone and is only sent to TMDB.</p>
+      <label class="field">OMDb API key, for IMDb ratings (free, optional)<input class="input" id="omdbkey" type="password" autocomplete="off" spellcheck="false" value="${esc(settings.omdbKey || "")}" placeholder="Paste your OMDb key"></label>
+      <div class="grid2"><button class="btn" id="omdbsave" aria-label="Save OMDb key">Save key</button><button class="btn" id="omdbget">Get a free key</button></div>
+      <p class="hint">IMDb has no free way to read its ratings; OMDb gives them with a free key (1,000 titles a day). Without it, movies show the TMDB score and anime the MyAnimeList score. The key stays on this phone and is only sent to OMDb.</p>
       <div class="opt"><span class="grow stack" style="gap:2px"><strong>Check new titles every night</strong><span class="small muted">Only on Wi-Fi, while charging and not in use, like a WhatsApp backup. Only new titles. Off by default.</span></span>
         <button class="switch" role="switch" id="nightly" aria-checked="${!!night.on}" aria-label="Check new titles every night"><span></span></button></div>
       ${night.last ? `<p class="hint">Last night: ${night.last.checked || 0} checked, ${night.last.verified || 0} verified${night.last.left ? `, ${night.last.left} left for the next night` : ""}.</p>` : ""}
@@ -153,10 +224,12 @@ const Verify = (() => {
   function bindSettings(redraw) {
     bind("#tmdbsave", "click", () => { settings.tmdbKey = document.getElementById("tmdbkey").value.trim().slice(0, 400); saveSettings(); toast(settings.tmdbKey ? "Key saved on this phone" : "Key removed"); });
     bind("#tmdbget", "click", () => sync("openUrl", "https://www.themoviedb.org/settings/api"));
+    bind("#omdbsave", "click", () => { settings.omdbKey = document.getElementById("omdbkey").value.trim().slice(0, 100); saveSettings(); toast(settings.omdbKey ? "Key saved on this phone" : "Key removed"); });
+    bind("#omdbget", "click", () => sync("openUrl", "https://www.omdbapi.com/apikey.aspx"));
     bind("#nightly", "click", (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; sync("setNightly", on); toast(on ? "Nightly check on" : "Nightly check off"); redraw(); });
   }
 
-  return { cardHtml, apply, migrate, counts, onOpen, screen, settingsHtml, bindSettings, start, get job() { return job; } };
+  return { cardHtml, apply, migrate, aiPrompt, aiNumber, aiTodo, counts, onOpen, screen, settingsHtml, bindSettings, start, get job() { return job; } };
 })();
 
 if (typeof module !== "undefined") module.exports = Verify;

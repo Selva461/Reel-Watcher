@@ -21,7 +21,8 @@ function posterHtml(m, cls = "thumb") {
 
 function verifiedTag(m) {
   const v = m.verified || "unverified";
-  const kind = v === "verified" ? "ok" : v === "conflict" ? "warn" : "";
+  if (v === "unverified" && m.checked_at) return `<span class="tag">Not found online yet</span>`;  // tried again later, by itself
+  const kind = v === "verified" ? "ok" : "";
   return `<span class="tag ${kind}">${esc(Catalog.VERIFIED[v] || v)}</span>`;
 }
 
@@ -32,10 +33,23 @@ function lengthText(m) {
   return m.episodes > 1 ? `${t} × ${m.episodes}` : t;
 }
 
+/** "★ 8.2 IMDb": the rating, and where it is from. */
+function ratingText(m) {
+  return m.rating && m.rating.score > 0 ? `★ ${m.rating.score.toFixed(1)} ${m.rating.by}` : "";
+}
+
+/** "3 seasons · 66 eps" for the list; the detail screen shows each season. */
+function seasonsText(m) {
+  const s = m.seasons || [];
+  if (s.length < 2) return "";
+  const eps = s.reduce((a, x) => a + (x.episodes || 0), 0);
+  return `${s.length} seasons${eps ? ` · ${eps} eps` : ""}`;
+}
+
 function titleRow(m) {
   const t = Catalog.typeInfo(db, m.type);
   const n = (m.sources || []).length;
-  const meta = [t.label, m.year, m.language ? Catalog.langName(m.language) : "", lengthText(m)].filter(Boolean).join(" · ");
+  const meta = [ratingText(m), t.label, m.year, m.language ? Catalog.langName(m.language) : "", seasonsText(m) || lengthText(m)].filter(Boolean).join(" · ");
   return `<a class="list-item" href="#/m/${enc(m.id)}">${posterHtml(m, "thumb sm")}
     <span class="grow stack" style="gap:4px"><span class="title clamp">${esc(m.title)}</span>
       <span class="small muted">${esc(meta)}</span>
@@ -58,17 +72,18 @@ function titleScreen(id) {
     <div class="row" style="align-items:flex-start;gap:14px">${posterHtml(m, "thumb big poster")}
       <div class="stack grow" style="gap:6px"><h2 style="font-size:22px">${esc(m.title)}</h2>
         ${m.original_title && m.original_title !== m.title ? `<span class="small soft">${esc(m.original_title)}</span>` : ""}
+        ${m.rating && m.rating.score > 0 ? `<span class="rating"><strong>★ ${esc(m.rating.score.toFixed(1))}</strong><span class="small muted">/10 ${esc(m.rating.by)}${m.rating.votes ? ` · ${esc(m.rating.votes.toLocaleString("en"))} votes` : ""}</span></span>` : ""}
         <span class="small muted">${esc([t.label, m.year, m.language ? Catalog.langName(m.language) : "", m.country, lengthText(m)].filter(Boolean).join(" · "))}</span>
         <span class="tagrow">${verifiedTag(m)}${(m.genres || []).map((g) => `<span class="tag">${esc(g)}</span>`).join("")}</span>
         ${m.confidence && m.verified !== "verified" ? `<span class="small muted">Sure: ${Math.round(m.confidence * 100)}%</span>` : ""}</div></div>
     ${m.overview ? `<p class="soft" style="margin:0;line-height:1.5">${esc(m.overview)}</p>` : ""}
+    ${(m.seasons || []).length ? `<div class="stack" style="gap:6px"><h2>${plural(m.seasons.length, "season")}</h2>${m.seasons.map((x) => `<div class="list-item season">
+      <strong>S${x.n}</strong><span class="grow stack" style="gap:2px"><span>${x.episodes ? `${x.episodes} eps` : "Episodes not known yet"}${x.year ? ` · ${x.year}` : ""}</span>${x.title && x.title !== m.title ? `<span class="small muted clamp">${esc(x.title)}</span>` : ""}</span></div>`).join("")}</div>` : ""}
     <div class="seg" role="group" aria-label="Status">${Object.entries(Catalog.STATUS).map(([k, l]) => `<button data-st="${k}" aria-pressed="${(m.status || "want") === k}">${esc(t.group === "read" ? ({ want: "Want", watching: "Reading", done: "Finished", dropped: "Dropped" })[k] : ({ want: "Want", watching: "Watching", done: "Finished", dropped: "Dropped" })[k])}</button>`).join("")}</div>
     ${firstReel ? `<button class="btn primary block" id="openig">${UI.insta} Instagram</button>` : ""}
     <div class="grid2">
       <button class="btn" id="edit">Edit</button>
-      <button class="btn" id="look">Look it up</button>
-      ${m.verified !== "verified" ? `<button class="btn" id="okv">It is right</button>` : ""}
-      <button class="btn" id="wrong">Not a real title</button>
+      ${m.ext && /^tt\d+$/.test(m.ext.imdb || "") ? `<button class="btn" id="imdb">IMDb</button>` : `<button class="btn" id="look">Look it up</button>`}
     </div>
     ${(m.aka || []).length ? `<div class="card stack" style="gap:6px"><span class="label">Also known as</span><p class="small soft" style="margin:0">${esc(m.aka.join(" · "))}</p></div>` : ""}
     <div class="stack"><h2>Found in ${plural(src.length, "place")}</h2>${src.length ? src.map(srcRow).join("") : `<div class="empty small">No sources yet.</div>`}</div>
@@ -78,8 +93,7 @@ function titleScreen(id) {
   bind("#edit", "click", () => titleDialog(m));
   bind("#openig", "click", () => { firstReel.opened_at = Date.now(); saveDb(); sync("openUrl", firstReel.url); });
   bind("#look", "click", () => sync("openUrl", "https://www.google.com/search?q=" + enc([m.title, m.year, t.label].filter(Boolean).join(" "))));
-  bind("#okv", "click", () => { Catalog.verify(db, m.id, {}, "verified", "you"); saveDb(); toast("Marked as checked"); titleScreen(m.id); });
-  bind("#wrong", "click", () => { Catalog.verify(db, m.id, {}, "rejected", "you"); saveDb(); toast("Hidden from your watchlist"); location.hash = "#/"; });
+  bind("#imdb", "click", () => sync("openUrl", `https://www.imdb.com/title/${m.ext.imdb}/`));
   bind("#mnote", "change", (e, el) => { Catalog.update(db, m.id, { note: el.value }); saveDb(); toast("Saved"); });
   bind("#mdel", "click", () => { if (confirm(`Remove "${m.title}" from your watchlist?`)) { Catalog.remove(db, m.id); saveDb(); location.hash = "#/"; } });
 }
