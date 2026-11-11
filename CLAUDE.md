@@ -91,7 +91,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Local-first AI processing.
 - No mandatory paid APIs.
 - No mandatory cloud LLM.
-- No application-side API keys.
+- No hardcoded or bundled API keys. Optional user-entered API keys for existing integrations are permitted.
 - Preserve user privacy and explicit media permissions.
 - Keep temporary media cleanup reliable.
 - Maintain compatibility with the existing Android application.
