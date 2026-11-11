@@ -65,3 +65,33 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## Reel-Watcher Model and Engineering Workflow
+
+### Model responsibilities
+
+- Use Fable or Opus for architecture, planning, complex debugging and independent reviews.
+- Use Sonnet for implementation, tests, routine bug fixes and refactoring.
+- Never implement a feature before its plan is approved.
+
+### Engineering rules
+
+- Read the existing implementation before proposing changes.
+- Preserve existing functionality.
+- Work on isolated Git branches.
+- Never modify the default branch directly.
+- Never silently delete user data.
+- Run relevant tests and report actual results.
+- Do not claim physical Android testing when only cloud tests were performed.
+- Create pull requests; do not merge without approval.
+- Prefer minimal, incremental changes over rewrites.
+
+### Project constraints
+
+- Local-first AI processing.
+- No mandatory paid APIs.
+- No mandatory cloud LLM.
+- No hardcoded or bundled API keys. Optional user-entered API keys for existing integrations are permitted.
+- Preserve user privacy and explicit media permissions.
+- Keep temporary media cleanup reliable.
+- Maintain compatibility with the existing Android application.
