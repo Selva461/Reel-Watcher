@@ -67,17 +67,31 @@ function sync(method, ...args) {
 // ------------------------------------------------------------------ library and settings
 
 let db = { reels: [], inbox: [], media: [], mediaTypes: [] };
+let dbLocked = false;  // the library file could not be read: nothing is saved over it until you choose (lockedScreen)
+function libraryInfo(which) { try { return JSON.parse(sync("libraryInfo", which || "reels") || "{}"); } catch (e) { return {}; } }
 function loadDb() {
   const t = sync("load");
+  const info = libraryInfo();
+  if (info.state === "unreadable") { dbLocked = true; return; }  // the phone found it damaged and kept it as it is
   if (t) {
     try {
       const d = JSON.parse(t);
+      if (!d || typeof d !== "object" || Array.isArray(d) || (d.reels != null && !Array.isArray(d.reels))) throw new Error("not a library");
       db = { ...d, reels: d.reels || [], inbox: d.inbox || [], media: d.media || [], mediaTypes: d.mediaTypes || [] };
       for (const r of db.reels) if (r.status === "working") r.status = r.notes ? "done" : "new";  // the app was closed mid-way
       for (const r of db.reels) if (r.author && !Notes.isYoutube(r) && !Notes.username(r.author)) r.author = "";  // "Media": a label from the export, not a creator (before 1.3.5)
-    } catch (e) { toast("Your library file could not be read"); } }
+    } catch (e) { dbLocked = true; return; } }  // damaged: never save over it
+  if (info.notice === "recovered") toast("Your library file could not be read. The last saved copy was restored; the damaged file was kept" + (info.bad ? " as " + info.bad : "") + ".");
 }
-function saveDb() { if (sync("store", JSON.stringify(db)) === false) toast("Could not save. Is the phone's storage full?"); }
+let deferSaves = false, savePending = false;  // a batch (shared items) is saved once, at its end
+/** Saves the library. False when it was not saved (locked, or the phone refused). */
+function saveDb() {
+  if (dbLocked) return false;
+  if (deferSaves) { savePending = true; return true; }
+  const ok = sync("store", JSON.stringify(db)) !== false;
+  if (!ok) toast("Could not save. Is the phone's storage full?");
+  return ok;
+}
 function reel(code) { return db.reels.find((r) => r.code === code || r.ig_code === code); }
 
 const MODELS = [
@@ -161,11 +175,17 @@ function takeShared() {
   let answers = 0;
   let waiting = 0;
   let other = 0;
-  for (const it of items) {
-    const text = String(it.text || "");
-    if (Notes.parse(text)) { const r = fileAnswer(text, "meta"); answers += r.filed; waiting += r.inbox; continue; }
-    const found = Notes.links(text);
-    if (found.length) reels += addReels(found, "share"); else other++;
+  deferSaves = true;  // 100 shared reels are one save, not 100
+  try {
+    for (const it of items) {
+      const text = String(it.text || "");
+      if (Notes.parse(text)) { const r = fileAnswer(text, "meta"); answers += r.filed; waiting += r.inbox; continue; }
+      const found = Notes.links(text);
+      if (found.length) reels += addReels(found, "share"); else other++;
+    }
+  } finally {
+    deferSaves = false;
+    if (savePending) { savePending = false; saveDb(); }
   }
   const msg = [reels && `${plural(reels, "new reel")} saved`, answers && `${plural(answers, "Meta AI answer")} filed`,
     waiting && `${plural(waiting, "answer")} to file`, other && `${plural(other, "share")} had no reel link`].filter(Boolean).join(", ");
@@ -656,6 +676,7 @@ window.fileCommentScreen = (lines, at) => {
 
 let backFrom = "";  // the reel you just looked at in Instagram
 window.onAppResume = () => {
+  if (dbLocked) return;  // the library is not open: Try again on the screen
   const seen = db.reels.filter((x) => x.opened_at && Date.now() - x.opened_at < 20 * 60000).sort((a, b) => b.opened_at - a.opened_at)[0];
   if (seen && backFrom !== seen.code) {  // back from Instagram: offer the next step on that reel
     backFrom = seen.code;
@@ -1180,7 +1201,7 @@ function settingsScreen() {
   bind("#excsv", "click", () => phone("saveFile", `watchlist-${stamp()}.csv`, "text/csv", Catalog.exportCsv(db)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#exshare", "click", () => sync("shareText", Notes.exportMarkdown(db.reels), "Share your reel notes"));
   bind("#excopy", "click", () => { sync("copy", Notes.exportMarkdown(db.reels)); toast("All notes copied"); });
-  bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes? This cannot be undone.`)) { db.reels = []; db.inbox = []; saveDb(); toast("Deleted (your watchlist is kept)"); settingsScreen(); } });
+  bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes? This cannot be undone.`)) { db.reels = []; db.inbox = []; if (saveDb()) sync("dropBackup", "reels"); toast("Deleted (your watchlist is kept)"); settingsScreen(); } });
 }
 
 // ------------------------------------------------------------------ router
@@ -1195,7 +1216,36 @@ const ROUTES = [
   [/^#\/check$/, () => Verify.screen(), "inbox"], [/^#\/quotes$/, () => { lib.kind = "quotes"; location.replace("#/"); }, "lib"],
 ];
 
+/** The library file could not be read. Nothing is saved over it; you choose what happens next. */
+function lockedScreen() {
+  $app.innerHTML = `${header("Library not opened", "")}
+    <div class="card stack"><strong>Your library file could not be read</strong>
+      <span class="small">Reel Shelf has not changed it, and will not save anything until you choose. Shared reels wait safely.</span></div>
+    <button class="btn block" id="retry">Try again</button>
+    <button class="btn block" id="saveBad">Save the unreadable file to Downloads</button>
+    <button class="btn block danger" id="startNew">Start a new library</button>
+    <p class="hint">Start a new library sets the unreadable file aside under a new name (it is not deleted). Save a copy to Downloads first if you want to keep it outside the app.</p>`;
+  bind("#retry", "click", () => { dbLocked = false; loadDb(); if (dbLocked) toast("Still unreadable"); else openLibrary(); render(); });
+  bind("#saveBad", "click", () => phone("saveUnreadable", "reels").then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
+  bind("#startNew", "click", () => {
+    if (!confirm("Start a new, empty library? The unreadable file is kept under a new name, not deleted.")) return;
+    if (!sync("libraryStartNew", "reels")) { toast("Could not set the file aside. Nothing was changed."); return; }
+    dbLocked = false;
+    db = { reels: [], inbox: [], media: [], mediaTypes: [] };
+    openLibrary();
+    render();
+  });
+}
+
+/** What happens when the library is open: things shared while the app was closed come in, titles checked overnight are applied. */
+function openLibrary() {
+  takeShared();
+  Verify.onOpen();
+  Verify.resume();  // a check cut short by an update carries on
+}
+
 function render() {
+  if (dbLocked) { paintTabs(""); topBar(false); lockedScreen(); return; }
   const h = location.hash || "#/";
   for (const [rx, fn, tab, top] of ROUTES) {
     const m = h.match(rx);
@@ -1213,8 +1263,6 @@ window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); }
 loadSettings();
 loadDb();
 bindTopBar();
-takeShared();
-Verify.onOpen();
-Verify.resume();  // a check cut short by an update carries on
+if (!dbLocked) openLibrary();  // while locked nothing is taken from the share queue or the check results
 render();
-if (sync("isNight")) overnightRun(true);  // the nightly run (no screen): see NightRun.java
+if (sync("isNight")) { if (dbLocked) sync("nightDone"); else overnightRun(true); }  // the nightly run (no screen): see NightRun.java

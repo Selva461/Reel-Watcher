@@ -18,8 +18,15 @@ const Shots = (() => {
     loaded = true;
     try {
       const t = sync("loadShots");
-      if (t) { const d = JSON.parse(t); state = { v: 1, seen: d.seen || {}, reels: d.reels || {} }; }
-    } catch (e) { toast("The screenshot list could not be read; it will be rebuilt"); }
+      if (t) {
+        const d = JSON.parse(t);
+        if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error("not a list");
+        state = { v: 1, seen: d.seen || {}, reels: d.reels || {} };
+      }
+    } catch (e) { sync("libraryStartNew", "shots"); toast("The screenshot list could not be read; it will be rebuilt"); }  // the damaged file is kept, renamed
+    const info = libraryInfo("shots");
+    if (info.notice === "recovered") toast("The screenshot list could not be read. The last saved copy was restored.");
+    else if (info.notice === "started_new") toast("The screenshot list could not be read; it was set aside and will be rebuilt");
   }
   function save() {
     if (sync("storeShots", JSON.stringify(state)) === false) toast("Could not save. Is the phone's storage full?");

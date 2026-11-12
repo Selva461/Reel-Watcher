@@ -5,6 +5,15 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.7
+- Your library is safer. If the library file cannot be read, Reel Shelf no longer replaces it with an empty one. It
+  restores the last good copy when there is one (the damaged file is kept under a new name). Otherwise it stops, shows
+  a recovery screen, and saves nothing until you choose: Try again, Save the unreadable file to Downloads, or Start a
+  new library (the unreadable file is set aside, never deleted). Reels shared meanwhile wait safely.
+- Each save keeps the previous version as a backup. The screenshot list is protected the same way; if it cannot be read
+  it is set aside and read again from your pictures. "Delete all reels and notes" also removes the backup.
+- Reels shared while the app was closed are filed in one save instead of one per reel.
+
 ## 1.3.6
 - Products: a new Products chip in Library. Screenshots of a label ("Clinic Plus / Strong & Long Shampoo") or a store
   page (Amazon, Flipkart, Nykaa...) add the product, with the store link and price when the screenshot shows them.
