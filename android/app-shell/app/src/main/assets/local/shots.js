@@ -23,6 +23,7 @@ const Shots = (() => {
     if (loaded) return;
     loaded = true;
     blocked = false;
+    state = { v: 1, seen: {}, reels: {} };  // nothing of the copy already in memory survives a (re)load: a new or empty list stays empty
     let unusable = false;
     try {
       const t = sync("loadShots");

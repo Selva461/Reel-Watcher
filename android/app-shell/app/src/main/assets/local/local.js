@@ -69,7 +69,10 @@ function sync(method, ...args) {
 let db = { reels: [], inbox: [], media: [], mediaTypes: [] };
 let dbLocked = false;  // the library file could not be read: nothing is saved over it until you choose (lockedScreen)
 function libraryInfo(which) { try { return JSON.parse(sync("libraryInfo", which || "reels") || "{}"); } catch (e) { return {}; } }
+function emptyDb() { return { reels: [], inbox: [], media: [], mediaTypes: [] }; }
+/** Reads the library from the phone. Nothing of the copy already in memory survives: a stored library that is new or empty (for example one another page just started) gives an empty library, never the old records. */
 function loadDb() {
+  db = emptyDb();
   const t = sync("load");
   const info = libraryInfo();
   if (info.state === "unreadable") { dbLocked = true; return; }  // the phone found it damaged and kept it as it is
@@ -1283,7 +1286,7 @@ function lockedScreen() {
     if (!confirm("Start a new, empty library? The unreadable file is kept under a new name, not deleted.")) return;
     if (!sync("libraryStartNew", "reels")) { toast("Could not set the file aside. Nothing was changed."); return; }
     dbLocked = false;
-    db = { reels: [], inbox: [], media: [], mediaTypes: [] };
+    db = emptyDb();
     openLibrary();
     render();
   });

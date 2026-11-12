@@ -5,7 +5,9 @@ Here: what the page does with what the phone reports, with a fake bridge whose l
 shared items stay listed until acknowledged, and whose settings are merged key by key. No network, no device."""
 import json
 
+from test_library_safety import DAMAGED, LIB_RN, PIC, SHOT_STATE, locked_screen
 from test_phone_app import db_of, phone, site  # noqa: F401  (pytest fixtures)
+from test_shots import SHOTS_RN
 
 GOOD = json.dumps({"reels": [{"code": f"OLD{i:05d}", "url": f"https://www.instagram.com/reel/OLD{i:05d}/", "status": "done",
                               "notes": {"topic": f"topic {i}"}, "added_at": 1} for i in range(5)], "inbox": []})
@@ -64,6 +66,84 @@ def test_the_same_page_saving_again_and_again_is_never_stale(phone):
         phone.evaluate("i => addReels([{ code: 'SELF000' + i, url: 'https://www.instagram.com/reel/SELF000' + i + '/' }], 'paste')", i)
     assert len([c for c in codes(phone) if c.startswith("SELF")]) == 5
     assert not phone.evaluate("() => document.getElementById('toast').textContent.includes('elsewhere')")
+
+
+def other_page_starts_a_new_library(pg):
+    """The other page chose "Start a new library": the old file was renamed away, so the library reads as new and empty, and the revision moved on."""
+    pg.evaluate("() => { const s = window.__rn; s.db = ''; s.rev = (s.rev || 0) + 1; sessionStorage.setItem('rn', JSON.stringify(s)); }")
+
+
+def test_a_stale_save_after_another_page_started_a_new_library_does_not_bring_the_old_reels_back(phone):
+    phone.open_with({"db": GOOD})
+    assert len(page_codes(phone)) == 5
+    other_page_starts_a_new_library(phone)
+    phone.evaluate("() => addReels([{ code: 'MINE0001', url: 'https://www.instagram.com/reel/MINE0001/' }], 'paste')")  # stale: refused
+    toast_has(phone, "updated elsewhere")
+    assert page_codes(phone) == [], "this page shows the new, empty library, not its old copy"
+    assert phone.rn()["db"] == "", "the refused save wrote nothing"
+    phone.evaluate("() => addReels([{ code: 'MINE0002', url: 'https://www.instagram.com/reel/MINE0002/' }], 'paste')")
+    phone.wait_for_function("() => window.__rn.db.includes('MINE0002')")
+    assert codes(phone) == ["MINE0002"], "nothing from the old copy came back"
+
+
+def test_coming_back_after_another_page_started_a_new_library_does_not_bring_the_old_reels_back(phone):
+    phone.open_with({"db": GOOD})
+    other_page_starts_a_new_library(phone)
+    phone.evaluate("() => onAppResume()")
+    phone.wait_for_function("() => db.reels.length === 0")
+    phone.evaluate("() => addReels([{ code: 'MINE0003', url: 'https://www.instagram.com/reel/MINE0003/' }], 'paste')")
+    phone.wait_for_function("() => window.__rn.db.includes('MINE0003')")
+    assert codes(phone) == ["MINE0003"] and "OLD0" not in phone.rn()["db"]
+
+
+def test_a_reload_that_finds_the_library_unreadable_still_locks_and_keeps_no_old_records(phone):
+    phone.context.add_init_script(LIB_RN)
+    phone.open_with({"db": GOOD})
+    saves_before = phone.rn().get("stores") or 0  # the page's own housekeeping when it opened
+    phone.evaluate("t => { const s = window.__rn; s.db = t; s.rev = (s.rev || 0) + 1; s.lib = { reels: { state: 'unreadable' } }; sessionStorage.setItem('rn', JSON.stringify(s)); }", DAMAGED)
+    phone.evaluate("() => onAppResume()")
+    locked_screen(phone)
+    assert phone.evaluate("() => db.reels.length") == 0, "the old copy is gone from memory"
+    rn = phone.rn()
+    assert rn["db"] == DAMAGED and (rn.get("stores") or 0) == saves_before, "and nothing was saved over the unreadable file"
+
+
+# a screenshot list with its own revision, like LibraryFile gives it
+SHOTS_REVISION_RN = r"""
+(() => {
+  const st = window.__rn;
+  const keep = () => sessionStorage.setItem("rn", JSON.stringify(st));
+  const was = window.RN.libraryStale;
+  const pg = { rev: st.shotsRev || 0 };
+  Object.assign(window.RN, {
+    loadShots: () => { pg.rev = st.shotsRev || 0; return st.shotsDb || ""; },
+    storeShots: (j) => { if ((st.shotsRev || 0) !== pg.rev) return false; st.shotsDb = j; st.shotsRev = pg.rev = (st.shotsRev || 0) + 1;
+      st.shotsStores = (st.shotsStores || 0) + 1; keep(); return true; },
+    libraryStale: (w) => (w === "shots" ? (st.shotsRev || 0) !== pg.rev : was(w)),
+  });
+})();
+"""
+OLD_SHOTS = json.dumps({"v": 1, "seen": {"content://x/old1": {"m": 1, "st": "found", "n": "a.jpg", "f": "S", "c": ["Heat"], "x": ""},
+                                         "content://x/old2": {"m": 2, "st": "none", "n": "b.jpg", "f": "S", "c": [], "x": ""}},
+                        "reels": {"OLD00000": "sig"}})
+
+
+def test_a_stale_save_after_another_page_started_a_new_screenshot_list_does_not_bring_the_old_records_back(phone):
+    phone.context.add_init_script(SHOTS_RN)
+    phone.context.add_init_script(SHOTS_REVISION_RN)
+    phone.open_with({"db": GOOD, "shotsDb": OLD_SHOTS, **SHOT_STATE})
+    phone.evaluate("() => { location.hash = '#/shots'; }")
+    phone.get_by_role("button", name="Read new screenshots now").wait_for()  # the list was loaded: two old records
+    phone.evaluate("() => { const s = window.__rn; s.shotsDb = ''; s.shotsRev = (s.shotsRev || 0) + 1; sessionStorage.setItem('rn', JSON.stringify(s)); }")  # new list
+    phone.click("#go")  # reads the picture, but its save is stale: refused, the list is read again
+    phone.get_by_role("button", name="Read new screenshots now").wait_for()  # the run is over (its toast is replaced at once by the title check's)
+    assert phone.rn()["shotsDb"] == "" and not phone.rn().get("shotsStores"), "the refused save wrote nothing"
+    phone.click("#go")
+    phone.wait_for_function("() => window.__rn.shotsStores >= 1")
+    saved = json.loads(phone.rn()["shotsDb"])
+    assert list(saved["seen"]) == [PIC["k"]], "only what was read after the reload, none of the old records"
+    assert "OLD00000" not in saved["reels"]
+    assert saved["seen"][PIC["k"]]["c"] == ["Interstellar"]
 
 
 # ---------------------------------------------------------------- shared items: kept until saved
