@@ -5,6 +5,7 @@ Here: what the page does with what the phone reports, with a fake bridge. No net
 import json
 
 from test_phone_app import db_of, phone, site  # noqa: F401  (pytest fixtures)
+from test_shots import L, SHOTS_RN
 
 GOOD = json.dumps({"reels": [{"code": f"OLD{i:05d}", "url": f"https://www.instagram.com/reel/OLD{i:05d}/", "status": "done",
                               "notes": {"topic": f"topic {i}"}, "added_at": 1} for i in range(20)], "inbox": []})
@@ -23,12 +24,13 @@ LIB_RN = r"""
     store: (j) => { if (locked() || st.storeRefused) return false; st.db = j; st.stores = (st.stores || 0) + 1; keep(); return true; },
     libraryInfo: (w) => { const i = lib(w); const o = { state: i.state || "ok", bad: i.bad || "", notice: i.notice || "" }; i.notice = ""; keep(); return JSON.stringify(o); },
     libraryStartNew: (w) => { st.calls.push(["libraryStartNew", w]); if (st.startNewFails) { keep(); return false; }
-      st.badFile = st.db; st.db = ""; lib(w).state = "started_new"; keep(); return true; },
+      if (w === "shots") { st.shotsBadFile = st.shotsDb; st.shotsDb = ""; } else { st.badFile = st.db; st.db = ""; }  // renamed away, kept
+      lib(w).state = "started_new"; keep(); return true; },
     dropBackup: (w) => { st.calls.push(["dropBackup", w]); keep(); return true; },
     saveUnreadable: (id, w) => { st.calls.push(["saveUnreadable", w]); keep();
       setTimeout(() => rnDone(id, true, "Downloads/ReelShelf/" + w + "-unreadable-20260101-000000.txt"), 5); },
-    loadShots: () => st.shotsDb || "",
-    storeShots: (j) => { st.shotsDb = j; keep(); return true; },
+    loadShots: () => (lib("shots").state === "unreadable" ? "" : st.shotsDb || ""),
+    storeShots: (j) => { if (lib("shots").state === "unreadable") return false; st.shotsDb = j; st.shotsStores = (st.shotsStores || 0) + 1; keep(); return true; },
   });
 })();
 """
@@ -91,8 +93,8 @@ def test_try_again_opens_the_library_once_the_file_is_readable_and_takes_the_wai
     assert phone.rn()["shared"] == [LINK]
     phone.evaluate("g => { window.__rn.lib.reels.state = 'ok'; window.__rn.db = g; }", GOOD)  # the phone restored it
     phone.get_by_role("button", name="Try again").click()
-    phone.wait_for_function("!document.body.innerText.includes('Library not opened')")
-    phone.wait_for_function("window.__rn.stores >= 1")
+    phone.wait_for_function("() => !document.body.innerText.includes('Library not opened')")
+    phone.wait_for_function("() => window.__rn.stores >= 1")
     reels = db_of(phone)["reels"]
     assert len(reels) == 21 and {r["code"] for r in reels} >= {"OLD00000", "SHARE0001"}
     assert phone.rn()["shared"] == []
@@ -116,11 +118,11 @@ def test_start_a_new_library_keeps_the_damaged_file_and_a_failure_changes_nothin
     assert phone.rn()["db"] == DAMAGED and phone.rn()["shared"] == [LINK]
     phone.evaluate("window.__rn.startNewFails = false")
     phone.get_by_role("button", name="Start a new library").click()
-    phone.wait_for_function("!document.body.innerText.includes('Library not opened')")
+    phone.wait_for_function("() => !document.body.innerText.includes('Library not opened')")
     rn = phone.rn()
     assert ["libraryStartNew", "reels"] in rn["calls"]
     assert rn["badFile"] == DAMAGED, "the unreadable file was set aside, not deleted"
-    phone.wait_for_function("window.__rn.stores >= 1")
+    phone.wait_for_function("() => window.__rn.stores >= 1")
     assert [r["code"] for r in db_of(phone)["reels"]] == ["SHARE0001"]  # the new library holds what was shared meanwhile
 
 
@@ -137,11 +139,11 @@ def test_the_unreadable_file_can_be_saved_to_downloads_from_the_recovery_screen(
 def test_a_hundred_shared_reels_are_one_save(phone):
     phone.context.add_init_script(LIB_RN)
     phone.open_with({"db": GOOD, "shared": [LINK]})
-    phone.wait_for_function("window.__rn.stores >= 1")
+    phone.wait_for_function("() => window.__rn.stores >= 1")
     one = phone.rn()["stores"]
     links = [f"https://www.instagram.com/reel/BATCH{i:04d}/" for i in range(100)]
     phone.open_with({"db": GOOD, "shared": links})
-    phone.wait_for_function("window.__rn.stores >= 1")
+    phone.wait_for_function("() => window.__rn.stores >= 1")
     assert phone.rn()["stores"] == one, "the number of saves does not grow with the number of shared items"
     assert len(db_of(phone)["reels"]) == 120 and phone.rn()["shared"] == []
 
@@ -155,7 +157,7 @@ def test_delete_all_drops_the_backup_only_when_the_empty_library_was_saved(phone
     phone.open_with({"db": GOOD})
     go(phone, "#/settings")
     phone.click("#wipe")
-    phone.wait_for_function("window.__rn.calls.some((c) => c[0] === 'dropBackup')")
+    phone.wait_for_function("() => window.__rn.calls.some((c) => c[0] === 'dropBackup')")
     assert ["dropBackup", "reels"] in phone.rn()["calls"] and db_of(phone)["reels"] == []
     phone.open_with({"db": GOOD, "storeRefused": True})  # a failed save keeps the backup (and the file)
     go(phone, "#/settings")
@@ -167,7 +169,7 @@ def test_delete_all_drops_the_backup_only_when_the_empty_library_was_saved(phone
 def test_the_nightly_run_with_an_unreadable_library_ends_without_touching_anything(phone):
     phone.context.add_init_script(LIB_RN)
     phone.open_with(unreadable(night=True))
-    phone.wait_for_function("window.__rn.nightDone === 1")
+    phone.wait_for_function("() => window.__rn.nightDone === 1")
     rn = phone.rn()
     assert rn["db"] == DAMAGED and not rn.get("stores") and rn["shared"] == [LINK] and not rn.get("work")
 
@@ -177,7 +179,7 @@ def test_a_library_from_the_previous_version_loads_and_saves_with_every_key_kept
            "inbox": [], "media": [], "mediaTypes": [], "verify_rules": 4, "lastNight": {"at": 5, "log": ["a"]}, "futureKey": {"a": [1, 2]}}
     phone.context.add_init_script(LIB_RN)
     phone.open_with({"db": json.dumps(old), "shared": [LINK]})
-    phone.wait_for_function("window.__rn.stores >= 1")
+    phone.wait_for_function("() => window.__rn.stores >= 1")
     after = db_of(phone)
     for k in ("inbox", "media", "mediaTypes", "verify_rules", "lastNight", "futureKey"):
         assert after[k] == old[k], k
@@ -193,3 +195,55 @@ def test_the_screenshot_list_that_was_set_aside_says_so(phone):
     go(phone, "#/shots")
     toast_has(phone, "could not be read")
     assert ["libraryStartNew", "shots"] in phone.rn()["calls"]
+
+
+DAMAGED_SHOTS = '{"v": 1, "seen": {"content://x/1": {"m": 1, "st": "found", "n": "a.jpg", "f": "S", "c": ["Heat"], "x": ""}'  # cut short
+PIC = {"k": "content://x/tree/primary%3AScreens/document/9", "n": "Screenshot_9.jpg", "f": "DCIM/Screenshots", "m": 9, "s": 1}
+SHOT_STATE = {"folders": [{"uri": "content://x/tree/primary%3AScreens", "name": "DCIM/Screenshots"}], "pics": [PIC],
+              "text": {PIC["k"]: [L("Movie: Interstellar", 600)]}}
+
+
+def shots_phone(pg):
+    pg.context.add_init_script(SHOTS_RN)
+    pg.context.add_init_script(LIB_RN)  # after SHOTS_RN: its loadShots/storeShots know about "unreadable"
+
+
+def test_an_unreadable_screenshot_list_is_set_aside_rebuilt_and_saves_again(phone):
+    # the phone reports "unreadable", loadShots() gives "", and there is no good backup to restore
+    shots_phone(phone)
+    phone.open_with({"db": GOOD, "shotsDb": DAMAGED_SHOTS, "lib": {"shots": {"state": "unreadable"}}, **SHOT_STATE})
+    go(phone, "#/shots")
+    toast_has(phone, "set aside and will be rebuilt")
+    rn = phone.rn()
+    assert ["libraryStartNew", "shots"] in rn["calls"]
+    assert rn["shotsBadFile"] == DAMAGED_SHOTS, "the damaged list is kept, not deleted"
+    assert json.loads(rn["db"])["reels"] == json.loads(GOOD)["reels"], "the library's reels are not touched"
+    phone.click("#go")  # rebuild: read the pictures again, and the list is saved again
+    phone.wait_for_function("() => window.__rn.shotsStores >= 1")
+    saved = json.loads(phone.rn()["shotsDb"])
+    assert list(saved["seen"]) == [PIC["k"]] and saved["seen"][PIC["k"]]["c"] == ["Interstellar"]
+    assert phone.rn()["shotsBadFile"] == DAMAGED_SHOTS
+
+
+def test_a_screenshot_list_that_cannot_be_set_aside_is_left_alone_and_tried_again_later(phone):
+    shots_phone(phone)
+    phone.open_with({"db": GOOD, "shotsDb": DAMAGED_SHOTS, "startNewFails": True, "lib": {"shots": {"state": "unreadable"}}, **SHOT_STATE})
+    go(phone, "#/shots")
+    toast_has(phone, "could not be set aside")
+    phone.get_by_text("The screenshot list is not open").wait_for()
+    go(phone, "#/inbox")
+    go(phone, "#/shots")  # every visit tries again, and every visit changes nothing while it fails
+    phone.get_by_text("The screenshot list is not open").wait_for()
+    phone.evaluate("window.__rn.calls.length")  # let the page settle
+    rn = phone.rn()
+    assert rn["shotsDb"] == DAMAGED_SHOTS and not rn.get("shotsStores"), "nothing was saved over the damaged list"
+    assert not any(c[0] == "readShots" for c in rn["calls"]), "no pictures are read for a list that cannot be saved"
+    assert sum(1 for c in rn["calls"] if c == ["libraryStartNew", "shots"]) >= 2
+    phone.evaluate("window.__rn.startNewFails = false")  # the phone can set it aside now
+    go(phone, "#/inbox")
+    go(phone, "#/shots")
+    toast_has(phone, "set aside and will be rebuilt")
+    assert phone.rn()["shotsBadFile"] == DAMAGED_SHOTS
+    phone.click("#go")
+    phone.wait_for_function("() => window.__rn.shotsStores >= 1")
+    assert list(json.loads(phone.rn()["shotsDb"])["seen"]) == [PIC["k"]]
