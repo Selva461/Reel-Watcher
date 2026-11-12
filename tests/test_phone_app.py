@@ -26,12 +26,20 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
   }, JSON.parse(sessionStorage.getItem("rn") || "{}"));
   const keep = () => sessionStorage.setItem("rn", JSON.stringify(st));
   const later = (fn) => setTimeout(fn, 5);
+  const page = { rev: st.rev || 0, shotsRev: st.shotsRev || 0 };  // what this page loaded
   window.RN = {
-    load: () => st.db,
-    store: (j) => { st.db = j; keep(); return true; },
-    takeShared: () => { const s = JSON.stringify(st.shared.map((t) => ({ text: t, at: 1 }))); st.shared = []; keep(); return s; },
+    // the library file has a revision: a page's save is refused when the file moved on since the page loaded (LibraryFile.java)
+    load: () => { page.rev = st.rev || 0; return st.db; },
+    store: (j) => { if (st.storeRefused || (st.rev || 0) !== page.rev) return false; st.db = j; st.rev = page.rev = (st.rev || 0) + 1; keep(); return true; },
+    libraryStale: (w) => (w === "shots" ? (st.shotsRev || 0) !== page.shotsRev : (st.rev || 0) !== page.rev),
+    // shared items stay listed until acknowledged by id (SharedQueue.java)
+    // st.rivalDb: another page saves this library right after this page loaded it (a stale page)
+    peekShared: () => { if (st.rivalDb) { st.db = st.rivalDb; st.rev = (st.rev || 0) + 1; st.rivalDb = null; keep(); }
+      return JSON.stringify(st.shared.map((t) => ({ id: "id-" + t, text: t, at: 1 }))); },
+    ackShared: (ids) => { const gone = JSON.parse(ids); st.shared = st.shared.filter((t) => !gone.includes("id-" + t)); keep(); },
     getSettings: () => st.settings,
     setSettings: (j) => { st.settings = j; keep(); },
+    patchSettings: (j) => { st.patches = (st.patches || []).concat([j]); const m = Object.assign(JSON.parse(st.settings || "{}"), JSON.parse(j)); st.settings = JSON.stringify(m); keep(); return st.settings; },
     copy: (t) => { st.copied = t; keep(); },
     shareText: (t, title) => { st.sharedOut.push([title, t]); keep(); },
     openUrl: (u) => { st.opened.push(u); keep(); },

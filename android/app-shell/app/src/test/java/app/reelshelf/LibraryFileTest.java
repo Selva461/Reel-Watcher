@@ -8,6 +8,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
+import org.json.JSONObject;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -296,5 +297,134 @@ public class LibraryFileTest {
         assertFalse(f.write(V2));
         assertEquals(V1, get(f.main));
         assertEquals(LibraryFile.State.OK, f.state());
+    }
+
+    // ------------------------------------------------------------------ revisions: a stale page cannot overwrite newer data
+
+    @Test
+    public void theRevisionAdvancesOnEverySaveAndNotOnReads() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        LibraryFile.Loaded l = f.load();
+        assertEquals(LibraryFile.State.MISSING, l.state);
+        assertEquals("", l.text);
+        assertEquals(0, l.revision);
+        LibraryFile.Result r = f.write(V1, l.revision);
+        assertTrue(r.ok);
+        assertEquals(1, r.revision);
+        assertEquals(1, f.load().revision);
+        assertEquals(1, f.load().revision);
+        assertEquals(V1, f.load().text);
+        assertEquals(2, f.write(V2, 1).revision);
+    }
+
+    @Test
+    public void aSaveBasedOnAnOldRevisionIsRefusedAndChangesNothing() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        long pageA = f.load().revision;  // two pages load the same version
+        long pageB = pageA;
+        LibraryFile.Result a = f.write(V1, pageA);  // page A saves first
+        assertTrue(a.ok);
+        LibraryFile.Result b = f.write(V2, pageB);  // page B's copy is out of date
+        assertFalse(b.ok);
+        assertTrue(b.stale);
+        assertEquals(a.revision, b.revision);
+        assertEquals(V1, get(f.main));
+        assertFalse("a refused save leaves no backup or temp file behind", f.bak.exists());
+        assertFalse(new File(dir, "reels.json.tmp").exists());
+        LibraryFile.Loaded again = f.load();  // page B reloads and can save again
+        assertEquals(V1, again.text);
+        assertTrue(f.write(V2, again.revision).ok);
+        assertEquals(V2, get(f.main));
+        assertEquals(V1, get(f.bak));
+    }
+
+    @Test
+    public void aPageThatNeverLoadedCannotSave() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        LibraryFile.Result r = f.write(V1, -1);
+        assertTrue(r.stale);
+        assertFalse(f.main.exists());
+    }
+
+    @Test
+    public void aRefusalForOtherReasonsIsNotStale() throws Exception {
+        File dir = tmp.newFolder();
+        put(new File(dir, "reels.json"), "{oops");
+        LibraryFile f = LibraryFile.reels(dir);
+        LibraryFile.Loaded l = f.load();
+        assertEquals(LibraryFile.State.UNREADABLE, l.state);
+        LibraryFile.Result r = f.write(V1, l.revision);  // locked: refused, but the page's copy is current
+        assertFalse(r.ok);
+        assertFalse(r.stale);
+        assertEquals(l.revision, f.revision());
+    }
+
+    @Test
+    public void restoringFromTheBackupAndStartingNewMovePagesOutOfDate() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        long before = f.load().revision;
+        put(f.main, V2.substring(0, 10));  // damaged while the other page is open
+        put(f.bak, V1);
+        LibraryFile.Loaded l = f.load();
+        assertEquals(LibraryFile.State.RECOVERED, l.state);
+        assertTrue(l.revision > before);
+        assertTrue("the page that loaded before is now stale", f.write(V2, before).stale);
+        long r2 = f.revision();
+        f.startNew();
+        assertTrue(f.revision() > r2);
+    }
+
+    @Test
+    public void screenshotListHasItsOwnRevision() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile reels = LibraryFile.reels(dir);
+        LibraryFile shots = LibraryFile.shots(dir);
+        long r0 = reels.load().revision;
+        long s0 = shots.load().revision;
+        assertTrue(shots.write("{\"v\":1,\"seen\":{},\"reels\":{}}", s0).ok);
+        assertEquals("a save of the screenshot list does not make the library stale", r0, reels.revision());
+        assertTrue(reels.write(V1, r0).ok);
+    }
+
+    @Test
+    public void severalPagesSavingAtOnceNeverLoseAnUpdate() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        assertTrue(f.write("{\"reels\":[],\"n\":0}", f.load().revision).ok);
+        final int pages = 4, each = 25;
+        final java.util.concurrent.atomic.AtomicInteger refused = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicInteger failed = new java.util.concurrent.atomic.AtomicInteger();
+        Thread[] ts = new Thread[pages];
+        for (int p = 0; p < pages; p++) {
+            ts[p] = new Thread(() -> {
+                try {
+                    for (int i = 0; i < each; i++) {
+                        while (true) {  // what a page does: load, change, save; when refused, reload and do it again
+                            LibraryFile.Loaded l = f.load();
+                            int n = new JSONObject(l.text).getInt("n");
+                            LibraryFile.Result r = f.write("{\"reels\":[],\"n\":" + (n + 1) + "}", l.revision);
+                            if (r.ok) break;
+                            if (!r.stale) {
+                                failed.incrementAndGet();
+                                return;
+                            }
+                            refused.incrementAndGet();
+                        }
+                    }
+                } catch (Exception e) {
+                    failed.incrementAndGet();
+                }
+            });
+            ts[p].start();
+        }
+        for (Thread t : ts) t.join();
+        assertEquals(0, failed.get());
+        assertEquals("no update was lost", pages * each, new JSONObject(get(f.main)).getInt("n"));
+        assertEquals(1 + pages * each, f.revision());
+        assertTrue(new JSONObject(get(f.bak)).getInt("n") >= pages * each - 1);
     }
 }

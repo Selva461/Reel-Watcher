@@ -45,9 +45,17 @@ const Shots = (() => {
     if (info.notice === "recovered") toast("The screenshot list could not be read. The last saved copy was restored.");
     else if (info.notice === "started_new") toast("The screenshot list could not be read; it was set aside and will be rebuilt");
   }
+  /** Reads the list again (it was saved elsewhere while this page worked on an older copy). */
+  function reload() {
+    loaded = false;
+    load();
+  }
   function save() {
     if (blocked) return;
-    if (sync("storeShots", JSON.stringify(state)) === false) toast("Could not save. Is the phone's storage full?");
+    if (sync("storeShots", JSON.stringify(state)) === false) {
+      if (sync("libraryStale", "shots")) { reload(); toast("The screenshot list was updated elsewhere, so it was reloaded."); }
+      else toast("Could not save. Is the phone's storage full?");
+    }
   }
   function folders() { try { return JSON.parse(sync("shotFolders") || "[]"); } catch (e) { return []; } }
   function battery() { try { return JSON.parse(sync("battery") || "{}"); } catch (e) { return {}; } }
@@ -252,5 +260,5 @@ const Shots = (() => {
 
   function pause() { if (job && !job.finished) { job.paused = true; stop(); } }
 
-  return { screen, review, process, stop, pause, keep, get job() { return job; } };
+  return { screen, review, process, stop, pause, keep, reload, get job() { return job; } };
 })();
