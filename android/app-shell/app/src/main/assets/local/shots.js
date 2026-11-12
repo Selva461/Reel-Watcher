@@ -11,17 +11,42 @@ const Shots = (() => {
   const LOW_BATTERY = 40;     // pause below this, unless charging (Avles: battery is the only rule)
   let state = { v: 1, seen: {}, reels: {} };  // seen[key] = {m, st, n, f, c: [titles], x: short text}
   let loaded = false;
+  let blocked = false;        // the list could not be read and could not be set aside: nothing is read or saved over it
   let job = null;             // {phase, total, i, found, added, started, stop, finished, paused, why, recent}
 
+  /**
+   * Reads the saved list. A list that cannot be read (the phone reports "unreadable", or the page cannot use its text)
+   * is set aside by the phone (renamed, kept, never deleted) and the list starts empty, to be read again from the
+   * pictures. When it cannot be set aside, nothing is saved over it: blocked stays on and the next visit tries again.
+   */
   function load() {
     if (loaded) return;
     loaded = true;
+    blocked = false;
+    let unusable = false;
     try {
       const t = sync("loadShots");
-      if (t) { const d = JSON.parse(t); state = { v: 1, seen: d.seen || {}, reels: d.reels || {} }; }
-    } catch (e) { toast("The screenshot list could not be read; it will be rebuilt"); }
+      if (t) {
+        const d = JSON.parse(t);
+        if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error("not a list");
+        state = { v: 1, seen: d.seen || {}, reels: d.reels || {} };
+      }
+    } catch (e) { unusable = true; }
+    const info = libraryInfo("shots");
+    if (unusable || info.state === "unreadable") {
+      if (sync("libraryStartNew", "shots")) toast("The screenshot list could not be read; it was set aside and will be rebuilt");
+      else {
+        blocked = true;
+        loaded = false;  // tried again the next time this is opened
+        toast("The screenshot list could not be read and could not be set aside. Nothing was changed.");
+      }
+      return;
+    }
+    if (info.notice === "recovered") toast("The screenshot list could not be read. The last saved copy was restored.");
+    else if (info.notice === "started_new") toast("The screenshot list could not be read; it was set aside and will be rebuilt");
   }
   function save() {
+    if (blocked) return;
     if (sync("storeShots", JSON.stringify(state)) === false) toast("Could not save. Is the phone's storage full?");
   }
   function folders() { try { return JSON.parse(sync("shotFolders") || "[]"); } catch (e) { return []; } }
@@ -46,6 +71,7 @@ const Shots = (() => {
   async function process() {
     if (job && !job.finished) return;
     load();
+    if (blocked) return;  // nothing is read while the list cannot be saved; load() said why
     job = { phase: "list", total: 0, i: 0, found: 0, added: 0, started: Date.now(), stop: false, finished: false, paused: false, why: "", recent: [], pics: 0 };
     sync("keepAwake", true);
     paint();
@@ -135,6 +161,12 @@ const Shots = (() => {
 
   function screen() {
     load();
+    if (blocked) {
+      $app.innerHTML = `${header("Screenshots", "#/inbox")}
+        <div class="card stack"><strong>The screenshot list is not open</strong>
+          <span class="small">It could not be read and could not be set aside, so nothing is read or saved until that works. Nothing was changed. Open this screen again to retry.</span></div>`;
+      return;
+    }
     if (job && !job.finished) { paint(); return; }
     const fs = folders();
     const n = counts();

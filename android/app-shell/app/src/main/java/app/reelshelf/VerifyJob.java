@@ -132,7 +132,10 @@ final class VerifyJob {
         try {
             long t0 = System.currentTimeMillis();
             File f = new File(dir, RESULTS);
-            JSONObject db = readJson(new File(dir, "reels.json"));
+            JSONObject db;
+            synchronized (LibraryFile.reels(dir)) {  // not while a save is swapping the file
+                db = readJson(new File(dir, "reels.json"));
+            }
             JSONObject all;
             synchronized (LOCK) {
                 all = readJson(f);

@@ -111,6 +111,7 @@ May fail without breaking the app: MyAnimeList, TVmaze, one of the search engine
 | E4 | Restart the phone in the middle of reading a collection | After starting again, the job continues; nothing is lost or stuck on "working". |
 | E5 | Any item that keeps failing (for example the phone kills the app on the same reel) | After 4 tries: **Could not finish** "Stopped after 4 tries. Last problem: ...", with Try again. |
 | E6 | A reel Instagram refuses again and again | Paused and retried about every hour; after 6 refusals: Could not finish, "Instagram refused this reel 6 times". |
+| E7 | Damaged library (needs a debug build and a computer: `adb shell run-as app.reelshelf`, then cut `files/reels.json` short with `head -c 2000 reels.json > t && mv t reels.json` after copying it away). Open the app | With a good `reels.json.bak`: your reels are back and a message says the damaged file was kept as `reels.json.bad-<time>`. Without one: **Library not opened**, nothing saved. **Save the unreadable file to Downloads** puts `reels-unreadable-<time>.txt` in Downloads/ReelShelf (open it in the Files app). **Start a new library** asks first, then opens an empty shelf; the old file is still in the app folder as `reels.json.bad-<time>`. Share a reel while locked: after Start a new library it appears. |
 
 ## 7. Debugging
 

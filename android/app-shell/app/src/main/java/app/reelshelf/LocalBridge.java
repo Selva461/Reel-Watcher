@@ -102,34 +102,127 @@ final class LocalBridge {
 
     // ------------------------------------------------------------------ library (one JSON file in the app's storage)
 
-    private File dbFile() {
-        return new File(act.ctx().getFilesDir(), "reels.json");
+    private LibraryFile reelsFile() {
+        return LibraryFile.reels(act.ctx().getFilesDir());
     }
 
+    private LibraryFile shotsFile() {
+        return LibraryFile.shots(act.ctx().getFilesDir());
+    }
+
+    private LibraryFile fileOf(String which) {
+        return "shots".equals(which) ? shotsFile() : reelsFile();
+    }
+
+    /**
+     * The library text. "" for a new library, and also when the file cannot be read: then libraryInfo says "unreadable",
+     * every save is refused and the file is left exactly as it is (see LibraryFile). A good backup is restored first.
+     */
     @JavascriptInterface
     public String load() {
         if (!ok()) return "";
-        try {
-            File f = dbFile();
-            return f.isFile() ? new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8) : "";
-        } catch (IOException e) {
-            return "";
-        }
+        return reelsFile().read();
     }
 
     @JavascriptInterface
     public boolean store(String json) {
         if (!ok() || json == null) return false;
-        synchronized (this) {
-            File tmp = new File(act.ctx().getFilesDir(), "reels.json.tmp");
-            try (OutputStream out = new FileOutputStream(tmp)) {
-                out.write(json.getBytes(StandardCharsets.UTF_8));
-                out.flush();
-            } catch (IOException e) {
-                return false;
-            }
-            return tmp.renameTo(dbFile());
+        return reelsFile().write(json);
+    }
+
+    /** {"state": ok|missing|recovered|unreadable|started_new, "bad": name of the damaged file set aside, "notice": ...}. which: "reels" or "shots". */
+    @JavascriptInterface
+    public String libraryInfo(String which) {
+        if (!ok()) return "{}";
+        LibraryFile f = fileOf(which);
+        JSONObject o = new JSONObject();
+        try {
+            o.put("state", f.state().name().toLowerCase(java.util.Locale.ROOT));
+            o.put("bad", f.badName());
+            o.put("notice", act.isNight() ? "" : f.takeNotice());  // the nightly run has no screen to say it on
+        } catch (JSONException ignored) {
+            // not reachable
         }
+        return o.toString();
+    }
+
+    /** Sets the damaged file aside (renamed, kept) and unlocks for a new one. False when that did not work: nothing is then changed. */
+    @JavascriptInterface
+    public boolean libraryStartNew(String which) {
+        if (!ok()) return false;
+        try {
+            fileOf(which).startNew();
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /** Deletes the backup copy (only after "Delete all reels and notes"). */
+    @JavascriptInterface
+    public boolean dropBackup(String which) {
+        if (!ok()) return false;
+        return fileOf(which).dropBackup();
+    }
+
+    /**
+     * Saves the unreadable library file as it is to Downloads/ReelShelf (the same place as the exports), so it can be
+     * sent to someone who can repair it. Copied byte for byte, never changed or deleted.
+     */
+    @JavascriptInterface
+    public void saveUnreadable(int id, String which) {
+        if (!ok()) return;
+        work.execute(() -> {
+            LibraryFile f = fileOf(which);
+            String name = ("shots".equals(which) ? "shots" : "reels") + "-unreadable-"
+                    + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT).format(new java.util.Date()) + ".txt";
+            try {
+                if (f.unreadableFile() == null) {
+                    done(id, false, "There is no unreadable file to save");
+                    return;
+                }
+                done(id, true, saveToDownloads(name, "text/plain", f::copyUnreadableTo));
+            } catch (Exception e) {
+                done(id, false, "Could not save: " + e.getMessage());
+            }
+        });
+    }
+
+    private interface Writer {
+        long to(OutputStream out) throws IOException;
+    }
+
+    /** Android's own way to save into Downloads (MediaStore, no permission needed); before Android 10 the app's Downloads folder. */
+    private String saveToDownloads(String name, String mime, Writer w) throws IOException {
+        if (Build.VERSION.SDK_INT >= 29) {
+            android.content.ContentResolver cr = act.ctx().getContentResolver();
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.Downloads.DISPLAY_NAME, name);
+            v.put(MediaStore.Downloads.MIME_TYPE, mime);
+            v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ReelShelf");
+            Uri uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+            if (uri == null) throw new IOException("Android did not give a place to save");
+            try (OutputStream out = cr.openOutputStream(uri)) {
+                if (out == null) throw new IOException("Could not write the file");
+                if (w.to(out) < 0) throw new IOException("There is no unreadable file to save");
+            } catch (IOException | RuntimeException e) {
+                cr.delete(uri, null, null);  // no half-written file left in Downloads
+                throw e;
+            }
+            return "Downloads/ReelShelf/" + name;
+        }
+        File d = new File(act.ctx().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "ReelShelf");
+        //noinspection ResultOfMethodCallIgnored
+        d.mkdirs();
+        File f = new File(d, name);
+        try (OutputStream out = new FileOutputStream(f)) {
+            if (w.to(out) < 0) throw new IOException("There is no unreadable file to save");
+        } catch (IOException | RuntimeException e) {
+            //noinspection ResultOfMethodCallIgnored
+            f.delete();
+            throw e;
+        }
+        return f.getPath();
     }
 
     @JavascriptInterface
@@ -916,31 +1009,29 @@ final class LocalBridge {
         act.keepScreenOn(on);
     }
 
-    /** What has been read from screenshots so far (its own file, so the library file stays small). */
+    /**
+     * What has been read from screenshots so far (its own file, so the library file stays small). A list that cannot be
+     * read is set aside (renamed, kept) and read again from scratch: it only holds what can be rebuilt from the pictures.
+     */
     @JavascriptInterface
     public String loadShots() {
         if (!ok()) return "";
-        try {
-            File f = new File(act.ctx().getFilesDir(), "shots.json");
-            return f.isFile() ? new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8) : "";
-        } catch (IOException e) {
-            return "";
+        LibraryFile f = shotsFile();
+        String text = f.read();
+        if (f.state() == LibraryFile.State.UNREADABLE) {
+            try {
+                f.startNew();
+            } catch (IOException e) {
+                // stays locked: nothing is written over it
+            }
         }
+        return text;
     }
 
     @JavascriptInterface
     public boolean storeShots(String json) {
         if (!ok() || json == null) return false;
-        synchronized (this) {
-            File tmp = new File(act.ctx().getFilesDir(), "shots.json.tmp");
-            try (OutputStream out = new FileOutputStream(tmp)) {
-                out.write(json.getBytes(StandardCharsets.UTF_8));
-                out.flush();
-            } catch (IOException e) {
-                return false;
-            }
-            return tmp.renameTo(new File(act.ctx().getFilesDir(), "shots.json"));
-        }
+        return shotsFile().write(json);
     }
 
     // ------------------------------------------------------------------ the watchlist's online check
