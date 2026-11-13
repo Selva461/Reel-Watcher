@@ -9,7 +9,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PowerManager;
 
 import java.util.Set;
@@ -34,16 +36,39 @@ public class WorkService extends Service {
     private PowerManager.WakeLock lock;
     private NightRun.Headless night;
 
-    /** The nightly run (from NightRun's alarm): the page runs without a screen inside this service. */
+    private static final String ACTION_STOP_NIGHT = "app.reelshelf.STOP_NIGHT";
+    /** After the app is opened, the nightly run gets this long to finish the reel it is on and save; then its page is ended. */
+    private static final long HANDOVER_MS = 20_000;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+
+    /**
+     * The nightly run (from NightRun's alarm): the page runs without a screen inside this service. Not started while
+     * the app is on screen, while a job you started runs, or while a nightly run is already going.
+     */
     static void startNight(Context ctx) {
-        if (running) return;  // something you started is already running
+        if (NightRun.GUARD.tryStart(MainActivity.visible, running, System.currentTimeMillis()) != NightGuard.Verdict.START) return;
         Intent i = new Intent(ctx, WorkService.class).setAction(ACTION_NIGHT)
                 .putExtra("title", "Nightly run").putExtra("text", "Shared reels, new screenshots, titles");
         try {
             if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
             else ctx.startService(i);
         } catch (Exception ignored) {
-            // Android refused tonight; the alarm is set again for tomorrow
+            NightRun.GUARD.release();  // Android refused tonight; the alarm is set again for tomorrow
+        }
+    }
+
+    /** True while a nightly run is starting or running. */
+    static boolean nightActive() {
+        return NightRun.GUARD.active(System.currentTimeMillis());
+    }
+
+    /** The app was opened during a nightly run: it finishes the reel it is on, saves, and stops (see HANDOVER_MS). */
+    static void handOverNight(Context ctx) {
+        if (!nightActive()) return;
+        try {
+            ctx.startService(new Intent(ctx, WorkService.class).setAction(ACTION_STOP_NIGHT));
+        } catch (Exception ignored) {
+            // the app is on screen, so this is allowed; if not, the page's own wait ends the handover
         }
     }
 
@@ -83,6 +108,17 @@ public class WorkService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
+        if (intent != null && ACTION_STOP_NIGHT.equals(intent.getAction())) {
+            if (night == null) {  // no nightly run in this service: nothing to hand over
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+            night.callPage("window.stopAllWork && stopAllWork()");  // the page finishes, saves and calls nightDone, which ends this service
+            handler.postDelayed(() -> {
+                if (night != null) stopSelf();  // still not done: onDestroy ends its page. Everything it saved stays saved.
+            }, HANDOVER_MS);
+            return START_NOT_STICKY;
+        }
         Notification n = build(intent);
         if (!running) {
             if (Build.VERSION.SDK_INT >= 29) startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
@@ -96,6 +132,10 @@ public class WorkService extends Service {
             ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).notify(ID, n);
         }
         if (intent != null && ACTION_NIGHT.equals(intent.getAction()) && night == null) {
+            if (MainActivity.visible) {  // the app was opened since the alarm: this night is skipped
+                stopSelf();
+                return START_NOT_STICKY;
+            }
             night = new NightRun.Headless(this, this::stopSelf);
             night.start();
         }
@@ -134,8 +174,10 @@ public class WorkService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        handler.removeCallbacksAndMessages(null);
         if (night != null) night.stop();
         night = null;
+        NightRun.GUARD.release();  // no nightly run is going any more: the next night may start
         if (lock != null && lock.isHeld()) lock.release();
         super.onDestroy();
     }
