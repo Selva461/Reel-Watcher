@@ -5,6 +5,15 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.8
+- Two screens can no longer overwrite each other. If the app and the nightly run both work on your library, a save made
+  from an out-of-date copy is refused instead of replacing newer data: the screen reads the library, screenshots and
+  settings again and says so ("updated elsewhere"). Only the one change that was not saved yet needs repeating.
+- Reels you share are removed from the waiting list only after they are saved. If a save fails or is refused, they
+  stay listed and are filed at the next opening (or at once, from the fresh copy).
+- Changing one setting no longer reverts others changed elsewhere (for example a TMDB key typed while the nightly run
+  is checking titles): only the keys you changed are saved, and settings are read again when you come back to the app.
+
 ## 1.3.7
 - Your library is safer. If the library file cannot be read, Reel Shelf no longer replaces it with an empty one. It
   restores the last good copy when there is one (the damaged file is kept under a new name). Otherwise it stops, shows

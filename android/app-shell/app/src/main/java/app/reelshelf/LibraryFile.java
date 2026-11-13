@@ -27,6 +27,9 @@ import java.util.Map;
  *   NAME.bad-TIME), and with no good backup the file is locked: reads give nothing, writes are refused, until
  *   {@link #startNew()} sets the damaged file aside (renamed, never deleted).
  * One instance per file for the whole process, so the app screen and the nightly run obey the same lock.
+ * Every change to the file's content advances a revision. A page remembers the revision it loaded; a save based on an
+ * older one is refused ({@link #write(String, long)}), so a page working on an out-of-date copy can never overwrite
+ * newer data.
  * Pure Java (files and org.json only), tested on a computer.
  */
 final class LibraryFile {
@@ -79,6 +82,8 @@ final class LibraryFile {
     /** The damaged file this process set aside last. */
     private File setAside;
     private String notice = "";
+    /** Advances whenever the file's content changes (a save, a restore from the backup, a start-new). In memory: pages cannot outlive the process. */
+    private long revision;
 
     private LibraryFile(File dir, String name, Shape shape) {
         this.main = new File(dir, name);
@@ -107,7 +112,43 @@ final class LibraryFile {
         return n;
     }
 
+    synchronized long revision() {
+        return revision;
+    }
+
+    /** What a page gets when it loads: the text, the state and the revision the text belongs to, all at one moment. */
+    static final class Loaded {
+        final String text;
+        final State state;
+        final long revision;
+
+        Loaded(String text, State state, long revision) {
+            this.text = text;
+            this.state = state;
+            this.revision = revision;
+        }
+    }
+
+    /** The answer to a save: done, refused because the page's copy is out of date (stale), and the revision now. */
+    static final class Result {
+        final boolean ok;
+        final boolean stale;
+        final long revision;
+
+        Result(boolean ok, boolean stale, long revision) {
+            this.ok = ok;
+            this.stale = stale;
+            this.revision = revision;
+        }
+    }
+
     // ------------------------------------------------------------------ reading
+
+    /** {@link #read()} together with the revision it belongs to (nothing can change in between). */
+    synchronized Loaded load() {
+        String text = read();
+        return new Loaded(text, state, revision);
+    }
 
     /** The file's text; "" when there is none or it is locked (see {@link #state()}). Restores a good backup when needed. */
     synchronized String read() {
@@ -134,6 +175,7 @@ final class LibraryFile {
             locked = false;
             state = State.RECOVERED;
             notice = "recovered";
+            revision++;  // the content on disk is no longer what pages loaded before
             return old;
         }
         if (!hadMain && !bak.exists()) {  // nothing was ever saved: a new library
@@ -165,6 +207,16 @@ final class LibraryFile {
 
     // ------------------------------------------------------------------ writing
 
+    /**
+     * Saves text only when the page's copy is the current one: expectedRevision is what it got from {@link #load()} or
+     * from its last successful save. A stale save is refused and nothing changes.
+     */
+    synchronized Result write(String text, long expectedRevision) {
+        if (expectedRevision != revision) return new Result(false, true, revision);
+        boolean ok = write(text);
+        return new Result(ok, false, revision);
+    }
+
     /** Saves text. False (and nothing changes) while locked or when the disk refuses. */
     synchronized boolean write(String text) {
         if (locked || text == null) return false;
@@ -178,6 +230,7 @@ final class LibraryFile {
             move(tmp, main);
             trusted = true;
             if (state != State.STARTED_NEW) state = State.OK;
+            revision++;
             return true;
         } catch (IOException e) {
             tmp.delete();
@@ -242,6 +295,7 @@ final class LibraryFile {
         state = State.STARTED_NEW;
         if (bad != null) remember(bad);
         notice = "started_new";
+        revision++;
         return bad;
     }
 

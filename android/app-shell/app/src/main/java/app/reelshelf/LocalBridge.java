@@ -39,6 +39,8 @@ final class LocalBridge {
     static final String SHARED_KEY = "shared_queue";
     private static final Object SHARED_LOCK = new Object();
 
+    private static final Object SETTINGS_LOCK = new Object();
+
     private final Host act;
     private final SharedPreferences prefs;
     private final LocalModel model;
@@ -47,6 +49,8 @@ final class LocalBridge {
     private final ExecutorService work = Executors.newSingleThreadExecutor();
     private final ExecutorService net = Executors.newSingleThreadExecutor();
     private volatile boolean downloading;
+    /** The revision of each library file this page has loaded or last saved (see LibraryFile): a save is refused when the file has moved on. */
+    private volatile long reelsRev = -1, shotsRev = -1;
     private final ExecutorService verifyWork = Executors.newSingleThreadExecutor();
     private final java.util.concurrent.atomic.AtomicBoolean verifyStop = new java.util.concurrent.atomic.AtomicBoolean(false);
 
@@ -70,21 +74,8 @@ final class LocalBridge {
         if (text == null || text.trim().isEmpty()) return;
         synchronized (SHARED_LOCK) {
             SharedPreferences p = ctx.getSharedPreferences("reelshelf", Context.MODE_PRIVATE);
-            JSONArray a;
-            try {
-                a = new JSONArray(p.getString(SHARED_KEY, "[]"));
-            } catch (JSONException e) {
-                a = new JSONArray();
-            }
-            JSONObject o = new JSONObject();
-            try {
-                o.put("text", text.length() > 20000 ? text.substring(0, 20000) : text);
-                o.put("at", System.currentTimeMillis());
-            } catch (JSONException ignored) {
-                return;
-            }
-            a.put(o);
-            p.edit().putString(SHARED_KEY, a.toString()).commit();
+            String next = SharedQueue.append(p.getString(SHARED_KEY, "[]"), text, System.currentTimeMillis(), java.util.UUID.randomUUID().toString());
+            p.edit().putString(SHARED_KEY, next).commit();
         }
     }
 
@@ -121,13 +112,36 @@ final class LocalBridge {
     @JavascriptInterface
     public String load() {
         if (!ok()) return "";
-        return reelsFile().read();
+        LibraryFile.Loaded l = reelsFile().load();
+        reelsRev = l.revision;  // saves from this page are for this version of the file
+        return l.text;
     }
 
     @JavascriptInterface
     public boolean store(String json) {
         if (!ok() || json == null) return false;
-        return reelsFile().write(json);
+        LibraryFile.Result r = reelsFile().write(json, reelsRev);  // refused when another page saved since this one loaded
+        if (r.ok) reelsRev = r.revision;
+        return r.ok;
+    }
+
+    private long revOf(String which) {
+        return "shots".equals(which) ? shotsRev : reelsRev;
+    }
+
+    private void adopt(String which, long rev) {
+        if ("shots".equals(which)) shotsRev = rev;
+        else reelsRev = rev;
+    }
+
+    /**
+     * True when this page's copy of the library file (which: "reels" or "shots") is out of date because another page
+     * saved it, restored it or set it aside since this page loaded or last saved it. The page then reloads.
+     */
+    @JavascriptInterface
+    public boolean libraryStale(String which) {
+        if (!ok()) return false;
+        return fileOf(which).revision() != revOf(which);
     }
 
     /** {"state": ok|missing|recovered|unreadable|started_new, "bad": name of the damaged file set aside, "notice": ...}. which: "reels" or "shots". */
@@ -150,8 +164,12 @@ final class LocalBridge {
     @JavascriptInterface
     public boolean libraryStartNew(String which) {
         if (!ok()) return false;
+        LibraryFile f = fileOf(which);
         try {
-            fileOf(which).startNew();
+            synchronized (f) {
+                f.startNew();
+                adopt(which, f.revision());  // this page did it: its copy is not out of date
+            }
             return true;
         } catch (IOException e) {
             return false;
@@ -225,13 +243,30 @@ final class LocalBridge {
         return f.getPath();
     }
 
+    /**
+     * What was shared while the app was closed: [{id, text, at}]. The items stay in the list until the page has saved
+     * what it made of them and says so with ackShared, so nothing is lost when a save fails or the app dies in between.
+     */
     @JavascriptInterface
-    public String takeShared() {
+    public String peekShared() {
         if (!ok()) return "[]";
         synchronized (SHARED_LOCK) {
-            String s = prefs.getString(SHARED_KEY, "[]");
-            prefs.edit().remove(SHARED_KEY).commit();
-            return s;
+            SharedQueue.Peeked p = SharedQueue.peek(prefs.getString(SHARED_KEY, "[]"), () -> java.util.UUID.randomUUID().toString());
+            if (p.changed) prefs.edit().putString(SHARED_KEY, p.queue).commit();  // items from before ids existed get theirs
+            return p.items;
+        }
+    }
+
+    /** Removes the items with these ids (a JSON array of strings) from the list. Asking again, or from the other page, is harmless. */
+    @JavascriptInterface
+    public void ackShared(String idsJson) {
+        if (!ok()) return;
+        synchronized (SHARED_LOCK) {
+            String cur = prefs.getString(SHARED_KEY, "[]");
+            String next = SharedQueue.acknowledge(cur, idsJson);
+            if (next.equals(cur)) return;
+            if ("[]".equals(next)) prefs.edit().remove(SHARED_KEY).commit();
+            else prefs.edit().putString(SHARED_KEY, next).commit();
         }
     }
 
@@ -244,7 +279,23 @@ final class LocalBridge {
     @JavascriptInterface
     public void setSettings(String json) {
         if (!ok() || json == null) return;
-        prefs.edit().putString("local_settings", json).apply();
+        synchronized (SETTINGS_LOCK) {
+            prefs.edit().putString("local_settings", json).apply();
+        }
+    }
+
+    /**
+     * Merges the keys a page changed (a JSON object) into the stored settings and returns the result. Keys the page did
+     * not change are left as they are, so one page cannot revert what the other saved.
+     */
+    @JavascriptInterface
+    public String patchSettings(String patchJson) {
+        if (!ok() || patchJson == null) return "";
+        synchronized (SETTINGS_LOCK) {
+            String merged = SettingsPatch.merge(prefs.getString("local_settings", "{}"), patchJson);
+            prefs.edit().putString("local_settings", merged).apply();
+            return merged;
+        }
     }
 
     // ------------------------------------------------------------------ talking to other apps
@@ -1017,21 +1068,26 @@ final class LocalBridge {
     public String loadShots() {
         if (!ok()) return "";
         LibraryFile f = shotsFile();
-        String text = f.read();
-        if (f.state() == LibraryFile.State.UNREADABLE) {
-            try {
-                f.startNew();
-            } catch (IOException e) {
-                // stays locked: nothing is written over it
+        synchronized (f) {
+            LibraryFile.Loaded l = f.load();
+            if (l.state == LibraryFile.State.UNREADABLE) {
+                try {
+                    f.startNew();
+                } catch (IOException e) {
+                    // stays locked: nothing is written over it
+                }
             }
+            shotsRev = f.revision();
+            return l.text;
         }
-        return text;
     }
 
     @JavascriptInterface
     public boolean storeShots(String json) {
         if (!ok() || json == null) return false;
-        return shotsFile().write(json);
+        LibraryFile.Result r = shotsFile().write(json, shotsRev);
+        if (r.ok) shotsRev = r.revision;
+        return r.ok;
     }
 
     // ------------------------------------------------------------------ the watchlist's online check

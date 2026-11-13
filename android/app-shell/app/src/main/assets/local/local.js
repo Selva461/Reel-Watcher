@@ -69,7 +69,10 @@ function sync(method, ...args) {
 let db = { reels: [], inbox: [], media: [], mediaTypes: [] };
 let dbLocked = false;  // the library file could not be read: nothing is saved over it until you choose (lockedScreen)
 function libraryInfo(which) { try { return JSON.parse(sync("libraryInfo", which || "reels") || "{}"); } catch (e) { return {}; } }
+function emptyDb() { return { reels: [], inbox: [], media: [], mediaTypes: [] }; }
+/** Reads the library from the phone. Nothing of the copy already in memory survives: a stored library that is new or empty (for example one another page just started) gives an empty library, never the old records. */
 function loadDb() {
+  db = emptyDb();
   const t = sync("load");
   const info = libraryInfo();
   if (info.state === "unreadable") { dbLocked = true; return; }  // the phone found it damaged and kept it as it is
@@ -84,13 +87,33 @@ function loadDb() {
   if (info.notice === "recovered") toast("Your library file could not be read. The last saved copy was restored; the damaged file was kept" + (info.bad ? " as " + info.bad : "") + ".");
 }
 let deferSaves = false, savePending = false;  // a batch (shared items) is saved once, at its end
-/** Saves the library. False when it was not saved (locked, or the phone refused). */
+let staleSave = false;  // the last save was refused because another page had saved since this one loaded
+/**
+ * Saves the library. False when it was not saved: locked, the phone refused, or this page's copy was out of date
+ * (another page saved first: the unsaved change is dropped and everything is read again from disk, see staleReload).
+ */
 function saveDb() {
   if (dbLocked) return false;
   if (deferSaves) { savePending = true; return true; }
   const ok = sync("store", JSON.stringify(db)) !== false;
-  if (!ok) toast("Could not save. Is the phone's storage full?");
+  if (!ok) {
+    if (sync("libraryStale", "reels")) { staleSave = true; staleReload(); }
+    else toast("Could not save. Is the phone's storage full?");
+  }
   return ok;
+}
+let reloading = false;
+/** This page's copy is out of date (the nightly run or another page saved): read the library, screenshots and settings again. */
+function staleReload() {
+  if (reloading) return;
+  reloading = true;
+  try {
+    loadDb();
+    if (typeof Shots !== "undefined") Shots.reload();
+    loadSettings();
+    toast("Your library was updated elsewhere (for example by the nightly run), so it was reloaded. If your last change is missing, please do it again.");
+    render();
+  } finally { reloading = false; }
 }
 function reel(code) { return db.reels.find((r) => r.code === code || r.ig_code === code); }
 
@@ -107,8 +130,23 @@ const MODELS = [
 ];
 const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en", tmdbKey: "", omdbKey: "", metaAi: false, webLookup: false };
 let settings = { ...DEFAULTS };
-function loadSettings() { try { settings = { ...DEFAULTS, ...JSON.parse(sync("getSettings") || "{}") }; } catch (e) { settings = { ...DEFAULTS }; } }
-function saveSettings() { sync("setSettings", JSON.stringify(settings)); }
+let settingsBase = {};  // the settings as last read from or saved to the phone: only keys that differ from it are sent
+function loadSettings() {
+  try { settings = { ...DEFAULTS, ...JSON.parse(sync("getSettings") || "{}") }; } catch (e) { settings = { ...DEFAULTS }; }
+  settingsBase = JSON.parse(JSON.stringify(settings));
+}
+/** Sends only the keys this page changed, so a key changed elsewhere (the other page, the nightly run) is not reverted. */
+function saveSettings() {
+  if (!(RN && typeof RN.patchSettings === "function")) { sync("setSettings", JSON.stringify(settings)); return; }
+  const patch = {};
+  for (const k of Object.keys(settings)) if (JSON.stringify(settings[k]) !== JSON.stringify(settingsBase[k])) patch[k] = settings[k];
+  if (!Object.keys(patch).length) return;
+  let merged = null;
+  try { merged = JSON.parse(sync("patchSettings", JSON.stringify(patch)) || "null"); } catch (e) { merged = null; }
+  if (!merged) return;  // the phone did not take it: it stays "changed" and goes out with the next save
+  for (const k of Object.keys(merged)) if (!(k in patch)) settings[k] = merged[k];  // what the other page changed meanwhile
+  settingsBase = JSON.parse(JSON.stringify({ ...DEFAULTS, ...merged }));
+}
 function modelInfo() { try { return JSON.parse(sync("modelInfo", settings.modelFile) || "{}"); } catch (e) { return {}; } }
 
 // ------------------------------------------------------------------ adding reels and answers
@@ -167,28 +205,43 @@ function setNotes(r, notes, by, raw) {
   if (typeof Products !== "undefined") Products.addFromReel(db, r);  // products the notes name go to Products
 }
 
-/** Things shared to Reel Shelf while it was closed (reel links, Meta AI answers). */
-function takeShared() {
-  let items = [];
-  try { items = JSON.parse(sync("takeShared") || "[]"); } catch (e) { items = []; }
-  let reels = 0;
-  let answers = 0;
-  let waiting = 0;
-  let other = 0;
+/** Files the shared items in the library, in one save. Returns the counts, and whether the save worked. */
+function fileShared(items) {
+  const n = { reels: 0, answers: 0, waiting: 0, other: 0, saved: true };
   deferSaves = true;  // 100 shared reels are one save, not 100
   try {
     for (const it of items) {
       const text = String(it.text || "");
-      if (Notes.parse(text)) { const r = fileAnswer(text, "meta"); answers += r.filed; waiting += r.inbox; continue; }
+      if (Notes.parse(text)) { const r = fileAnswer(text, "meta"); n.answers += r.filed; n.waiting += r.inbox; continue; }
       const found = Notes.links(text);
-      if (found.length) reels += addReels(found, "share"); else other++;
+      if (found.length) n.reels += addReels(found, "share"); else n.other++;
     }
   } finally {
     deferSaves = false;
-    if (savePending) { savePending = false; saveDb(); }
+    if (savePending) { savePending = false; n.saved = saveDb(); }
   }
-  const msg = [reels && `${plural(reels, "new reel")} saved`, answers && `${plural(answers, "Meta AI answer")} filed`,
-    waiting && `${plural(waiting, "answer")} to file`, other && `${plural(other, "share")} had no reel link`].filter(Boolean).join(", ");
+  return n;
+}
+
+/**
+ * Things shared to Reel Shelf while it was closed (reel links, Meta AI answers). They stay in the phone's list until
+ * what was made of them is saved; only then are they acknowledged by id. A save refused because the library moved on
+ * reloads it, and the items (still listed) are filed again from the fresh copy.
+ */
+function takeShared() {
+  let items = [];
+  try { items = JSON.parse(sync("peekShared") || "[]"); } catch (e) { items = []; }
+  if (!items.length) return 0;
+  let n = null;
+  for (let tries = 0; tries < 2; tries++) {
+    staleSave = false;
+    n = fileShared(items);
+    if (n.saved || !staleSave) break;
+  }
+  if (!n.saved) return items.length;  // not saved: they stay listed and are tried again at the next opening
+  sync("ackShared", JSON.stringify(items.map((x) => x.id).filter(Boolean)));
+  const msg = [n.reels && `${plural(n.reels, "new reel")} saved`, n.answers && `${plural(n.answers, "Meta AI answer")} filed`,
+    n.waiting && `${plural(n.waiting, "answer")} to file`, n.other && `${plural(n.other, "share")} had no reel link`].filter(Boolean).join(", ");
   if (msg) toast(msg);
   return items.length;
 }
@@ -677,6 +730,8 @@ window.fileCommentScreen = (lines, at) => {
 let backFrom = "";  // the reel you just looked at in Instagram
 window.onAppResume = () => {
   if (dbLocked) return;  // the library is not open: Try again on the screen
+  if (sync("libraryStale", "reels") || sync("libraryStale", "shots")) staleReload();  // saved elsewhere while this screen was away
+  else loadSettings();  // settings have no revision: read again
   const seen = db.reels.filter((x) => x.opened_at && Date.now() - x.opened_at < 20 * 60000).sort((a, b) => b.opened_at - a.opened_at)[0];
   if (seen && backFrom !== seen.code) {  // back from Instagram: offer the next step on that reel
     backFrom = seen.code;
@@ -1231,7 +1286,7 @@ function lockedScreen() {
     if (!confirm("Start a new, empty library? The unreadable file is kept under a new name, not deleted.")) return;
     if (!sync("libraryStartNew", "reels")) { toast("Could not set the file aside. Nothing was changed."); return; }
     dbLocked = false;
-    db = { reels: [], inbox: [], media: [], mediaTypes: [] };
+    db = emptyDb();
     openLibrary();
     render();
   });
