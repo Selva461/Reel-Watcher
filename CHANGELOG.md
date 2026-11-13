@@ -5,6 +5,14 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.9
+- The nightly run and the app no longer get in each other's way. If Reel Shelf is on screen when the nightly run is
+  due, that night is skipped (the schedule, the hour and the battery level are unchanged: it runs again the next
+  night). If you open the app while the nightly run is going, the run is asked to finish the reel it is on, save and
+  stop; the app shows "The nightly run is finishing" for a few seconds, then opens with everything the run saved.
+  Nothing it saved is lost, and your own changes are never overwritten.
+- Two nightly runs can no longer overlap, even if two alarms arrive at the same moment.
+
 ## 1.3.8
 - Two screens can no longer overwrite each other. If the app and the nightly run both work on your library, a save made
   from an out-of-date copy is refused instead of replacing newer data: the screen reads the library, screenshots and

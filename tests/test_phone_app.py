@@ -72,6 +72,7 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
     workUpdate: (title, text, d, t) => { st.work = (st.work || []).concat([["update", title]]); keep(); },
     workEnd: () => { st.work = (st.work || []).concat([["end"]]); keep(); },
     isNight: () => !!st.night,
+    nightActive: () => !!st.nightActive,  // the app's page: a nightly run is still going (the phone is asking it to stop)
     nightDone: () => { st.nightDone = (st.nightDone || 0) + 1; keep(); },
     nightRunInfo: () => JSON.stringify(st.nightRun || { on: true, hour: 0, minBattery: 40, exact: true }),
     setNightRun: (on, hour, bat) => { st.nightRun = { on, hour, minBattery: bat, exact: true }; keep(); },

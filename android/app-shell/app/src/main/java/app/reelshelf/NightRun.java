@@ -33,6 +33,8 @@ public class NightRun extends BroadcastReceiver {
     /** Battery temperature (°C) above which the run pauses for the night, so the phone and its battery stay cool. */
     static final int HOT_C = 40;
     private static final String ACTION = "app.reelshelf.NIGHT_RUN";
+    /** One nightly run at a time, and never while you are using the app (see NightGuard). Longer than the 3 hours a run may hold the CPU. */
+    static final NightGuard GUARD = new NightGuard(4L * 60 * 60 * 1000);
 
     static SharedPreferences prefs(Context c) {
         return c.getSharedPreferences("reelshelf", Context.MODE_PRIVATE);
@@ -103,7 +105,7 @@ public class NightRun extends BroadcastReceiver {
         int[] b = battery(c);
         if (b[0] >= 0 && b[0] < minBattery(c)) return;  // Avles: battery is the only rule (no charger or Wi-Fi needed)
         if (temperature(c) >= HOT_C) return;  // already warm: skipped
-        WorkService.startNight(c);
+        WorkService.startNight(c);  // skips the night when the app is on screen, a job is running or a run is already going
     }
 
     // ------------------------------------------------------------------ the page, run without a screen
