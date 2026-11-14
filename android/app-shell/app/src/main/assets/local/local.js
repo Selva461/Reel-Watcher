@@ -1295,14 +1295,14 @@ function lockedScreen() {
 }
 
 // ------------------------------------------------------------------ the app is opened while the nightly run is still going
-// The phone has asked the nightly run to finish the reel it is on, save and stop. Until it has, this screen does not read or save
+// The phone has asked the nightly run to stop its current work (the reel being processed is cancelled; what is saved stays). Until it has, this screen does not read or save
 // anything, so the two can never work on the library at once; then everything is read fresh from disk.
 let handingOver = false;
 const HANDOVER = window.__handover || { poll: 500, max: 45000 };  // the phone ends the run after 20 s; this is only a safety net
 function handOverScreen() {
   $app.innerHTML = `${header("Finishing the nightly run", "")}
     <div class="card stack"><strong>The nightly run is finishing</strong>
-      <span class="small">It stops after the reel it is on and keeps everything it has saved. Your library opens in a moment.</span>
+      <span class="small">It stops its current work and keeps everything already saved. Your library opens in a moment.</span>
       <span class="bar"><span style="width:100%"></span></span></div>`;
 }
 function handOver() {
@@ -1317,6 +1317,7 @@ function handOver() {
     handingOver = false;
     loadSettings();
     loadDb();  // fresh: what the night saved is in it, and saves from here on are for this version
+    if (typeof Shots !== "undefined") Shots.reload();  // the screenshot list too: the night may have saved a newer one
     if (!dbLocked) openLibrary();
     render();
   };

@@ -37,7 +37,7 @@ public class WorkService extends Service {
     private NightRun.Headless night;
 
     private static final String ACTION_STOP_NIGHT = "app.reelshelf.STOP_NIGHT";
-    /** After the app is opened, the nightly run gets this long to finish the reel it is on and save; then its page is ended. */
+    /** After the app is opened, the nightly run gets this long to stop its current work and save; then its page is ended. */
     private static final long HANDOVER_MS = 20_000;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
@@ -62,7 +62,10 @@ public class WorkService extends Service {
         return NightRun.GUARD.active(System.currentTimeMillis());
     }
 
-    /** The app was opened during a nightly run: it finishes the reel it is on, saves, and stops (see HANDOVER_MS). */
+    /**
+     * The app was opened during a nightly run: it stops its current work (the reel being processed is cancelled and can be
+     * retried), keeps everything already saved, and ends (see HANDOVER_MS).
+     */
     static void handOverNight(Context ctx) {
         if (!nightActive()) return;
         try {
@@ -110,7 +113,7 @@ public class WorkService extends Service {
         }
         if (intent != null && ACTION_STOP_NIGHT.equals(intent.getAction())) {
             if (night == null) {  // no nightly run in this service: nothing to hand over
-                stopSelf();
+                if (!running) stopSelf();  // an instance this request just created; one carrying a job you started is left alone
                 return START_NOT_STICKY;
             }
             night.callPage("window.stopAllWork && stopAllWork()");  // the page finishes, saves and calls nightDone, which ends this service

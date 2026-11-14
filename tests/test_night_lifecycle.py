@@ -6,8 +6,10 @@ finish; the page waits, then reads everything fresh), and that stopping the nigh
 overwrites newer data. A fake bridge stands in for the phone. No network, no device."""
 import json
 
+from test_library_safety import PIC, SHOT_STATE
 from test_phone_app import EMBED, db_of, phone, site  # noqa: F401  (pytest fixtures)
-from test_stale_writes import GOOD, LINK, RIVAL, another_page_saves, codes, page_codes, toast_has  # noqa: F401
+from test_shots import SHOTS_RN
+from test_stale_writes import GOOD, LINK, OLD_SHOTS, RIVAL, SHOTS_REVISION_RN, another_page_saves, codes, page_codes, toast_has  # noqa: F401
 
 FAST = "window.__handover = { poll: 20, max: 5000 };"
 # fetches (Instagram pages) wait until the test lets them through, so a run can be stopped at a known moment
@@ -58,6 +60,31 @@ def test_coming_back_to_the_app_while_the_night_is_running_hands_over_too(phone)
     waiting_screen(phone).wait_for(state="hidden")
     phone.wait_for_function("() => db.reels.some((r) => r.code === 'RIVAL001')")
     assert "RIVAL001" in codes(phone), "what the run saved is still there"
+
+
+NIGHT_SHOTS = json.dumps({"v": 1, "seen": {"content://x/night1": {"m": 5, "st": "found", "n": "n.jpg", "f": "S", "c": ["Heat"], "x": ""}},
+                          "reels": {}})  # what the night run saved: a newer screenshot list
+
+
+def test_after_the_handover_the_first_screenshot_run_starts_from_the_latest_list_and_its_save_is_accepted(phone):
+    phone.context.add_init_script(FAST)
+    phone.context.add_init_script(SHOTS_RN)
+    phone.context.add_init_script(SHOTS_REVISION_RN)
+    phone.open_with({"db": GOOD, "shotsDb": OLD_SHOTS, **SHOT_STATE})
+    phone.evaluate("() => { location.hash = '#/shots'; }")
+    phone.get_by_role("button", name="Read new screenshots now").wait_for()  # this screen holds the old list
+    set_state(phone, nightActive=True)  # the night started while the screen was away
+    phone.evaluate("() => onAppResume()")
+    waiting_screen(phone).wait_for()
+    set_state(phone, shotsDb=NIGHT_SHOTS, shotsRev=1)  # the night saved a newer list, then ended
+    set_state(phone, nightActive=False)
+    waiting_screen(phone).wait_for(state="hidden")
+    assert phone.evaluate("() => RN.libraryStale('shots')") is False, "the screen already holds the newer list"
+    phone.get_by_role("button", name="Read new screenshots now").wait_for()
+    phone.click("#go")  # the first screenshot run after the handover
+    phone.wait_for_function("() => window.__rn.shotsStores >= 1")  # its save was accepted, not refused as stale
+    saved = json.loads(phone.rn()["shotsDb"])
+    assert set(saved["seen"]) == {"content://x/night1", PIC["k"]}, "the night's entry kept, this run's added, the old list gone"
 
 
 def test_the_app_does_not_wait_for_ever_for_a_run_that_does_not_end(phone):

@@ -37,6 +37,18 @@ final class NightGuard {
         return cur != 0 && now - cur < expireMs;
     }
 
+    /**
+     * A run that is still going keeps its claim from expiring: pushes the expiry out from now. Does nothing when no claim
+     * is active (it never creates one, and never revives one that has already expired).
+     */
+    void touch(long now) {
+        while (true) {
+            long cur = since.get();
+            if (cur == 0 || now - cur >= expireMs) return;
+            if (since.compareAndSet(cur, now)) return;
+        }
+    }
+
     /** The run ended (or never started): the next night may claim again. */
     void release() {
         since.set(0);

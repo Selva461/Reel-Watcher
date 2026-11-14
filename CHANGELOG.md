@@ -8,9 +8,10 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 ## 1.3.9
 - The nightly run and the app no longer get in each other's way. If Reel Shelf is on screen when the nightly run is
   due, that night is skipped (the schedule, the hour and the battery level are unchanged: it runs again the next
-  night). If you open the app while the nightly run is going, the run is asked to finish the reel it is on, save and
-  stop; the app shows "The nightly run is finishing" for a few seconds, then opens with everything the run saved.
-  Nothing it saved is lost, and your own changes are never overwritten.
+  night). If you open the app while the nightly run is going, the run is asked to stop its current work and keep
+  everything already saved (the reel being processed is cancelled and is retried next night); the app shows "The
+  nightly run is finishing" for a few seconds, then opens with everything the run saved. Nothing it saved is lost,
+  and your own changes are never overwritten.
 - Two nightly runs can no longer overlap, even if two alarms arrive at the same moment.
 
 ## 1.3.8

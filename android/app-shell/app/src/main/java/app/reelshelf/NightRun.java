@@ -152,6 +152,7 @@ public class NightRun extends BroadcastReceiver {
         /** Stops the run when the battery falls below the chosen level (40% unless changed), or the phone gets hot. */
         private void watchBattery() {
             if (done) return;
+            GUARD.touch(System.currentTimeMillis());  // still running: the claim must not expire under a run that lasts hours
             int[] b = battery(ctx);
             if ((b[0] >= 0 && b[0] < minBattery(ctx)) || temperature(ctx) >= HOT_C + 2) {
                 callPage("window.stopAllWork && stopAllWork()");

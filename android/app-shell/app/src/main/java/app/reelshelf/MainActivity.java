@@ -291,7 +291,7 @@ public class MainActivity extends Activity implements Host {
     protected void onStart() {
         super.onStart();
         visible = true;
-        WorkService.handOverNight(this);  // a nightly run still going finishes what it is doing and gives the library back
+        WorkService.handOverNight(this);  // a nightly run still going stops its current work, keeps what it saved, and gives the library back
     }
 
     @Override
