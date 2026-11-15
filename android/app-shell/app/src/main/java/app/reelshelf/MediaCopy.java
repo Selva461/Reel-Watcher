@@ -57,6 +57,15 @@ final class MediaCopy {
 
         /** Size in bytes when the provider says so, else -1. Not trusted: the copy counts what it reads. */
         long size();
+
+        /**
+         * Asked after the stream was read: the number of bytes this very stream promised to deliver (an asset's length), else
+         * -1. Fewer bytes than that means it was cut short (the other app died mid-transfer and the reader saw a plain end).
+         * Unlike size() this is not the size of the original: a provider that converts the file does not promise the old size.
+         */
+        default long exactSize() {
+            return -1;
+        }
     }
 
     /** What the caller wants to know and may decide while the copy runs. */
@@ -142,6 +151,7 @@ final class MediaCopy {
             try (InputStream in = src.open()) {
                 if (in == null) throw new CopyException(Kind.UNREADABLE, "it could not be opened");
                 ctl.opened(in);
+                if (ctl.cancelled()) throw new CopyException(Kind.CANCELLED, "stopped");  // stopped while it was opening: nothing was read yet
                 try (FileOutputStream out = new FileOutputStream(part)) {
                     byte[] buf = new byte[BUFFER];
                     int n;
@@ -163,6 +173,9 @@ final class MediaCopy {
             } finally {
                 ctl.opened(null);
             }
+            if (ctl.cancelled()) throw new CopyException(Kind.CANCELLED, "stopped");  // a closed stream may end with a plain end of file
+            long promised = src.exactSize();
+            if (promised > 0 && total < promised) throw new CopyException(Kind.FAILED, "it was cut short (the other app stopped sending it)");
             if (total == 0) throw new CopyException(Kind.EMPTY, "it is empty");
             if (part.length() != total) throw new CopyException(Kind.FAILED, "it could not be copied completely");
             File target = new File(rules.inbox, rules.prefix + hex(sha.digest()).substring(0, HASH_CHARS) + rules.ext);
@@ -181,30 +194,41 @@ final class MediaCopy {
         }
     }
 
-    /** Reads the source without writing anything: the file of this content that is in the inbox already, or null. */
+    /**
+     * Reads the source without writing anything (used when the phone is short of room): the file of this content that is in
+     * the inbox already, or null when it is not there. Says what is really wrong (too big, empty, cannot be read) instead of
+     * "no space" when it finds that.
+     */
     private static File keptAlready(Source src, Rules rules, Control ctl) throws CopyException {
         MessageDigest sha = digest();
         long total = 0;
         try (InputStream in = src.open()) {
-            if (in == null) return null;
+            if (in == null) throw new CopyException(Kind.UNREADABLE, "it could not be opened");
             ctl.opened(in);
+            if (ctl.cancelled()) throw new CopyException(Kind.CANCELLED, "stopped");
             byte[] buf = new byte[BUFFER];
             int n;
             while ((n = in.read(buf)) != -1) {
                 if (ctl.cancelled() || Thread.currentThread().isInterrupted()) throw new CopyException(Kind.CANCELLED, "stopped");
                 total += n;
-                if (total > rules.maxBytes) return null;
+                if (total > rules.maxBytes) throw new CopyException(Kind.TOO_BIG, "too big (over " + mb(rules.maxBytes) + ")");
                 sha.update(buf, 0, n);
+                ctl.progress(total);
             }
         } catch (CopyException e) {
             throw e;
-        } catch (IOException | SecurityException e) {
+        } catch (SecurityException e) {
+            throw new CopyException(Kind.UNREADABLE, "Reel Shelf is not allowed to read it (any more)");
+        } catch (IOException e) {
             if (ctl.cancelled()) throw new CopyException(Kind.CANCELLED, "stopped");
-            return null;
+            throw failed(e);
         } finally {
             ctl.opened(null);
         }
-        if (total == 0) return null;
+        if (ctl.cancelled()) throw new CopyException(Kind.CANCELLED, "stopped");
+        long promised = src.exactSize();
+        if (promised > 0 && total < promised) throw new CopyException(Kind.FAILED, "it was cut short (the other app stopped sending it)");
+        if (total == 0) throw new CopyException(Kind.EMPTY, "it is empty");
         File target = new File(rules.inbox, rules.prefix + hex(sha.digest()).substring(0, HASH_CHARS) + rules.ext);
         return target.isFile() && target.length() == total ? target : null;
     }

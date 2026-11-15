@@ -256,8 +256,10 @@ public class ShareActivity extends Activity {
         StringBuilder s = new StringBuilder();
         int shown = 0;
         boolean again = false;
-        for (MediaBatch.Entry e : failed.values()) {
-            if (shown++ < 6) s.append("• ").append(e.label).append(": ").append(e.why).append('\n');
+        for (Map.Entry<Integer, MediaBatch.Entry> f : failed.entrySet()) {
+            MediaBatch.Entry e = f.getValue();
+            String name = e.label == null || e.label.isEmpty() ? "item " + (f.getKey() + 1) : e.label;  // its place in the whole share
+            if (shown++ < 6) s.append("• ").append(name).append(": ").append(e.why).append('\n');
             if (e.kind != null && e.kind.retryable()) again = true;
         }
         if (failed.size() > 6) s.append("• and ").append(failed.size() - 6).append(" more\n");

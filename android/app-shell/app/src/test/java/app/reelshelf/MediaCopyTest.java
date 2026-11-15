@@ -598,4 +598,164 @@ public class MediaCopyTest {
         assertNotNull(seen.get(0));
         assertEquals(null, seen.get(1));
     }
+
+    // ------------------------------------------------------------------ cut short, and what is really wrong when space is short
+
+    /** A source that says its size() (the original's, as a column) and promises exactSize() (what this stream will deliver). */
+    private static MediaCopy.Source ofExact(byte[] bytes, long declared, long promised) {
+        return new MediaCopy.Source() {
+            @Override
+            public InputStream open() {
+                return new ByteArrayInputStream(bytes);
+            }
+
+            @Override
+            public long size() {
+                return declared;
+            }
+
+            @Override
+            public long exactSize() {
+                return promised;
+            }
+        };
+    }
+
+    @Test
+    public void aStreamThatEndsBeforeItsPromisedLengthIsNotKept() {
+        // a cloud video: the other app dies half way and the reader sees a normal end, not an error
+        MediaCopy.CopyException e = copyFails(ofExact(data(60_000, 50), 100_000, 100_000), rules(MB), go());
+        assertEquals(MediaCopy.Kind.FAILED, e.kind);
+        assertTrue(e.kind.retryable());
+        assertTrue(e.getMessage().contains("cut short"));
+        assertEquals("a cut-short file never reaches the inbox", 0, inboxCount());
+        assertEquals(0, stagingCount());
+    }
+
+    @Test
+    public void aFileThePhoneConvertedIsNotTakenForCutShort() throws Exception {
+        // the size column is the original's; the stream is a converted file of another size and promises nothing: it is kept
+        byte[] converted = data(40_000, 51);
+        MediaCopy.Result r = MediaCopy.copy(ofExact(converted, 100_000, -1), rules(MB), go());
+        assertArrayEquals(converted, Files.readAllBytes(r.file.toPath()));
+        // and a stream that promises N and delivers N is kept as well
+        byte[] whole = data(30_000, 52);
+        assertEquals(30_000, MediaCopy.copy(ofExact(whole, 30_000, 30_000), rules(MB), go()).file.length());
+    }
+
+    @Test
+    public void shortOfSpaceTheRealProblemIsStillTheOneReported() {
+        MediaCopy.Rules withReserve = new MediaCopy.Rules(inbox, staging, "shot_", ".jpg", 50_000, 100 * MB);
+        MediaCopy.Control noRoom = new MediaCopy.Control() {
+            @Override
+            public boolean cancelled() {
+                return false;
+            }
+
+            @Override
+            public long freeSpace(File dir) {
+                return 0;
+            }
+        };
+        assertEquals("over the limit, size not said", MediaCopy.Kind.TOO_BIG, copyFails(of(data(80_000, 53), -1), withReserve, noRoom).kind);
+        assertEquals("empty", MediaCopy.Kind.EMPTY, copyFails(of(new byte[0], -1), withReserve, noRoom).kind);
+        MediaCopy.Source revoked = new MediaCopy.Source() {
+            @Override
+            public InputStream open() {
+                throw new SecurityException("Permission Denial");
+            }
+
+            @Override
+            public long size() {
+                return -1;
+            }
+        };
+        assertEquals("not allowed to read", MediaCopy.Kind.UNREADABLE, copyFails(revoked, withReserve, noRoom).kind);
+        assertEquals("cut short", MediaCopy.Kind.FAILED, copyFails(ofExact(data(10_000, 54), -1, 30_000), withReserve, noRoom).kind);
+        assertEquals("only a readable, whole, new file is 'no space'", MediaCopy.Kind.NO_SPACE, copyFails(of(data(10_000, 55), -1), withReserve, noRoom).kind);
+        assertEquals(0, inboxCount());
+        assertEquals(0, stagingCount());
+    }
+
+    // ------------------------------------------------------------------ stopping at the edges
+
+    @Test
+    public void stoppedWhileItWasOpeningReadsNothing() {
+        int[] reads = {0};
+        boolean[] stop = {false};
+        MediaCopy.Source src = new MediaCopy.Source() {
+            @Override
+            public InputStream open() {
+                return new InputStream() {
+                    @Override
+                    public int read() {
+                        reads[0]++;
+                        return -1;
+                    }
+
+                    @Override
+                    public int read(byte[] b, int off, int len) {
+                        reads[0]++;
+                        return -1;
+                    }
+                };
+            }
+
+            @Override
+            public long size() {
+                return -1;
+            }
+        };
+        MediaCopy.Control ctl = new MediaCopy.Control() {
+            @Override
+            public boolean cancelled() {
+                return stop[0];
+            }
+
+            @Override
+            public void opened(java.io.Closeable stream) {
+                if (stream != null) stop[0] = true;  // Stop pressed after open() returned, before the first read
+            }
+        };
+        assertEquals(MediaCopy.Kind.CANCELLED, copyFails(src, rules(MB), ctl).kind);
+        assertEquals("a stalled first read cannot be reached any more", 0, reads[0]);
+        assertEquals(0, stagingCount());
+    }
+
+    @Test
+    public void aStreamThatEndsPlainlyBecauseItWasClosedToStopTheCopyIsNotKept() {
+        boolean[] stop = {false};
+        MediaCopy.Source src = new MediaCopy.Source() {
+            @Override
+            public InputStream open() {
+                return new InputStream() {
+                    int given;
+
+                    @Override
+                    public int read() {
+                        return -1;
+                    }
+
+                    @Override
+                    public int read(byte[] b, int off, int len) {
+                        if (given++ == 0) {
+                            Arrays.fill(b, off, off + 100, (byte) 1);
+                            return 100;
+                        }
+                        stop[0] = true;  // Stop pressed, the stream closed: this reader sees a plain end of file
+                        return -1;
+                    }
+                };
+            }
+
+            @Override
+            public long size() {
+                return -1;
+            }
+        };
+        MediaCopy.CopyException e = copyFails(src, rules(MB), () -> stop[0]);
+        assertEquals(MediaCopy.Kind.CANCELLED, e.kind);
+        assertEquals(0, inboxCount());
+        assertEquals(0, stagingCount());
+    }
 }

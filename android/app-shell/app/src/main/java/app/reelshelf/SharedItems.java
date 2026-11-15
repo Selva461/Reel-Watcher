@@ -1,6 +1,7 @@
 package app.reelshelf;
 
 import android.content.ContentResolver;
+import android.content.res.AssetFileDescriptor;
 import android.content.Context;
 import android.database.Cursor;
 import android.net.Uri;
@@ -55,6 +56,7 @@ final class SharedItems {
         private final Uri uri;
         private final boolean video;
         private long size = Long.MIN_VALUE;
+        private volatile long exact = -1;
 
         UriItem(Context c, Uri uri, boolean video) {
             this.c = c;
@@ -88,7 +90,16 @@ final class SharedItems {
             return new MediaCopy.Source() {
                 @Override
                 public InputStream open() throws IOException {
-                    return c.getContentResolver().openInputStream(uri);
+                    // what openInputStream does for a content address, but keeping the asset's own length: what this stream promises
+                    AssetFileDescriptor afd = c.getContentResolver().openAssetFileDescriptor(uri, "r");
+                    if (afd == null) return null;
+                    exact = afd.getLength() > 0 ? afd.getLength() : -1;
+                    return afd.createInputStream();
+                }
+
+                @Override
+                public long exactSize() {
+                    return exact;
                 }
 
                 @Override

@@ -151,7 +151,7 @@ final class MediaBatch {
                     if (l.cancelled()) return notStarted(report, items);  // Stop works while waiting too
                     if (System.currentTimeMillis() >= until) {
                         for (int i = 0; i < items.size(); i++) {
-                            report.entries.add(new Entry(i, "item " + (i + 1), Status.FAILED, MediaCopy.Kind.FAILED, "another share is still being copied", null));
+                            report.entries.add(new Entry(i, "", Status.FAILED, MediaCopy.Kind.FAILED, "another share is still being copied", null));
                         }
                         return report;
                     }
