@@ -14,8 +14,11 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
   longer leave a half-written file that is taken for a picture or a video.
 - Sharing the same picture or video again does not keep a second copy (and a video does not become a second reel): it
   says it was already saved. So trying again after a failure is safe.
-- A copy that would leave less than 100 MB free on the phone is refused ("not enough storage space on the phone"), so
-  your library can always still be saved. The size limits are as before: 30 MB a picture, 500 MB a video.
+- A copy is refused or stopped (and keeps nothing) when it would leave less than 100 MB free on the phone ("not enough
+  storage space on the phone"), so your library can always still be saved. The size limits are as before: 30 MB a
+  picture, 500 MB a video. A file that is already saved is still answered as saved when the phone is short of space.
+- If the other app stops answering while a file is copied, Stop (or leaving the screen) now ends it, and a share that
+  waits behind another one can be stopped too, or says it could not start, instead of waiting for ever.
 - Choosing pictures inside Reel Shelf is safe in the same way, and now says when some could not be saved, and why.
   Pictures and videos saved by earlier versions stay as they are.
 

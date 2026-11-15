@@ -1,8 +1,12 @@
 package app.reelshelf;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -42,6 +46,10 @@ final class MediaBatch {
 
         default long freeSpace(File dir) {
             return dir.getUsableSpace();
+        }
+
+        /** The stream being read, or null when none is (see MediaCopy.Control.opened): closing it ends a stalled read. */
+        default void opened(java.io.Closeable stream) {
         }
     }
 
@@ -100,10 +108,31 @@ final class MediaBatch {
             for (Entry e : entries) if (e.status == Status.FAILED) return e.why;
             return "";
         }
+
+        /** In the app now: kept just now, or kept before (the same content). */
+        int saved() {
+            return kept() + already();
+        }
+
+        /** What the page is told when at least one was saved: "3", or {"kept":3,"failed":2,"why":"..."} when some were not. */
+        String pickerAnswer() {
+            int failed = failed();
+            if (failed == 0) return String.valueOf(saved());
+            try {
+                return new JSONObject().put("kept", saved()).put("failed", failed).put("why", firstWhy()).toString();
+            } catch (JSONException e) {
+                return String.valueOf(saved());
+            }
+        }
     }
 
     /** Only one share is copied at a time in the whole app (one buffer, one disk writer, however many are shared). */
     private static final ReentrantLock ONE_AT_A_TIME = new ReentrantLock();
+    /**
+     * How long a share waits for the one before it (ms). A copy that never ends (the other app stalls) must not hold everyone
+     * up for ever: after this the waiting items are reported as not saved, and Try again can start them.
+     */
+    static volatile long maxWaitMillis = 2 * 60 * 1000;
 
     private MediaBatch() {
     }
@@ -117,13 +146,20 @@ final class MediaBatch {
         try {
             if (!ONE_AT_A_TIME.tryLock()) {
                 l.waiting();
-                ONE_AT_A_TIME.lockInterruptibly();
+                long until = System.currentTimeMillis() + maxWaitMillis;
+                while (!ONE_AT_A_TIME.tryLock(200, TimeUnit.MILLISECONDS)) {
+                    if (l.cancelled()) return notStarted(report, items);  // Stop works while waiting too
+                    if (System.currentTimeMillis() >= until) {
+                        for (int i = 0; i < items.size(); i++) {
+                            report.entries.add(new Entry(i, "item " + (i + 1), Status.FAILED, MediaCopy.Kind.FAILED, "another share is still being copied", null));
+                        }
+                        return report;
+                    }
+                }
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            for (int i = 0; i < items.size(); i++) report.entries.add(new Entry(i, "", Status.NOT_STARTED, null, "", null));
-            report.cancelled = true;
-            return report;
+            return notStarted(report, items);
         }
         try {
             removeLeftovers(staging);
@@ -157,6 +193,11 @@ final class MediaBatch {
                         public long freeSpace(File dir) {
                             return l.freeSpace(dir);
                         }
+
+                        @Override
+                        public void opened(java.io.Closeable stream) {
+                            l.opened(stream);
+                        }
                     });
                     entry = new Entry(i, label, r.alreadyThere ? Status.ALREADY : Status.KEPT, null, "", r.file);
                 } catch (MediaCopy.CopyException e) {
@@ -176,6 +217,12 @@ final class MediaBatch {
         } finally {
             ONE_AT_A_TIME.unlock();
         }
+    }
+
+    private static Report notStarted(Report report, List<Item> items) {
+        for (int i = 0; i < items.size(); i++) report.entries.add(new Entry(i, "", Status.NOT_STARTED, null, "", null));
+        report.cancelled = true;
+        return report;
     }
 
     private static String labelOf(Item item, int i) {

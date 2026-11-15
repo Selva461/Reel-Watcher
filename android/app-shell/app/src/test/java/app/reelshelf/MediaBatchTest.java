@@ -95,10 +95,16 @@ public class MediaBatchTest {
 
     /** Records what the caller is told, and what the inbox holds at the moment it is told. */
     private class Log implements MediaBatch.Listener {
-        final List<String> events = new ArrayList<>();
-        final List<Boolean> fileThereWhenTold = new ArrayList<>();
+        final List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+        final List<Boolean> fileThereWhenTold = new java.util.concurrent.CopyOnWriteArrayList<>();
         volatile boolean stop;
-        int waited;
+        volatile int waited;
+        volatile java.io.Closeable open;
+
+        @Override
+        public void opened(java.io.Closeable stream) {
+            open = stream;
+        }
 
         @Override
         public boolean cancelled() {
@@ -358,5 +364,122 @@ public class MediaBatchTest {
         assertEquals("never two copies at once", 1, peak.get());
         assertEquals(2, inboxCount());
         assertEquals(0, stagingCount());
+    }
+
+    // ------------------------------------------------------------------ a copy that never ends must not hold everyone up
+
+    /** An item whose source stalls (see MediaCopyTest.Stalled). */
+    private class Stuck implements MediaBatch.Item {
+        final MediaCopyTest.Stalled stalled = new MediaCopyTest.Stalled(data(1000, 40));
+
+        @Override
+        public String label() {
+            return "stuck.mp4";
+        }
+
+        @Override
+        public MediaCopy.Rules rules() {
+            return new MediaCopy.Rules(inbox, staging, "video_", ".mp4", 1024 * 1024, 0);
+        }
+
+        @Override
+        public MediaCopy.Source source() {
+            return stalled;
+        }
+    }
+
+    @Test(timeout = 20_000)
+    public void closingTheStreamEndsAStalledShareAndTheNextOneStartsAtOnce() throws Exception {
+        Stuck stuck = new Stuck();
+        Log first = new Log();
+        MediaBatch.Report[] r = new MediaBatch.Report[1];
+        Thread t = new Thread(() -> r[0] = MediaBatch.run(list(stuck), staging, first));
+        t.start();
+        assertTrue(stuck.stalled.awaitInside());
+        first.stop = true;               // Stop, or leaving the screen
+        first.open.close();              // ... which also closes the stream that does not answer
+        t.join();
+        assertTrue(r[0].cancelled);
+        assertEquals(0, inboxCount());
+        assertEquals(0, stagingCount());
+        MediaBatch.Report next = MediaBatch.run(list(new Shared("next.mp4", data(2000, 41))), staging, new Log());  // the lock is free again
+        assertEquals(1, next.kept());
+    }
+
+    @Test(timeout = 20_000)
+    public void aShareThatWaitsForTheLockCanBeStopped() throws Exception {
+        Stuck stuck = new Stuck();
+        Log first = new Log();
+        Thread t = new Thread(() -> MediaBatch.run(list(stuck), staging, first));
+        t.start();
+        assertTrue(stuck.stalled.awaitInside());
+        Log second = new Log();
+        MediaBatch.Report[] r = new MediaBatch.Report[1];
+        Thread w = new Thread(() -> r[0] = MediaBatch.run(list(new Shared("next.mp4", data(2000, 42))), staging, second));
+        w.start();
+        long until = System.currentTimeMillis() + 5000;
+        while (second.waited == 0 && System.currentTimeMillis() < until) Thread.sleep(10);
+        assertEquals(1, second.waited);
+        second.stop = true;              // Stop pressed while it waits
+        w.join(5000);
+        assertFalse("it ended without waiting for the stuck share", w.isAlive());
+        assertTrue(r[0].cancelled);
+        assertEquals(0, inboxCount());
+        first.stop = true;
+        first.open.close();
+        t.join();
+    }
+
+    @Test(timeout = 20_000)
+    public void aShareThatWaitsTooLongIsToldItCanTryAgainInsteadOfHanging() throws Exception {
+        long before = MediaBatch.maxWaitMillis;
+        MediaBatch.maxWaitMillis = 400;
+        Stuck stuck = new Stuck();
+        Log first = new Log();
+        Thread t = new Thread(() -> MediaBatch.run(list(stuck), staging, first));
+        try {
+            t.start();
+            assertTrue(stuck.stalled.awaitInside());
+            MediaBatch.Report r = MediaBatch.run(list(new Shared("a.mp4", data(1000, 43)), new Shared("b.mp4", data(1000, 44))), staging, new Log());
+            assertFalse(r.cancelled);
+            assertEquals(2, r.failed());
+            assertTrue(r.firstWhy().contains("another share is still being copied"));
+            assertEquals("a retry can work once the other copy is gone", Arrays.asList(0, 1), r.retryable());
+            assertEquals(0, inboxCount());
+        } finally {
+            MediaBatch.maxWaitMillis = before;
+            first.stop = true;
+            if (first.open != null) first.open.close();
+            stuck.stalled.release();
+            t.join();
+        }
+    }
+
+    // ------------------------------------------------------------------ what the picker's page is told
+
+    private static MediaBatch.Entry entry(int i, MediaBatch.Status s, MediaCopy.Kind k, String why) {
+        return new MediaBatch.Entry(i, "p" + i, s, k, why, null);
+    }
+
+    @Test
+    public void thePickerIsToldACountWhenEverythingWasSaved() {
+        MediaBatch.Report r = new MediaBatch.Report();
+        r.entries.add(entry(0, MediaBatch.Status.KEPT, null, ""));
+        r.entries.add(entry(1, MediaBatch.Status.ALREADY, null, ""));  // kept before: it is in the app
+        r.entries.add(entry(2, MediaBatch.Status.KEPT, null, ""));
+        assertEquals(3, r.saved());
+        assertEquals("3", r.pickerAnswer());
+    }
+
+    @Test
+    public void thePickerIsToldWhatWasSavedAndWhyTheRestWasNot() throws Exception {
+        MediaBatch.Report r = new MediaBatch.Report();
+        r.entries.add(entry(0, MediaBatch.Status.KEPT, null, ""));
+        r.entries.add(entry(1, MediaBatch.Status.FAILED, MediaCopy.Kind.NO_SPACE, "not enough storage space on the phone"));
+        r.entries.add(entry(2, MediaBatch.Status.FAILED, MediaCopy.Kind.TOO_BIG, "too big (over 30 MB)"));
+        org.json.JSONObject o = new org.json.JSONObject(r.pickerAnswer());
+        assertEquals(1, o.getInt("kept"));
+        assertEquals(2, o.getInt("failed"));
+        assertEquals("the first reason", "not enough storage space on the phone", o.getString("why"));
     }
 }

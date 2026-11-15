@@ -157,7 +157,8 @@ final class ScreenshotReader {
      */
     static MediaBatch.Report addPictures(Context c, List<Uri> uris) {
         if (uris == null) return new MediaBatch.Report();
-        return MediaBatch.run(SharedItems.pictures(c, uris), SharedItems.staging(c), () -> false);
+        List<Uri> use = uris.subList(0, Math.min(uris.size(), SharedItems.MAX_PICTURES));
+        return MediaBatch.run(SharedItems.pictures(c, use), SharedItems.staging(c), () -> false);
     }
 
     private boolean inInbox(String key) {

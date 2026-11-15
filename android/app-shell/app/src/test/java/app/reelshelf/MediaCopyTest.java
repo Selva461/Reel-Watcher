@@ -19,6 +19,8 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -432,5 +434,168 @@ public class MediaCopyTest {
         assertFalse(again.alreadyThere);
         assertArrayEquals(bytes, Files.readAllBytes(again.file.toPath()));
         assertEquals(1, inboxCount());
+    }
+
+    // ------------------------------------------------------------------ the reserve, while copying
+
+    @Test
+    public void theReserveIsKeptWhileCopyingASourceThatDidNotSayItsSize() {
+        MediaCopy.Rules withReserve = new MediaCopy.Rules(inbox, staging, "video_", ".mp4", 100 * MB, 100 * MB);
+        long[] written = {0};
+        MediaCopy.Control fillingUp = new MediaCopy.Control() {
+            @Override
+            public boolean cancelled() {
+                return false;
+            }
+
+            @Override
+            public void progress(long copied) {
+                written[0] = copied;
+            }
+
+            @Override
+            public long freeSpace(File dir) {
+                return 106 * MB - written[0];  // room for the reserve and 6 MB: more than that must not be written
+            }
+        };
+        MediaCopy.CopyException e = copyFails(of(data(10_000_000, 30), -1), withReserve, fillingUp);
+        assertEquals(MediaCopy.Kind.NO_SPACE, e.kind);
+        assertTrue("stopped part way, not after the last byte", written[0] > 0 && written[0] < 10_000_000);
+        assertEquals(0, inboxCount());
+        assertEquals(0, stagingCount());
+    }
+
+    @Test
+    public void shortOfSpaceWhatIsAlreadyKeptIsStillAnswered() throws Exception {
+        byte[] bytes = data(50_000, 31);
+        MediaCopy.Result first = MediaCopy.copy(of(bytes, bytes.length), rules(MB), go());
+        MediaCopy.Control noRoom = new MediaCopy.Control() {
+            @Override
+            public boolean cancelled() {
+                return false;
+            }
+
+            @Override
+            public long freeSpace(File dir) {
+                return 0;
+            }
+        };
+        MediaCopy.Rules withReserve = new MediaCopy.Rules(inbox, staging, "shot_", ".jpg", MB, 100 * MB);
+        MediaCopy.Result again = MediaCopy.copy(of(bytes, bytes.length), withReserve, noRoom);
+        assertTrue("it is in the app already: no room is needed for it", again.alreadyThere);
+        assertEquals(first.file, again.file);
+        assertEquals(1, inboxCount());
+        assertEquals(0, stagingCount());
+        // something that is not kept yet is still refused, and nothing is written for it
+        assertEquals(MediaCopy.Kind.NO_SPACE, copyFails(of(data(50_000, 32), 50_000), withReserve, noRoom).kind);
+        assertEquals(1, inboxCount());
+        assertEquals(0, stagingCount());
+    }
+
+    // ------------------------------------------------------------------ a read that never returns
+
+    /** A source whose read waits for the other app: until close() (closing a stuck provider stream ends the read) or release(). */
+    public static final class Stalled implements MediaCopy.Source {
+        private final CountDownLatch inside = new CountDownLatch(1);
+        private final CountDownLatch gate = new CountDownLatch(1);
+        private final byte[] after;
+        volatile boolean closed;
+        volatile InputStream stream;
+
+        public Stalled(byte[] afterRelease) {
+            this.after = afterRelease;
+        }
+
+        @Override
+        public InputStream open() {
+            stream = new InputStream() {
+                boolean given;
+
+                @Override
+                public int read() throws IOException {
+                    byte[] one = new byte[1];
+                    int n = read(one, 0, 1);
+                    return n < 0 ? -1 : one[0] & 0xff;
+                }
+
+                @Override
+                public int read(byte[] b, int off, int len) throws IOException {
+                    inside.countDown();
+                    try {
+                        gate.await(30, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        throw new IOException(e);
+                    }
+                    if (closed) throw new IOException("Stream closed");
+                    if (given) return -1;
+                    given = true;
+                    int n = Math.min(len, after.length);
+                    System.arraycopy(after, 0, b, off, n);
+                    return n;
+                }
+
+                @Override
+                public void close() {
+                    closed = true;
+                    gate.countDown();
+                }
+            };
+            return stream;
+        }
+
+        @Override
+        public long size() {
+            return -1;
+        }
+
+        public boolean awaitInside() throws InterruptedException {
+            return inside.await(10, TimeUnit.SECONDS);
+        }
+
+        public void release() {
+            gate.countDown();
+        }
+    }
+
+    @Test(timeout = 20_000)
+    public void aStalledReadEndsWhenItsStreamIsClosedAndItIsReportedAsStopped() throws Exception {
+        Stalled stalled = new Stalled(new byte[0]);
+        boolean[] stop = {false};
+        MediaCopy.Control ctl = new MediaCopy.Control() {
+            @Override
+            public boolean cancelled() {
+                return stop[0];
+            }
+        };
+        MediaCopy.CopyException[] got = new MediaCopy.CopyException[1];
+        Thread t = new Thread(() -> got[0] = copyFails(stalled, rules(MB), ctl));
+        t.start();
+        assertTrue(stalled.awaitInside());  // the copy is in the middle of a read that does not return
+        stop[0] = true;
+        stalled.stream.close();             // what the screen does when Stop is pressed or it is left
+        t.join();
+        assertEquals(MediaCopy.Kind.CANCELLED, got[0].kind);
+        assertEquals(0, inboxCount());
+        assertEquals(0, stagingCount());
+    }
+
+    @Test(timeout = 20_000)
+    public void theOpenStreamIsHandedOutWhileReadingAndTakenBackAfterwards() throws Exception {
+        java.util.List<Object> seen = new java.util.ArrayList<>();
+        MediaCopy.Control ctl = new MediaCopy.Control() {
+            @Override
+            public boolean cancelled() {
+                return false;
+            }
+
+            @Override
+            public void opened(java.io.Closeable stream) {
+                seen.add(stream);
+            }
+        };
+        MediaCopy.copy(of(data(1000, 33), -1), rules(MB), ctl);
+        assertEquals(2, seen.size());
+        assertNotNull(seen.get(0));
+        assertEquals(null, seen.get(1));
     }
 }

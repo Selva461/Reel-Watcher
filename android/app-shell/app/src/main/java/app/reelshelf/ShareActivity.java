@@ -18,6 +18,7 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.Closeable;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -37,6 +38,7 @@ public class ShareActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private volatile boolean destroyed;
     private volatile boolean stopRequested;
+    private volatile Closeable openStream;  // the file being read: closing it ends a read that never returns (the other app stalls)
     private ExecutorService worker;  // one thread; MediaBatch also lets only one share copy at a time in the whole app
 
     private boolean video;
@@ -123,33 +125,66 @@ public class ShareActivity extends Activity {
         for (int i : which) run.add(items.get(i));
         final File staging = SharedItems.staging(getApplicationContext());
         worker.execute(() -> {
-            MediaBatch.Report report = MediaBatch.run(run, staging, new MediaBatch.Listener() {
-                @Override
-                public boolean cancelled() {
-                    return stopRequested || destroyed;
-                }
+            MediaBatch.Report report;
+            try {
+                report = MediaBatch.run(run, staging, new MediaBatch.Listener() {
+                    @Override
+                    public boolean cancelled() {
+                        return stopRequested || destroyed;
+                    }
 
-                @Override
-                public void waiting() {
-                    post(() -> show("Waiting for another share to finish...", "", -1));
-                }
+                    @Override
+                    public void opened(Closeable stream) {
+                        openStream = stream;
+                    }
 
-                @Override
-                public void started(int index, int total, String label) {
-                    String of = which.get(index) + 1 + " of " + (items.size());
-                    post(() -> show((video ? "Saving video " : "Saving picture ") + of, label, 0));
-                }
+                    @Override
+                    public void waiting() {
+                        post(() -> show("Waiting for another share to finish...", "", -1));
+                    }
 
-                @Override
-                public void bytes(int index, long copied, long size) {
-                    long now = System.currentTimeMillis();
-                    if (now - lastPaint < 100 && copied != size) return;  // not more than ten times a second
-                    lastPaint = now;
-                    post(() -> show(null, size > 0 ? MediaCopy.mb(copied) + " of " + MediaCopy.mb(size) : MediaCopy.mb(copied), size > 0 ? (int) (copied * 1000 / size) : -1));
-                }
+                    @Override
+                    public void started(int index, int total, String label) {
+                        String of = which.get(index) + 1 + " of " + (items.size());
+                        post(() -> show((video ? "Saving video " : "Saving picture ") + of, label, 0));
+                    }
+
+                    @Override
+                    public void bytes(int index, long copied, long size) {
+                        long now = System.currentTimeMillis();
+                        if (now - lastPaint < 100 && copied != size) return;  // not more than ten times a second
+                        lastPaint = now;
+                        post(() -> show(null, size > 0 ? MediaCopy.mb(copied) + " of " + MediaCopy.mb(size) : MediaCopy.mb(copied), size > 0 ? (int) (copied * 1000 / size) : -1));
+                    }
+                });
+            } catch (Throwable t) {  // whatever it was, the screen must not stay on "Saving..."
+                report = null;
+            }
+            final MediaBatch.Report done = report;
+            post(() -> {
+                if (done == null) wentWrong();
+                else attemptDone(done, which);
             });
-            post(() -> attemptDone(report, which));
         });
+    }
+
+    private void wentWrong() {
+        copying = false;
+        Toast.makeText(this, "Something went wrong while saving. What was already saved stays; share the rest again.", Toast.LENGTH_LONG).show();
+        finish();
+    }
+
+    /** Ends a read that is waiting for the other app. Closing a file is quick, but not on the screen's thread. */
+    private void closeOpenStream() {
+        final Closeable s = openStream;
+        if (s == null) return;
+        new Thread(() -> {
+            try {
+                s.close();
+            } catch (Exception e) {
+                // already closed, or the other app is gone: the copy ends either way
+            }
+        }, "share-close").start();
     }
 
     private void attemptDone(MediaBatch.Report report, List<Integer> which) {
@@ -261,6 +296,7 @@ public class ShareActivity extends Activity {
         buttons.setGravity(Gravity.END);
         stopButton = button("Stop", () -> {
             stopRequested = true;
+            closeOpenStream();
             stopButton.setEnabled(false);
             stopButton.setText("Stopping...");
         });
@@ -310,6 +346,7 @@ public class ShareActivity extends Activity {
     protected void onDestroy() {
         destroyed = true;
         stopRequested = true;
+        closeOpenStream();
         if (worker != null) worker.shutdownNow();  // the copy sees it at the next buffer, removes its half file and ends
         ui.removeCallbacksAndMessages(null);
         if (copying) {

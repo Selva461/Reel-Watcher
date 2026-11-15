@@ -83,13 +83,16 @@ def test_closing_the_picker_says_nothing(phone):
 def test_the_comment_screenshots_button_tells_the_same(phone):
     phone.context.add_init_script(SHOTS_RN)
     phone.context.add_init_script(PICK_RN)
-    answer = json.dumps({"kept": 1, "failed": 2, "why": "it is too big (over 30 MB)"})
+    answer = json.dumps({"kept": 1, "failed": 2, "why": "too big (over 30 MB)"})
     phone.open_with({"pick": [{"ok": True, "text": answer}]}, "#/inbox")
     phone.locator("#comments").click()
-    phone.locator("#toast", has_text="1 picture added, 2 could not be saved (it is too big (over 30 MB))").wait_for()
+    phone.locator("#toast", has_text="1 picture added, 2 could not be saved (too big (over 30 MB))").wait_for()
 
 
 # ---------------------------------------------------------------- shared videos: one file, one reel
+# (The page side of the dedupe: the file names come from the content, in Java, so the same video is the same file. These tests
+# pin that the page makes one reel per file; they pass without the Java change too, and say so on purpose. The naming itself is
+# tested in MediaCopyTest and MediaBatchTest.)
 
 VIDEO = {"k": "file:///data/user/0/app.reelshelf/files/video-inbox/video_0123456789abcdef01234567.mp4", "n": "video_0123456789abcdef01234567.mp4", "m": 1700000000000, "s": 5000000}
 OTHER = {"k": "file:///data/user/0/app.reelshelf/files/video-inbox/video_fedcba9876543210fedcba98.mp4", "n": "video_fedcba9876543210fedcba98.mp4", "m": 1700000001000, "s": 7000000}
