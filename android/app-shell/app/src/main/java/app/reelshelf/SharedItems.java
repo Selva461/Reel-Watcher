@@ -90,10 +90,11 @@ final class SharedItems {
             return new MediaCopy.Source() {
                 @Override
                 public InputStream open() throws IOException {
-                    // what openInputStream does for a content address, but keeping the asset's own length: what this stream promises
+                    // what openInputStream does for a content address, but keeping the length the provider DECLARED for this stream
+                    // (not getLength(), which guesses the file's size when nothing was declared: wrong for an asset that starts at an offset)
                     AssetFileDescriptor afd = c.getContentResolver().openAssetFileDescriptor(uri, "r");
                     if (afd == null) return null;
-                    exact = afd.getLength() > 0 ? afd.getLength() : -1;
+                    exact = afd.getDeclaredLength() > 0 ? afd.getDeclaredLength() : -1;
                     return afd.createInputStream();
                 }
 
