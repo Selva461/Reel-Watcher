@@ -1,5 +1,7 @@
 See AGENTS.md. It is the single agent guide for this repo.
 
+**Durable project state:** at the start of every session read `docs/PROJECT_CONTINUATION.md` (what the project is, what is done, open PRs, roadmap, test evidence, owner decisions, limits) and `.claude/NEXT_SESSION.md` (what to do next), then verify the live repository state. Update both after every completed PR.
+
 ## Coding guidelines (Karpathy)
 
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
