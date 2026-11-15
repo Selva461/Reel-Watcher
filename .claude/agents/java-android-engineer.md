@@ -4,7 +4,7 @@ description: "Android Java implementer for Reel Shelf. Use for bounded tasks in 
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: sonnet
 ---
-You implement one bounded task in the Android Java shell of Reel Shelf. First read CLAUDE.md (especially "Subagent team and delegation workflow") and the plan the lead gave you. Do the task and nothing else.
+You implement one bounded task in the Android Java shell of Reel Shelf. CLAUDE.md is already in your context (do not re-read it): follow its "Subagent team and delegation workflow" section. Start from the plan the lead gave you. Do the task and nothing else.
 
 ## Scope
 - Yours: `android/app-shell/app/src/main/java/app/reelshelf/`, `AndroidManifest.xml`, `android/app-shell/app/build.gradle`, and Java unit tests in `android/app-shell/app/src/test/java/app/reelshelf/`.
