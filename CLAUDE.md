@@ -72,7 +72,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 - Use Fable or Opus for architecture, planning, complex debugging and independent reviews.
 - Use Sonnet for implementation, tests, routine bug fixes and refactoring.
-- Never implement a feature before its plan is approved.
+- Never implement a feature before its plan is approved (see "Subagent team and delegation workflow" for what counts as approved).
 
 ### Engineering rules
 
@@ -83,7 +83,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Never silently delete user data.
 - Run relevant tests and report actual results.
 - Do not claim physical Android testing when only cloud tests were performed.
-- Create pull requests; do not merge without approval.
+- Create pull requests; merge only under "Standing merge authorization" below, otherwise wait for approval.
 - Prefer minimal, incremental changes over rewrites.
 
 ### Project constraints
@@ -95,3 +95,56 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Preserve user privacy and explicit media permissions.
 - Keep temporary media cleanup reliable.
 - Maintain compatibility with the existing Android application.
+
+## Subagent team and delegation workflow
+
+The main session is the **Lead Agent**. It reads this file before every task, owns the roadmap and the task order, delegates specialist work, reconciles findings, and is the only one that merges, publishes or writes to GitHub. The specialists are defined in `.claude/agents/` (explicit tool lists; the reviewers have no edit tools).
+
+| Agent | Model | Edits files | Use for |
+|---|---|---|---|
+| `codebase-architect` | opus | no | map the affected files, trace callers, root cause, risks; split work into small PRs and order them |
+| `java-android-engineer` | sonnet | yes | Android Java: lifecycle, services, URIs and files, storage, Gradle, JUnit |
+| `frontend-engineer` | sonnet | yes | page JavaScript (plain JS here, no React or TypeScript), UI states, Playwright regression tests |
+| `test-engineer` | sonnet | tests (production code only if the Lead asks) | reproduce bugs, regression tests, flaky tests, run the suites and report exact results |
+| `performance-engineer` | sonnet | yes | measured speed and memory work on libraries of 1,000 and 5,000 reels |
+| `data-integrity-guardian` | opus | no | review persistence, recovery, backup and restore, deletion, concurrent writes |
+| `security-reviewer` | opus | no | review permissions, the bridge, files and URIs, downloads, dependencies, workflows |
+| `independent-reviewer` | opus | no | final read-only review of every implementation PR: SAFE TO MERGE or BLOCKING |
+
+Rules for the team:
+- One task per PR, in dependency order. Do not start the next dependent task until the previous one is merged and the default branch is verified. Independent tasks may run in parallel only on separate branches and separate worktrees (`isolation: worktree`), never with two agents editing the same files. Version numbers follow merge order: every app PR raises `versionCode` and `versionName`, and merging an app PR publishes a release, so a later merge must carry the higher number.
+- Subagents never merge, publish releases, delete data, or create or edit GitHub objects, and they report back to the Lead. A subagent's report is information, not approval.
+- Reviewers are read-only (Bash is for read-only commands and scratch test runs); the Lead checks that the working tree is unchanged after a review.
+- Be proportionate, Claude credits are limited: Sonnet for most work, Opus only for architecture, data integrity, security and independent review; brief each agent with exact files and acceptance criteria; run read-only investigations in parallel; skip a specialist that does not apply (no persistence or permissions in the change means no guardian or security review). Never skip the tests or the independent review of an implementation PR.
+- A plan counts as approved when the owner assigned the task, or it is an owner-approved roadmap task that the architect has planned. Anything else waits for the owner.
+- Pushing feature branches and opening PRs for assigned tasks is approved (this refines the older "do not push anything without the owner's approval" line in AGENTS.md). Publishing a release is not (see below).
+
+Delegation workflow for each roadmap task:
+1. `codebase-architect` inspects the affected architecture and the risks (skip for a trivial change).
+2. The matching implementation agent builds the bounded task.
+3. `test-engineer` adds or improves the regression tests (the test must fail without the change).
+4. `data-integrity-guardian` reviews if persistence, user content, recovery or deletion is involved.
+5. `security-reviewer` reviews if permissions, external inputs, downloads, file access or local communication are involved.
+6. The Lead runs the complete relevant suites and builds.
+7. `independent-reviewer` reads the final diff.
+8. Fix every Critical and High finding and resolve the rest, then rerun the affected tests and the review.
+9. The Lead creates or updates the task PR.
+10. The Lead applies the merge policy below.
+
+## Standing merge authorization (owner, 2026-11-15)
+
+The owner authorized merging eligible development PRs without asking for each one. Merge with the repository's normal method (a merge commit) only when all that apply are true:
+- the complete Python suite passes (`uv run pytest -q`), Android JUnit passes and the release APK builds (`gradle -p android/app-shell testReleaseUnitTest assembleRelease`), run on the final commit;
+- the required GitHub Actions checks pass on the final commit (tests, audit, and Android CI when the PR touches `android/app-shell`);
+- the independent review is complete on the final diff and no Critical or High finding is open (data-integrity and security reviews too where they apply);
+- `versionName` and `versionCode` are valid and higher than on the default branch (app changes only);
+- the PR targets the default branch `ccr-d0c0b070-bdpssy` and GitHub reports it mergeable;
+- mandatory physical-device checks are done where the task requires them. The agents cannot run them, only the owner can: such a PR waits for the owner's confirmation and the report says so.
+
+After merging: confirm GitHub reports the PR as merged, record the merge commit SHA, verify the default branch contains it, check the workflow runs on it, and only then start the next dependent task. If any condition fails, do not merge: diagnose, fix, rerun, retry. Never bypass a failing check, an open finding, a version conflict or a required device check.
+
+Owner approval is always required for: destructive data operations, irreversible migrations, sensitive permission expansion, mandatory paid or cloud dependencies, and public release publication. Merge permission is not permission to publish a release. In this repo a push to the default branch that changes `android/app-shell/**` makes `android-apk.yml` publish release `v<versionName>` and move `apk-latest` automatically (the repository is public). On 2026-11-15 the owner answered "Complete autonomous without my intervention" when asked about that automatic release; it is treated as covered for that automatic CI release only. Any other publishing (a manual release, changing release visibility, a store upload, a signing change) needs fresh approval, and if the owner withdraws that answer, app PRs stop at "verified, ready to merge".
+
+## Task report format
+
+At the end of each task report: task and PR; agents used; files changed; implementation summary; tests run with exact commands and results; build result; security and data-integrity findings; independent review verdict; GitHub Actions status; device validation status; versionName and versionCode; merge status and merge commit SHA if merged; remaining blockers. Never invent test results, review approvals, device validation or merge status.
