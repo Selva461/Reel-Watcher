@@ -5,6 +5,12 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.11
+- A reel's "Topic: ..." link now always opens the group it counted. In a library of more than 500 reels, one subject
+  could be cut into a big group and a small piece with the same words, and the link of a reel in the small piece
+  opened the big group (which did not hold that reel). Each group now has its own address. Smaller libraries and the
+  groups themselves are unchanged.
+
 ## 1.3.10
 - Reels open at once in a big library. Opening a reel used to work out the topics of your whole library first (about 2
   seconds with 1,000 reels, minutes with thousands). Now it does not. A reel's "Topic: ..." link shows once the topics
