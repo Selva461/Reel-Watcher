@@ -5,6 +5,20 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.12
+- Sharing pictures or videos to Reel Shelf no longer holds the phone up. They are copied in the background while a small
+  screen shows how far it is (with Stop). The screen stays until every file is saved, or says which ones could not be
+  saved and why (with Try again). Leaving the screen stops the copy; what was already saved stays.
+- A file only shows up once it is complete. It is first copied to a separate temporary place, checked, and only then moved
+  in, so a copy that is cut short (the phone ends the app, the storage fills up, the other app stops answering) can no
+  longer leave a half-written file that is taken for a picture or a video.
+- Sharing the same picture or video again does not keep a second copy (and a video does not become a second reel): it
+  says it was already saved. So trying again after a failure is safe.
+- A copy that would leave less than 100 MB free on the phone is refused ("not enough storage space on the phone"), so
+  your library can always still be saved. The size limits are as before: 30 MB a picture, 500 MB a video.
+- Choosing pictures inside Reel Shelf is safe in the same way, and now says when some could not be saved, and why.
+  Pictures and videos saved by earlier versions stay as they are.
+
 ## 1.3.11
 - A reel's "Topic: ..." link now always opens the group it counted. In a library of more than 500 reels, one subject
   could be cut into a big group and a small piece with the same words, and the link of a reel in the small piece

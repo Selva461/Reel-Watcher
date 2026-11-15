@@ -977,7 +977,21 @@ final class LocalBridge {
                 done(id, false, "cancelled");
                 return;
             }
-            ocr.execute(() -> done(id, true, String.valueOf(ScreenshotReader.addPictures(act.ctx(), uris))));
+            ocr.execute(() -> {
+                MediaBatch.Report r = ScreenshotReader.addPictures(act.ctx(), uris);
+                int saved = r.kept() + r.already();  // a picture that was kept before counts: it is in the app
+                if (saved == 0) {
+                    done(id, false, "Could not keep those pictures" + (r.failed() > 0 ? ": " + r.firstWhy() : ""));
+                } else if (r.failed() == 0) {
+                    done(id, true, String.valueOf(saved));
+                } else {  // some kept, some not: the page tells both
+                    try {
+                        done(id, true, new JSONObject().put("kept", saved).put("failed", r.failed()).put("why", r.firstWhy()).toString());
+                    } catch (JSONException e) {
+                        done(id, true, String.valueOf(saved));
+                    }
+                }
+            });
         }));
     }
 
