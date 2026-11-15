@@ -5,6 +5,16 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.10
+- Reels open at once in a big library. Opening a reel used to work out the topics of your whole library first (about 2
+  seconds with 1,000 reels, minutes with thousands). Now it does not. A reel's "Topic: ..." link shows once the topics
+  are known, which is when you have opened **Ask** (and until a reel changes).
+- The topics on **Ask** and on a topic page are worked out a few milliseconds at a time, so the app stays usable while
+  they appear ("Working out topics..."). Leaving the screen stops the work; a changed reel starts it again.
+- In a library of more than 500 reels, each reel is grouped by its 40 most telling words, which makes the grouping
+  several times faster (the groups stay just as pure, and most reels stay with the same others). A library of up to 500
+  reels is grouped exactly as before.
+
 ## 1.3.8
 - Two screens can no longer overwrite each other. If the app and the nightly run both work on your library, a save made
   from an out-of-date copy is refused instead of replacing newer data: the screen reads the library, screenshots and
