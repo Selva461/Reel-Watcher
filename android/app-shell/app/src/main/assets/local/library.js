@@ -278,7 +278,12 @@ const Lib = (() => {
       groups.push({ key: picked.join("+") || "group" + members[0], label: wordsShown.join(", "), words: wordsShown, reels: members.map((m) => ix.docs[m].r) });
       yield;
     }
-    return groups.sort((a, b) => b.reels.length - a.reels.length || (a.label < b.label ? -1 : 1));
+    groups.sort((a, b) => b.reels.length - a.reels.length || (a.label < b.label ? -1 : 1));
+    // A topic page is found by its key, so each group needs its own. Two groups can have the same words (a subject cut in two
+    // by the cap): the bigger keeps the plain key, the next ones get ~2, ~3 (a word never has a ~).
+    const seen = new Map();
+    for (const g of groups) { const n = (seen.get(g.key) || 0) + 1; seen.set(g.key, n); if (n > 1) g.key += "~" + n; }
+    return groups;
   }
 
   /** The grouping for one version of the library, done in steps. Kept with the index, so a changed reel drops it. */

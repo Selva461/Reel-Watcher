@@ -66,8 +66,32 @@ def test_opening_a_reel_never_starts_the_topics(phone):
     # and then a reel points to its topic, which opens
     _go(phone, "#/r/GYM002")
     phone.locator("a.chip", has_text="Topic:").click()
-    phone.get_by_text("Squats first").wait_for()
+    # Wait for the topic page itself. "Squats first" is on the reel page too, and the click changes the address before the
+    # page is drawn again: until then the page is still the reel page, with its two related reels as .list-item (what the
+    # first version of this test counted on a slow runner: 2).
+    phone.get_by_text("3 reels about the same thing").wait_for()
     assert phone.locator(".list-item").count() == 3
+    assert phone.locator("#app li a", has_text="Squats first").count() == 1
+
+
+# The page handles an address change 300 ms late, like a slow runner does: the address is already the topic's while the screen
+# is still the reel's.
+SLOW_REDRAW_JS = "(() => { const add = window.addEventListener.bind(window); window.addEventListener = (t, f, o) => add(t, t === 'hashchange' ? (e) => setTimeout(() => f(e), 300) : f, o); })();"
+
+
+def test_a_topic_page_lists_the_whole_group_even_when_the_page_redraws_late(phone):
+    phone.context.add_init_script(SLOW_REDRAW_JS)
+    phone.open_with({"db": json.dumps(_library())}, "#/r/GYM002")
+    phone.get_by_role("heading", name="Related reels").wait_for()
+    _go(phone, "#/ask")
+    phone.get_by_role("heading", name="Topics you learned").wait_for()
+    _go(phone, "#/r/GYM002")
+    phone.locator("a.chip", has_text="Topic:").click()
+    # in the 300 ms before the redraw the address is the topic's and the screen is the reel's: it has "Squats first" and its two
+    # related reels as .list-item, so neither tells the topic page from the reel page. Only the topic page counts its reels.
+    phone.get_by_text("3 reels about the same thing").wait_for()
+    assert phone.locator(".list-item").count() == 3
+    assert phone.evaluate("() => location.hash") == "#/topic/workout%2Bgym%2Bset"
 
 
 def test_opening_a_reel_in_a_library_of_a_thousand_does_not_freeze(phone):
@@ -184,6 +208,42 @@ def test_topics_are_kept_until_a_reel_changes(phone):
     assert r["foodBefore"] is False and r["droppedAfterEdit"] and r["foodAfter"] is True
     assert r["droppedAfterAdd"] and r["gymAfterAdd"] == ["GYM001", "GYM002", "GYM003", "GYM004"]
     assert r["droppedAfterRemove"] and r["gymAfterRemove"] == ["GYM001", "GYM002", "GYM003"]
+
+
+@pytest.mark.parametrize("n,kinds,cap", [(100, 12, 30), (1000, 150, None)])
+def test_every_topic_key_names_exactly_one_group(phone, n, kinds, cap):
+    # A topic page is found by its key (the words of the group), so two groups must never share one. They can have the same
+    # words: with the cap (a forced 30 words here; the real 40 above 500 reels) one subject is cut into a big group and a
+    # small piece.
+    phone.open_with()
+    out = phone.evaluate("""([n, k, cap]) => {
+      const rs = (""" + GEN_JS + """)([n, k]).reels;
+      const gs = Lib.topics(rs, 0.3, cap === null ? undefined : cap);
+      const twins = gs.filter((g, i) => gs.findIndex((t) => t.label === g.label) !== i).length;   // called by the same words as an earlier group
+      return { groups: gs.length, keys: new Set(gs.map((g) => g.key)).size, twins, reachable: gs.every((g) => gs.find((t) => t.key === g.key) === g) };
+    }""", [n, kinds, cap])
+    assert out["twins"] >= 1, out   # the generated library does have such groups (else this checks nothing)
+    assert out["keys"] == out["groups"] and out["reachable"], out
+
+
+def test_the_topic_link_of_a_reel_in_a_cut_group_opens_that_group(phone):
+    _generated(phone, 1000)
+    pick = phone.evaluate("""() => {
+      Notes.index(db.reels);
+      const gs = Lib.topics(db.reels);                                              // kept: the reel page links to its topic
+      const g = gs.find((x, i) => gs.findIndex((t) => t.label === x.label) !== i);  // the second group called by the same words
+      return g && { code: g.reels[0].code, size: g.reels.length };
+    }""")
+    assert pick, "the generated library has no two groups with the same words any more"
+    _go(phone, "#/r/" + pick["code"])
+    chip = phone.locator("a.chip", has_text="Topic:")
+    chip.wait_for()
+    assert chip.inner_text().endswith(f"({pick['size']})")
+    chip.click()
+    # the topic page says how many reels it holds (the reel page has no such line): it must be the group the link counted
+    phone.get_by_text(f"{pick['size']} reels about the same thing").wait_for(timeout=10000)
+    assert phone.locator("#app .list-item").count() == pick["size"]
+    assert phone.locator(f'#app .list-item[href="#/r/{pick["code"]}"]').count() == 1   # and it holds the reel the link was on
 
 
 def test_a_failed_attempt_is_not_kept(phone):
