@@ -870,7 +870,8 @@ function reelScreen(code) {
 
 function relatedHtml(r) {
   const rel = Notes.related(db.reels, r, 4);
-  const t = Lib.topics(db.reels).find((x) => x.reels.includes(r));
+  const known = Lib.topicsReady(db.reels);  // only when the Ask screen already worked the topics out: opening a reel never starts that
+  const t = known && known.find((x) => x.reels.includes(r));
   const topicLink = t ? `<a class="chip" href="#/topic/${enc(t.key)}">Topic: ${esc(t.label)} (${t.reels.length})</a>` : "";
   return rel.length || t ? `<div class="stack"><h2>Related reels</h2>${topicLink ? `<div class="chips">${topicLink}</div>` : ""}${rel.map((x) => reelRow(x.reel)).join("")}</div>` : "";
 }
@@ -879,26 +880,34 @@ function relatedHtml(r) {
 
 function titleOf(r) { const n = r.notes || {}; return n.topic || r.title || (r.caption || "").split("\n")[0].slice(0, 90) || r.code; }
 
-function libraryOverview() {
-  const groups = Lib.topics(db.reels).slice(0, 12);
-  const tl = Lib.tools(db.reels).filter((t) => t.count > 1).slice(0, 16);
-  return `${groups.length ? `<div class="stack"><h2>Topics you learned</h2>${groups.map((g) => `<a class="list-item" href="#/topic/${enc(g.key)}"><span class="grow stack" style="gap:4px">
+function topicsHtml(all) {
+  const groups = all.slice(0, 12);
+  return groups.length ? `<div class="stack"><h2>Topics you learned</h2>${groups.map((g) => `<a class="list-item" href="#/topic/${enc(g.key)}"><span class="grow stack" style="gap:4px">
       <span class="title">${esc(g.label)}</span><span class="small muted clamp">${esc(g.reels.slice(0, 3).map(titleOf).join(" · "))}</span></span>
-      <span class="tag">${g.reels.length}</span></a>`).join("")}</div>` : ""}
+      <span class="tag">${g.reels.length}</span></a>`).join("")}</div>` : "";
+}
+
+function libraryOverview() {
+  const tl = Lib.tools(db.reels).filter((t) => t.count > 1).slice(0, 16);
+  return `<div id="topicsBox" style="display:contents"><p class="hint">Working out topics...</p></div>
     ${tl.length ? `<div class="stack"><h2>Tools you saw most</h2><div class="chips wrap">${tl.map((t) => `<a class="chip" href="#/ask?q=${enc('"' + t.name + '"')}">${esc(t.name)} ${t.count}</a>`).join("")}</div></div>` : ""}`;
 }
 
 function topicScreen(key) {
-  const g = Lib.topic(db.reels, key);
-  if (!g) { $app.innerHTML = `${header("Topic", "#/ask")}<div class="empty">This topic changed as your library grew. <a href="#/ask">See all topics</a>.</div>`; return; }
-  const takeaways = g.reels.filter((r) => (r.notes || {}).takeaway);
-  const tl = Lib.tools(g.reels).slice(0, 12);
-  $app.innerHTML = `${header(g.label, "#/ask")}
-    <p class="hint">${plural(g.reels.length, "reel")} about the same thing, grouped by the words they share. No AI.</p>
-    <div class="chips wrap">${g.words.map((w) => `<a class="chip" href="#/ask?q=${enc(w)}">${esc(w)}</a>`).join("")}</div>
-    ${takeaways.length ? `<div class="card stack" style="gap:8px"><span class="label">What you learned</span><ul style="margin:0;padding-left:18px;line-height:1.5">${takeaways.map((r) => `<li><a href="#/r/${enc(r.code)}">${esc(r.notes.takeaway)}</a></li>`).join("")}</ul></div>` : ""}
-    ${tl.length ? `<div class="card stack" style="gap:8px"><span class="label">Tools</span><p style="margin:0">${esc(tl.map((t) => t.name + (t.count > 1 ? ` (${t.count})` : "")).join(", "))}</p></div>` : ""}
-    <div class="stack">${g.reels.map(reelRow).join("")}</div>`;
+  $app.innerHTML = `${header("Topic", "#/ask")}<p class="hint" id="topicWait">Working out topics...</p>`;
+  const wait = document.getElementById("topicWait");
+  Lib.topicsSoon(db.reels, (groups) => {
+    const g = groups.find((t) => t.key === key);
+    if (!g) { $app.innerHTML = `${header("Topic", "#/ask")}<div class="empty">This topic changed as your library grew. <a href="#/ask">See all topics</a>.</div>`; return; }
+    const takeaways = g.reels.filter((r) => (r.notes || {}).takeaway);
+    const tl = Lib.countTools(g.reels).slice(0, 12);  // not Lib.tools: that would replace the library's index, and with it the topics kept for it
+    $app.innerHTML = `${header(g.label, "#/ask")}
+      <p class="hint">${plural(g.reels.length, "reel")} about the same thing, grouped by the words they share. No AI.</p>
+      <div class="chips wrap">${g.words.map((w) => `<a class="chip" href="#/ask?q=${enc(w)}">${esc(w)}</a>`).join("")}</div>
+      ${takeaways.length ? `<div class="card stack" style="gap:8px"><span class="label">What you learned</span><ul style="margin:0;padding-left:18px;line-height:1.5">${takeaways.map((r) => `<li><a href="#/r/${enc(r.code)}">${esc(r.notes.takeaway)}</a></li>`).join("")}</ul></div>` : ""}
+      ${tl.length ? `<div class="card stack" style="gap:8px"><span class="label">Tools</span><p style="margin:0">${esc(tl.map((t) => t.name + (t.count > 1 ? ` (${t.count})` : "")).join(", "))}</p></div>` : ""}
+      <div class="stack">${g.reels.map(reelRow).join("")}</div>`;
+  }, () => wait.isConnected);  // another screen replaced this one: stop
 }
 
 // ------------------------------------------------------------------ Ask: your library answers
@@ -933,6 +942,8 @@ function askScreen() {
         ${x.lines.length ? `<ul class="small" style="margin:0;padding-left:18px">${x.lines.map((l) => `<li>${mark(l)}</li>`).join("")}</ul>` : ""}
         <span class="small muted">${esc([r.author ? "@" + r.author : "", (n.tags || []).slice(0, 3).map((t) => "#" + t).join(" ")].filter(Boolean).join(" · "))}</span></a>`;
     }).join("")}</div>`;
+  const box = document.getElementById("topicsBox");
+  if (box) Lib.topicsSoon(db.reels, (groups) => { box.innerHTML = topicsHtml(groups); }, () => box.isConnected);
   const input = document.getElementById("aq");
   document.getElementById("askf").addEventListener("submit", (e) => { e.preventDefault(); const nq = input.value.trim(); lastAsk = { q: nq, answer: null, results: [] }; if (location.hash === `#/ask?q=${enc(nq)}`) askScreen(); else location.hash = `#/ask?q=${enc(nq)}`; });
   bind("[data-url]", "click", (e, a) => { e.preventDefault(); sync("openUrl", a.dataset.url); });
