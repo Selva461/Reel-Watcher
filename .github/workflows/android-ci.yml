@@ -1,0 +1,47 @@
+name: Android CI
+
+# Pull requests into the install branch compile the Android app and run its JUnit tests, so a broken change is seen
+# before it is merged (android-apk.yml only builds after the merge). Nothing is published or uploaded here: no release,
+# no artifact, no secrets. The APK is signed with the throwaway debug key, as in any build without the signing secrets.
+# Only changes under android/app-shell (or to this file) start it, to save Actions minutes; the Python tests and the
+# dependency audit run separately in tests.yml.
+on:
+  pull_request:
+    branches: [ccr-d0c0b070-bdpssy]
+    paths:
+      - "android/app-shell/**"
+      - ".github/workflows/android-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# a new push to the same pull request replaces the run in progress
+concurrency:
+  group: android-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # actions pinned to exact commits (tag in the comment), the same ones as android-apk.yml; Dependabot proposes updates
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      # the build needs Java 21 (sourceCompatibility in android/app-shell/app/build.gradle)
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3  # v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      # the repository has no Gradle wrapper: the same pinned Gradle as android-apk.yml. Its Gradle cache is only read
+      # here (written by builds on the install branch), so pull requests never add entries that could push those out.
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a  # v4
+        with:
+          gradle-version: "8.13"
+      # the Android SDK (platform 36) is preinstalled on the GitHub runner. A failing test or compile error fails the step.
+      - name: JUnit tests (testReleaseUnitTest, compiles all the app's Java)
+        run: gradle -p android/app-shell testReleaseUnitTest --stacktrace
+      - name: Release build (assembleRelease, signed with the debug key, not published)
+        run: gradle -p android/app-shell assembleRelease --stacktrace
