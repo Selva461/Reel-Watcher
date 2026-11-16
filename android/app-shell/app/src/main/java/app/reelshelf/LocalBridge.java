@@ -977,7 +977,11 @@ final class LocalBridge {
                 done(id, false, "cancelled");
                 return;
             }
-            ocr.execute(() -> done(id, true, String.valueOf(ScreenshotReader.addPictures(act.ctx(), uris))));
+            ocr.execute(() -> {
+                MediaBatch.Report r = ScreenshotReader.addPictures(act.ctx(), uris);
+                if (r.saved() == 0) done(id, false, "Could not keep those pictures" + (r.failed() > 0 ? ": " + r.firstWhy() : ""));
+                else done(id, true, r.pickerAnswer());  // a picture kept before counts: it is in the app
+            });
         }));
     }
 
