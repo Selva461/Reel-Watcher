@@ -5,7 +5,7 @@ Read, in this order (about 10 minutes): `CLAUDE.md`, `docs/PROJECT_CONTINUATION.
 ## What was true when this was written (2026-11-15, about 17:20 UTC)
 - Default branch `ccr-d0c0b070-bdpssy` at `f6a3f29`, app 1.3.11 / versionCode 18.
 - Open and waiting: PR #37 (Task 4, all checks green, waits for the owner's device checks E13-E19 and counts as a release), PR #38 (subagent team in `.claude/agents/` and CLAUDE.md rules), PR #33 (Task 2b, needs a refresh and renumber, owner device checks E9-E11).
-- Background agents were building P2 (search), P3 (watchlist index) and R3 (CI runs once, flaky UI tests); check `git ls-remote --heads origin` for `performance/p2-search-index-related`, `performance/p3-watchlist-index`, `ci/r3-single-test-run`. Do not redo them if they exist.
+- The P2, P3, R3 and R4-1 agents stopped at the 5-hour usage limit (2026-11-15 17:25 UTC). Partial, unreviewed work is saved as `wip/p2-search-index-related`, `wip/p3-watchlist-index`, `wip/r3-single-test-run` (see `docs/PROJECT_CONTINUATION.md` section 3). Continue from those branches; do not start over, and do not merge them as they are. Nothing was merged overnight.
 
 ## Do this (in order)
 1. Open the PR list. For each of #37, #38, #33: re-check status; do not redo finished work.

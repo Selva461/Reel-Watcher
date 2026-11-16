@@ -1,6 +1,6 @@
 # Reel Shelf: project continuation record
 
-Durable project state for any new Claude session. Written 2026-11-15 around 17:20 UTC from the live repository and GitHub, not from memory. Items marked **[V]** were verified against git or GitHub on that date. **UNKNOWN** and **NEEDS VERIFICATION** mean exactly that: do not treat them as done. Update this file after every completed PR (see "How to keep this file current").
+Durable project state for any new Claude session. Written 2026-11-15 around 17:20 UTC and updated 2026-11-16 03:40 UTC from the live repository and GitHub, not from memory. Items marked **[V]** were verified against git or GitHub on that date. **UNKNOWN** and **NEEDS VERIFICATION** mean exactly that: do not treat them as done. Update this file after every completed PR (see "How to keep this file current").
 
 ## 1. What the project is
 
@@ -30,7 +30,12 @@ Architecture [V, from the code and AGENTS.md]:
 | **#33** Task 2b: nightly run and the app no longer overlap | `stabilize/task-2b-night-run-lifecycle` @ `a0d205e` | 1.3.9 / 16 | Based on the old default (67f8050), versionCode 16 is below the default's 18: it must be refreshed (merge the default into it) and renumbered. Reviewed twice earlier in a previous session (the verdicts are in the PR history: NEEDS VERIFICATION before relying on them). **Blocked: device checks E9, E10, E11 (they exist only on that branch's TESTING.md) are not run.** |
 | Dependabot #16, #9, #6, #5, #4, #2, #1 | various | n/a | Not reviewed. #9 (AGP 9.5.0), #5 (setup-gradle 6.x) and #4 (checkout 7.x) are risky major bumps: review before any merge; the workflows pin actions to commit SHAs. |
 
-Background agents running at the time of writing (outcome **UNKNOWN**; their branches were not yet pushed): `performance/p2-search-index-related` (P2), `performance/p3-watchlist-index` (P3), `ci/r3-single-test-run` (R3, CI runs tests once per PR commit and a proper fix for two flaky UI tests). If the session ended, check `git ls-remote --heads origin` for these branches. Their work lives only in `.claude/worktrees/agent-*` of that container unless pushed.
+Background agents (update 2026-11-16 03:40 UTC): the P2, P3, R3 and R4-1 implementation agents and the independent review of #38 all stopped at 2026-11-15 about 17:25 UTC because of the 5-hour Claude usage limit (reset 20:00 UTC). Nothing was merged overnight: the default branch is still `f6a3f29`. Their partial work was NOT complete and NOT reviewed; it is saved, unreviewed, as WIP branches (do not merge them as they are):
+- `wip/p2-search-index-related` @ `de509d9`: edits to `library.js` and `notes.js` plus `tests/test_phone_search_scale.py` (search, index, related speed).
+- `wip/p3-watchlist-index` @ `cd1f540`: `catalog.js` index plus `tests/test_watchlist_scale.py` and `tests/catalog_before_index.js` (the old code kept as a test reference).
+- `wip/r3-single-test-run` @ `27528fc`: `tests.yml` (push only on the default branch) and a `tests/test_app.py` fix for the flaky UI tests.
+- R4-1 (upgrade fixtures): the agent died at its first step, nothing saved. The independent review of #38 also did not run.
+The agents keep their context and can be resumed with SendMessage; if the container is gone, start from the WIP branches and the briefs in this repo's design documents.
 
 ## 4. Recently merged [V]
 
@@ -148,7 +153,7 @@ Decisions recorded by the owner in the sessions (verbatim in spirit):
 
 ## 13. Exact next steps (in order)
 
-1. Check `git ls-remote --heads origin` and the PR list. If the P2, P3, R3 branches exist, open one PR each (bodies from the agents' PR_BODY.md files if present under the scratchpad, else rewrite from the diff), get checks and an independent Opus review. R3 (CI and tests only) can be merged under the standing conditions; P2 and P3 stay ready.
+1. Check `git ls-remote --heads origin` and the PR list. Finish R3 from `wip/r3-single-test-run` (CI and tests only: it may be merged under the standing conditions after the full suite and an independent review). Finish P2 and P3 from their `wip/*` branches (they change app code: verify and leave ready, do not merge, until the owner merges R5 or says otherwise). Then R4-1 (tests only).
 2. Merge the docs PR that adds this file, then PR #38 after its checks, once its release wording matches section 12.
 3. Open R5 (decouple publishing). Do not merge it.
 4. Start R4-1 (upgrade fixtures and round-trip tests, tests only) per `docs/design/A1-R4-retry-and-schema.md`: it publishes nothing.
