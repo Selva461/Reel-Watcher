@@ -1,6 +1,6 @@
 # Reel Shelf: project continuation record
 
-Durable project state for any new Claude session. Written 2026-11-15 around 17:20 UTC and updated 2026-11-16 04:00 UTC from the live repository and GitHub, not from memory. Items marked **[V]** were verified against git or GitHub on that date. **UNKNOWN** and **NEEDS VERIFICATION** mean exactly that: do not treat them as done. Update this file after every completed PR (see "How to keep this file current").
+Durable project state for any new Claude session. Written 2026-11-15 around 17:20 UTC and updated 2026-11-16 04:50 UTC from the live repository and GitHub, not from memory. Items marked **[V]** were verified against git or GitHub on that date. **UNKNOWN** and **NEEDS VERIFICATION** mean exactly that: do not treat them as done. Update this file after every completed PR (see "How to keep this file current").
 
 ## 1. What the project is
 
@@ -13,34 +13,39 @@ Architecture [V, from the code and AGENTS.md]:
 - **Python engine** `src/reel_watcher/` and `webapp/`: the older PC edition (SQLite library). The Android app does not start it. Tests in `tests/` (Python; the "phone harness" drives the page in Chromium with a fake `window.RN`: `tests/test_phone_app.py`) and JUnit 4 in `android/app-shell/app/src/test/`.
 - **CI** `.github/workflows/`: `tests.yml` (uv run pytest and pip-audit; on push and pull_request), `android-ci.yml` (JUnit and assembleRelease on PRs that touch `android/app-shell`), `android-apk.yml` (a push to the default branch that touches `android/app-shell/**` builds the APK and PUBLISHES release `v<versionName>` and `apk-latest`; the repository is public).
 
-## 2. Repository state [V, 2026-11-16 03:58 UTC]
+## 2. Repository state [V, 2026-11-16 04:48 UTC]
 
-- Default (install) branch: `ccr-d0c0b070-bdpssy`, head **`cf5d8ca`** (merge of PR #41).
+- Default (install) branch: `ccr-d0c0b070-bdpssy`, head **`19bbd58`** (merge of PR #45).
 - App version on default: **versionName 1.3.11, versionCode 18** (unchanged: nothing since #36 touched `android/app-shell/**`). Release tags: v1.3.7, v1.3.8, v1.3.10, v1.3.11 (no v1.3.9: PR #33 is not merged). No release was published after v1.3.11.
-- CI on the default branch: Tests success for 53119a2 (run 43799920266) and 050640c (run 43800129974); earlier f6a3f29 Tests success and the Android APK build for 5cd4fcd (run 43734040483, published v1.3.11).
-- `tests.yml` now runs on push only for the default branch (R3): a PR commit gets one Tests run (pull_request), not two.
-- The eight specialist agents are on the default branch in `.claude/agents/` (PR #38); a restart of Claude Code is needed once to load them. `CLAUDE.md` has the team rules, the standing merge authorization and the "Release rule" (section 12).
+- CI on the default branch, Tests (push) runs: success for cf5d8ca (43800920085), fa3ac7b (43801873217), d7935b6 (43802825322); the run for 19bbd58 (43805536736) was still in progress when this was written (NEEDS VERIFICATION). The last Android APK build was for 5cd4fcd (run 43734040483, published v1.3.11).
+- `tests.yml` runs on push only for the default branch (R3): a PR commit gets one Tests run (pull_request), not two.
+- The eight specialist agents are on the default branch in `.claude/agents/` (PR #38); a restart of Claude Code is needed once to load them (until then reviews run as `general-purpose` agents with the same briefs). `CLAUDE.md` has the team rules, the standing merge authorization and the "Release rule" (section 12).
+- Library upgrade safety net (R4-1, R4-1b) is on the default branch: `tests/fixtures/library/<version>/` (14 released versions), `tests/fixtures/make_library_fixtures.py`, `tests/test_library_upgrade.py` (50 tests).
 - Main checkout at the time of writing: branch `stabilize/task-4-background-media-copy` at `8e3c275`. `.claude/worktrees/` holds the agents' worktrees (git-ignored).
 
-## 3. Open pull requests and branches [V, 2026-11-16 03:58 UTC]
+## 3. Open pull requests and branches [V, 2026-11-16 04:48 UTC]
+
+Order of app PRs (all are publishing PRs; the owner merges them in this order; versions are provisional and follow merge order): **#37 (1.3.12 / 19), then #44 (1.3.13 / 20), then P3 (1.3.14 / 21), then R4-2 (1.3.15 / 22) and the rest of the roadmap**. #33 (Task 2b) needs a refresh and its own number whenever the owner decides.
 
 | PR / branch | Head | Version claim | Status and blockers |
 |---|---|---|---|
 | **#37** Task 4: shared pictures and videos copied in the background, atomically | `stabilize/task-4-background-media-copy` @ `8e3c275` | 1.3.12 / 19 | All GitHub checks green on 8e3c275 (android 43738527111, test 43738527098 and 43738522141, audit). Local: 251 Python, 112 JUnit, assembleRelease OK. Two independent Opus reviews: no blocking findings. **Publishing PR (app code); blocked on the owner's device checks E13-E19.** |
+| **#44** P2: search, the index and related reels are fast in a big library | `performance/p2-search-index-related` @ `83dc49c` | 1.3.13 / 20 (valid only after #37; otherwise renumber and merge the CHANGELOG sections) | Results identical to before: independent Opus review SAFE TO MERGE (no Critical, High or Medium; about 31,000 exact old-versus-new comparisons with 0 differences, 7 of 7 deliberate breaks caught). Its Low findings: CHANGELOG wording fixed in 83dc49c (wording only; code is as reviewed at ea5ea74); the rest need no change. Local on ea5ea74: 299 Python (full suite), assembleRelease OK. GitHub checks on 83dc49c: NEEDS VERIFICATION. **Publishing PR; needs the owner (device check E20, and the merge).** Branch history includes a WIP checkpoint commit: do not squash it away if history matters, otherwise squash. |
+| P3 watchlist index | `performance/p3-watchlist-index` (agent working; started from `wip/p3-watchlist-index` @ `cd1f540` and stacked on the P2 branch) | 1.3.14 / 21 | IN PROGRESS: no result yet. Publishing PR. |
 | **#40** R5: publishing a release is manual (`android-apk.yml` publish step only on workflow_dispatch) | `ci/r5-manual-release-publish` @ `bf20dcf` | none | Ready; it changes release publication and the file is in the publish path, so **only the owner merges it**. After it, merging an app PR never publishes. |
-| **#33** Task 2b: nightly run and the app no longer overlap | `stabilize/task-2b-night-run-lifecycle` @ `a0d205e` | 1.3.9 / 16 | Based on old default; must be refreshed (merge the default into it) and renumbered (above 18, in merge order). Earlier reviews: verdicts NEEDS VERIFICATION. **Blocked: device checks E9-E11; publishing PR.** |
+| **#33** Task 2b: nightly run and the app no longer overlap | `stabilize/task-2b-night-run-lifecycle` @ `a0d205e` | 1.3.9 / 16 | Based on old default; must be refreshed (merge the default into it) and renumbered. Earlier reviews: verdicts NEEDS VERIFICATION. **Blocked: device checks E9-E11; publishing PR.** |
 | Dependabot #16, #9, #6, #5, #4, #2, #1 | various | n/a | Not reviewed. #9, #5, #4 are major bumps; #5, #4, #2, #1 edit workflows (`android-apk.yml` bumps are publishing PRs). |
-| `test/r4-1-upgrade-fixtures` @ `7117848` | pushed by the R4-1 agent | none (tests only) | Fixtures per released version (made by each tag's own page code) plus round-trip tests. The agent had not yet reported (full suite and teeth checks unconfirmed): NEEDS VERIFICATION. Publishes nothing (tests/ only): PR then independent review, may merge under the standing conditions. |
-| `performance/p2-search-index-related` @ `71a2458` | agent in progress | 1.3.13 / 20 provisional | Resumed from `wip/p2-search-index-related`; merged the new default in. App code: publishing PR, stays ready. |
-| `wip/p3-watchlist-index` @ `cd1f540` | WIP, not complete | 1.3.14 / 21 provisional | To be resumed after P2 (one agent at a time: usage limit). Publishing PR. |
-| `wip/r3-single-test-run` | superseded | n/a | R3 was finished and merged as #41; this WIP ref is obsolete. |
+| `wip/p3-watchlist-index`, `wip/p2-search-index-related`, `wip/r3-single-test-run` | WIP refs | n/a | Superseded (P2 is #44, R3 was merged as #41, P3 continues on its new branch). Safe to delete after P3 is done. |
 
-Agent history: the P2, P3, R3, R4-1 agents and one review stopped at the 5-hour usage limit on 2026-11-15 about 17:25 UTC (reset 20:00 UTC); nothing was merged overnight; their partial work was saved as `wip/*` branches and the agents were resumed on 2026-11-16 from 03:40 UTC. Agents can be resumed with SendMessage while the container lives.
+Agent history: the P2, P3, R3, R4-1 agents and one review stopped at the 5-hour usage limit on 2026-11-15 about 17:25 UTC (reset 20:00 UTC); nothing was merged overnight; their partial work was saved as `wip/*` branches and the agents were resumed on 2026-11-16 from 03:40 UTC and finished (except P3). Agents can be resumed with SendMessage while the container lives.
 
 ## 4. Recently merged [V]
 
 | PR | What | Merge commit | Merged (UTC) |
 |---|---|---|---|
+| #45 | R4-1b: review follow-ups for the upgrade tests (hand-made library for the Verify.migrate downgrade, reset and delete rules at rules 0, 2 and 3; pinned page clock; stricter shots check) (independent review: SAFE TO MERGE, 4 Low) | `19bbd58` | 2026-11-16 04:40 |
+| #43 | R4-1: upgrade fixtures for 14 released versions made by each tag's own page code, plus 47 round-trip tests (independent review: SAFE TO MERGE; 1 Medium and 5 Low, resolved in #45 except L2) | `d7935b6` | 2026-11-16 04:12 |
+| #42 | Docs: continuation record update | `fa3ac7b` | 2026-11-16 04:04 |
 | #41 | R3: CI runs the Python tests once per PR commit; two flaky UI tests fixed at their cause (independent review: SAFE TO MERGE, 4 Low) | `cf5d8ca` | 2026-11-16 03:55 |
 | #38 | The subagent team (`.claude/agents/`, 8 agents), delegation rules, standing merge authorization and the Release rule in CLAUDE.md (two Opus reviews; the first was BLOCKING on a release loophole, fixed) | `050640c` | 2026-11-16 03:46 |
 | #39 | This continuation record, NEXT_SESSION.md, the S4 and A1/R4 designs | `53119a2` | 2026-11-16 03:44 |
@@ -74,6 +79,7 @@ Verified by measurement or code reading earlier in this project (desktop Chromiu
 - `onRenderProcessGone` is not handled (a killed WebView renderer takes the app down). Instagram/YouTube access relies on unofficial endpoints.
 - The topic link on a reel appears only after the Ask screen has worked the topics out (by design of P1).
 - Docs: `AGENTS.md` and `README.md` stale (owner said: not yet). Also stale after R3/R5: `TESTING.md` says dependencies are scanned "on every push and weekly" (now push only on the default branch), and the comment in `android-apk.yml` says "other branches are tested by tests.yml" (true only once a PR is open; that file is a publishing path: owner/R5).
+- R4-1 test debt (optional, from the reviews, all Low): the empty-settings path is the only one covered (open-time rules that need settings such as `metaAi`, a ready model, `verifyRunning` are not; add when A1 adds retries); a rules-2 title never carries `verified_by` in the hand-made library, so "rule 2 also deletes verified_by" would go unnoticed; the shots signature is checked by shape and `notes_at`, not the exact length; a single-source verified title that looks like a comment line (downgraded then deleted at rules below 3) and an unverified title without a `verified` key are not covered; a few "EXPECTED" wording leftovers in `tests/test_library_upgrade.py` (about lines 75 and 80).
 - **PC web app settings race** (`src/reel_watcher/webapp/app.js`, not the Android app): `settingsScreen()` draws the controls, awaits `GET /api/selfcheck`, and only then binds the handlers, so a change made before the answer arrives is silently dropped. Fix: bind first. `tests/test_app.py::test_ui_import_and_settings` may have the same latent race. Low priority (PC edition).
 - Version collisions: #33 (1.3.9/16) and #37 (1.3.12/19) must be numbered in merge order (section 12).
 
@@ -133,6 +139,10 @@ Timing tests can fail when the machine is busy: rerun alone before treating as r
 | 2026-11-16 | dd1a925 (#38) | independent Opus re-review | SAFE TO MERGE (one Medium and two Low fixed in 89f8120, not re-reviewed) | session log |
 | 2026-11-16 | 494d330 (#41) | GitHub test (one run) and audit; independent Opus review | success; SAFE TO MERGE (4 Low); agent-run local suite 240 passed | run 43799977866 |
 
+| 2026-11-16 | 7117848 (#43) | GitHub test and audit (PR run); agent-run full suite; independent Opus review | success; 287 passed locally; SAFE TO MERGE (14 fixtures regenerated byte-identical; 10 of 10 breaks caught) | run 43801828462 |
+| 2026-11-16 | 48fe2aa (#45) | GitHub test and audit; independent Opus review; agent-run full suite | success; SAFE TO MERGE (10 of 11 breaks caught); 290 passed locally | run 43804341205 |
+| 2026-11-16 | ea5ea74 (#44) | agent-run full suite and Gradle (on ea9a129); independent Opus review | 299 passed; BUILD SUCCESSFUL; SAFE TO MERGE | session log; GitHub run on 83dc49c NEEDS VERIFICATION |
+
 Earlier results (Tasks 1, 2a, 2b, P1) were reported per PR; the numbers are in each PR description.
 
 ## 11. Physical-device tests pending (only the owner can run them)
@@ -161,10 +171,10 @@ Decisions recorded by the owner in the sessions (verbatim in spirit):
 
 ## 13. Exact next steps (in order)
 
-1. Collect the R4-1 agent's report; check its branch (`test/r4-1-upgrade-fixtures`) for the full-suite result and that the tests fail when the page code drops a field; open the PR, get green GitHub checks and an independent Opus review; it publishes nothing (tests/ only), so it may be merged under the standing conditions.
-2. Finish P2 (resumed), then resume P3 from `wip/p3-watchlist-index`: complete, verified, independent review, PR opened, LEFT READY (publishing PRs: never merged by the AI).
-3. Next task that publishes nothing: continue the roadmap in section 7 with tasks whose changes stay outside `android/app-shell/**` and `android-apk.yml` (for example more test-only work from the designs); anything else is prepared to "verified and ready".
-4. Owner to-do (do not wait): merge #40 (R5), run E13-E19 and E9-E11, decide the release question, then #37, #33 (refresh and renumber first) and the ready PRs in version order, then 5a, S4-1..S4-4, 5b, A1.
+1. Check `git ls-remote --heads origin`, the PR list and the agents: P3 (`performance/p3-watchlist-index`) is in progress; when it reports, verify its branch, open its PR, get an independent Opus review, fix findings, leave it READY (a publishing PR: never merged by the AI). Check the GitHub run on #44's head 83dc49c.
+2. Next roadmap task: **R4-2** (`schema_version` and the "newer library" rule, per `docs/design/A1-R4-retry-and-schema.md`; its prerequisite R4-1 is merged). Stack it on the P3 branch (1.3.15 / 22), data-integrity-guardian review (it changes how a library is opened and what happens to a newer one), independent review, leave READY.
+3. Then, in order, each stacked and left READY (all publish): A1 (retry and night-queue cap), 5a only after #37 is merged (it depends on Task 4), S4-1..S4-4, 5b, P4, A2, A3, K1.
+4. Owner to-do (do not wait): merge #40 (R5), run E13-E19 and E9-E11 and E20, decide the release question, then merge #37, #44, P3 and the rest in version order (renumber if the order changes); #33 needs a refresh first.
 
 ## 14. Instructions for the next Claude session
 
