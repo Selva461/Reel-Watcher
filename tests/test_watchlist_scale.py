@@ -455,20 +455,25 @@ def test_an_entry_that_is_in_the_list_twice_is_handled_as_before(phone):
         const a = agree(A);
         if (a.bad.length || a.stale) out.bad.push(what + ": answers " + JSON.stringify(a.bad.slice(0, 2)));
       };
-      same("built");
+      // the same clock for both, as in equivalence(): the new Catalog and the old one run one after the other, and the stored times must agree
+      const real = Date.now;
+      let clock = 1.7e12;
+      Date.now = () => clock;
+      const both = (fn) => { clock += 1000; const x = fn(Catalog, A); const y = fn(CatalogRef, B); return [x, y]; };
       try {
-        const m1 = Catalog.merge(A, twice, other), m2 = CatalogRef.merge(B, twice, other);
+        same("built");
+        const [m1, m2] = both((C, db) => C.merge(db, twice, other));
         if (m1.id !== m2.id) out.bad.push("merge kept another entry");
         same("merged");
-        Catalog.remove(A, front); CatalogRef.remove(B, front);        // the entry that is in front and again further down
+        both((C, db) => C.remove(db, front));                              // the entry that is in front and again further down
         same("removed");
         out.gone = Catalog.get(A, front);
-        const again = A.media.find((m, i) => A.media.indexOf(m) !== i);   // one that is still there twice, if any
-        if (again) { Catalog.remove(A, again.id); CatalogRef.remove(B, again.id); same("removed again"); }
-        const x = Catalog.add(A, { title: "After The Removals" }), y = CatalogRef.add(B, { title: "After The Removals" });
+        const again = A.media.find((m, i) => A.media.indexOf(m) !== i);    // one that is still there twice, if any
+        if (again) { both((C, db) => C.remove(db, again.id)); same("removed again"); }
+        const [x, y] = both((C, db) => C.add(db, { title: "After The Removals" }));
         if (x.entry.id !== y.entry.id || x.created !== y.created) out.bad.push("add after");
         same("added");
-      } catch (e) { out.threw = e.message; }
+      } catch (e) { out.threw = e.message; } finally { Date.now = real; }
       return out;
     }""")
     assert r["threw"] is None and r["bad"] == []
