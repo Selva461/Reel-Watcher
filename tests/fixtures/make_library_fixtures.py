@@ -258,6 +258,8 @@ def main():
     ap.add_argument("--assets", help="use the page assets in this folder instead of the tag (one version only)")
     ap.add_argument("--out", default=str(HERE / "library"))
     a = ap.parse_args()
+    if a.assets and len(a.versions) != 1:
+        ap.error("--assets is the page code of ONE version: give exactly one version with it")
     if not CHROME:
         sys.exit("Chromium is not available")
     for v in a.versions:
