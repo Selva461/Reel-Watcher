@@ -1,5 +1,5 @@
 """The watchlist at scale (assets/local/catalog.js): adding a title and checking a title online used to read the whole list again for
-every title (and clean every stored name again), so adding 5,000 titles took about 24 seconds. Now an index in memory finds the
+every title (and clean every stored name again), so adding 5,000 titles took about 12 to 14 seconds (desktop Chromium). Now an index in memory finds the
 few entries that can be the same title. These tests pin three things, in the phone harness (Chromium at phone size, no network):
 
 1. the answers are the old answers: the same questions put to the new Catalog and to a frozen copy of the old one
@@ -92,7 +92,7 @@ GEN_JS = r"""function genTitles(n, seed, dupRate) {
 # update, a list read again, an emptied list) on a list kept by the new Catalog and one kept by the old one, with questions put to
 # findSame in between. The clock is the same for both, so the stored times agree. bad is empty when the two always agree.
 EQUIV_JS = r"""// equivalence(New, Ref, genTitles, n, seed, probesPer): the same operations on two lists, one with the new Catalog and one with
-// the old one. Returns { ops, probes, found, size, peak, bad }: bad holds the first differences (empty when the two always agree).
+// the old one. Returns { ops, probes, found, size, peak, batches, bad }: bad holds the first differences (empty when the two always agree).
 function equivalence(New, Ref, genTitles, n, seed, probesPer) {
   let s = (seed ^ 0x9e3779b9) | 0;
   const rnd = () => { s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
@@ -102,7 +102,7 @@ function equivalence(New, Ref, genTitles, n, seed, probesPer) {
   const cands = genTitles(n, seed, 0.34);
   const A = { media: [] }, B = { media: [] };  // A: the new code, B: the old code
   for (const db of [A, B]) Ref.addType(db, "Thai BL", "watch");
-  const out = { ops: 0, probes: 0, found: 0, size: 0, peak: 0, bad: [] };
+  const out = { ops: 0, probes: 0, found: 0, size: 0, peak: 0, batches: 0, bad: [] };
   const differ = (what, x, y) => { if (JSON.stringify(x) !== JSON.stringify(y) && out.bad.length < 8) out.bad.push({ what, op: out.ops, new: x, ref: y }); };
   const real = Date.now;
   let clock = 1.7e12;
@@ -119,7 +119,25 @@ function equivalence(New, Ref, genTitles, n, seed, probesPer) {
   try {
     for (let i = 0; i < cands.length; i++) {
       const c = cands[i];
-      differ("add", ...both((C, db) => { const r = C.add(db, clone(c)); return r && { id: r.entry.id, created: r.created, merged: r.merged }; }));
+      if (rnd() < 0.2) {
+        // addMany on a batch of 2 to 5: this candidate, and near-duplicates of each other and of a stored title. The first of them
+        // merges into the stored title and gives it a new database id and new names; the next ones can only be found through those.
+        const e = A.media.length ? A.media[below(A.media.length)] : null;
+        const items = e ? [
+          { title: e.title, type: e.type, year: e.year, language: e.language, ext: { anilist: "b" + i }, aka: ["Batch Alias " + i], original_title: "Batch Orig " + i },
+          { title: "Other Name " + i, ext: { anilist: "b" + i } },
+          { title: "Batch Alias " + i, type: e.type },
+          { title: "Batch Orig " + i, type: e.type },
+          { ...c, title: c.title.toUpperCase() + "!", ext: c.ext, source: { ...c.source, ref: "dup-" + i } },
+        ] : [{ ...c, title: c.title.toUpperCase() + "!", source: { ...c.source, ref: "dup-" + i } }];
+        let picked = items.filter(() => rnd() < 0.7);
+        if (!picked.length) picked = [items[0]];
+        const batch = [c, ...picked];
+        differ("addMany", ...both((C, db) => C.addMany(db, clone(batch))));
+        if (e) differ("addMany target", A.media.find((m) => m.id === e.id), B.media.find((m) => m.id === e.id));
+        differ("addMany front", A.media.slice(0, batch.length), B.media.slice(0, batch.length));
+        out.batches++;
+      } else differ("add", ...both((C, db) => { const r = C.add(db, clone(c)); return r && { id: r.entry.id, created: r.created, merged: r.merged }; }));
       out.peak = Math.max(out.peak, B.media.length);
       for (let k = 0; k < probesPer; k++) {
         probe(cands[Math.min(cands.length - 1, i + 1 + below(3))]);  // titles not added yet, some of them near-duplicates of stored ones
@@ -233,6 +251,7 @@ def test_the_indexed_lookup_gives_the_old_answers_on_generated_lists(phone, n, s
     assert r["probes"] >= 2 * n and r["ops"] >= n   # a lot was asked and done
     assert r["found"] >= 0.2 * r["probes"]           # and many of the questions had an entry for an answer, not only "none"
     assert r["peak"] >= 0.4 * n                      # the list grew to a real size before it was emptied
+    assert r["batches"] >= n // 10                   # and addMany was used too, on batches of near-duplicates
 
 
 # What the old code decided, written out. Both the new Catalog and the old copy must give exactly these answers. (The old code
@@ -417,6 +436,48 @@ def test_the_index_follows_add_merge_rename_update_remove_and_details(phone):
     assert f["mergedGone"] is None
     assert f["removed"] == [None, None, None, None] and f["addedAgain"] is True
     assert f["details"] == [True, True]
+
+
+def test_an_entry_that_is_in_the_list_twice_is_handled_as_before(phone):
+    """Nothing in the app does this, but the old code coped with it: removing, merging or looking up an entry that is in the list twice
+    must not throw, must leave the same list as the old code, and no answer may be an entry that was removed."""
+    _ready(phone)
+    r = phone.evaluate(r"""() => {
+      const base = { media: [] };
+      Catalog.addMany(base, genTitles(60, 71, 0.3));
+      const raw = JSON.stringify(base.media);
+      const make = () => { const db = { media: JSON.parse(raw) }; db.media.push(db.media[5]); db.media.unshift(db.media[9]); return db; };  // entries 5 and 9 are in the list twice
+      const A = make(), B = make();   // A is kept by the new Catalog, B by the old one
+      const twice = A.media[6].id, front = A.media[0].id, other = A.media[20].id;
+      const out = { bad: [], threw: null };
+      const same = (what) => {
+        if (JSON.stringify(A.media) !== JSON.stringify(B.media)) out.bad.push(what + ": the lists differ");
+        const a = agree(A);
+        if (a.bad.length || a.stale) out.bad.push(what + ": answers " + JSON.stringify(a.bad.slice(0, 2)));
+      };
+      // the same clock for both, as in equivalence(): the new Catalog and the old one run one after the other, and the stored times must agree
+      const real = Date.now;
+      let clock = 1.7e12;
+      Date.now = () => clock;
+      const both = (fn) => { clock += 1000; const x = fn(Catalog, A); const y = fn(CatalogRef, B); return [x, y]; };
+      try {
+        same("built");
+        const [m1, m2] = both((C, db) => C.merge(db, twice, other));
+        if (m1.id !== m2.id) out.bad.push("merge kept another entry");
+        same("merged");
+        both((C, db) => C.remove(db, front));                              // the entry that is in front and again further down
+        same("removed");
+        out.gone = Catalog.get(A, front);
+        const again = A.media.find((m, i) => A.media.indexOf(m) !== i);    // one that is still there twice, if any
+        if (again) { both((C, db) => C.remove(db, again.id)); same("removed again"); }
+        const [x, y] = both((C, db) => C.add(db, { title: "After The Removals" }));
+        if (x.entry.id !== y.entry.id || x.created !== y.created) out.bad.push("add after");
+        same("added");
+      } catch (e) { out.threw = e.message; } finally { Date.now = real; }
+      return out;
+    }""")
+    assert r["threw"] is None and r["bad"] == []
+    assert r["gone"] is None
 
 
 def test_the_index_is_dropped_when_the_list_is_replaced(phone):

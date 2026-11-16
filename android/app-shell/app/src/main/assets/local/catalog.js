@@ -1,7 +1,8 @@
 /* Reel Shelf watchlist: movies, series, dramas, anime, manga and every other kind of title, from screenshots and reels.
    No AI and no network here: this file only stores, merges (dedupes), filters and counts titles.
    Other parts of the app write into it through Catalog.add(db, candidate) and Catalog.verify(db, id, facts).
-   Stored inside the same library file as the reels: db.media (titles) and db.mediaTypes (categories you added). */
+   Stored inside the same library file as the reels: db.media (titles) and db.mediaTypes (categories you added).
+   Rule for other files: REPLACE aka and ext (m.aka = [...], m.ext = {...}), never change them in place: the lookup index sees only a new array or object. */
 "use strict";
 
 const Catalog = (() => {
@@ -134,7 +135,7 @@ const Catalog = (() => {
       this.names = new Map(); // cleaned name -> entries
       this.exts = new Map();  // "tmdb\u0000603" -> entries
       this.ids = new Map();   // entry id -> entries
-      for (const m of list) this.recs.push(this.file(m));
+      for (const m of list) this.recs.push(this.at.get(m) || this.file(m));  // an entry that is in the list twice is filed once
     }
     put(map, key, m) { const b = map.get(key); if (b) b.push(m); else map.set(key, [m]); }
     cut(map, key, m) {
@@ -162,7 +163,7 @@ const Catalog = (() => {
     }
     refresh(m) { const r = this.at.get(m); if (r) { this.unfile(r); this.file(m); } }  // its names or ids changed
     add(m) { this.recs.unshift(this.file(m)); }  // m was just put at the front of the list
-    remove(m) { this.unfile(this.at.get(m)); this.at.delete(m); }
+    remove(m) { const r = this.at.get(m); if (r) { this.unfile(r); this.at.delete(m); } }
     adopt(list) { this.list = list; this.recs = this.recs.filter((r) => this.at.has(r.m)); indexes.set(list, this); }  // the list was replaced by a copy without the removed entries
     /** True when this describes `list`: the same entries in the same order (false: build a new one). */
     sync(list) {
