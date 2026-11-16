@@ -114,7 +114,7 @@ const Catalog = (() => {
 
   // ---------------------------------------------------------------- the lookup index (memory only, never saved)
   // Every add and every online check asks "is this title already in the list?". Reading the whole list for each answer (and
-  // cleaning every stored name again) made adding 5,000 titles take 24 seconds. The index files each entry under its cleaned
+  // cleaning every stored name again) made adding 5,000 titles take over ten seconds. The index files each entry under its cleaned
   // names (title, original title, other names), its database ids and its own id, so a question only reads the few entries
   // that can match. The matching rules are still the ones in findSame, run on those entries: the index only narrows where
   // to look. When two entries match, the one that comes first in the list is read off the list itself, so the order is never
@@ -179,7 +179,7 @@ const Catalog = (() => {
     first(entries) {
       if (entries.length < 2) return entries[0] || null;
       const want = new Set(entries);
-      return this.list.find((m) => want.has(m));
+      return this.list.find((m) => want.has(m)) || null;
     }
     get(id) { return this.first(this.ids.get(id) || []); }
 
