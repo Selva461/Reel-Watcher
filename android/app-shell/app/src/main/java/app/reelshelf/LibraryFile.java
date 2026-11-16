@@ -254,12 +254,13 @@ final class LibraryFile {
     }
 
     /**
-     * Whether a schema value is newer than this build supports. Only a number above {@code supported} is: a file that
-     * says nothing (no key, null), 0, a negative number, 1 or 1.0 is read as before, and so is a value that is not a
-     * number at all ("2", true, a list): no release ever wrote one, so it is no sign of a newer Reel Shelf, and locking
-     * the library for it would take away a library nothing is known to be wrong with. 1.5 and numbers too big for a
-     * long are newer (a bigger number than we know, whatever it is; JSON has no NaN or Infinity to compare).
-     * local.js (loadDb) and shots.js (load) apply the same rule.
+     * Whether a schema value is newer than this build supports: only a NUMBER above {@code supported} is, whatever it is
+     * (2, 1.5, a number too big for a long: it is a bigger number than we know). Everything else is read as before: no key,
+     * null, 0, a negative number, 1 or 1.0, and a value that is not a number at all ("2", true, a list). No release ever
+     * wrote one of those, so it is no sign of a newer Reel Shelf, and locking the library for it would take away a library
+     * nothing is known to be wrong with. The test is on the double value: a number a double cannot hold (1e999) is newer, and
+     * NaN (not valid JSON anyway) is not. local.js (isNewer) and shots.js (load) apply the same rule, and the tests of both
+     * use the same list of odd values.
      */
     private boolean newer(Object schema) {
         return schema instanceof Number && ((Number) schema).doubleValue() > supported;
