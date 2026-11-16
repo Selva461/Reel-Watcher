@@ -112,26 +112,104 @@ const Catalog = (() => {
     return same ? true : null;
   }
 
+  // ---------------------------------------------------------------- the lookup index (memory only, never saved)
+  // Every add and every online check asks "is this title already in the list?". Reading the whole list for each answer (and
+  // cleaning every stored name again) made adding 5,000 titles take 24 seconds. The index files each entry under its cleaned
+  // names (title, original title, other names), its database ids and its own id, so a question only reads the few entries
+  // that can match. The matching rules are still the ones in findSame, run on those entries: the index only narrows where
+  // to look, and remembers each entry's place in the list (the first match in list order wins, as it always did).
+  // It lives in a WeakMap keyed by the db.media array, so it is never saved and a new array (load, reload, a filter) starts
+  // with a fresh one. add, merge, update, remove, verify and setDetails keep it current; the array's length and its first
+  // and last entry are checked on every use, so an entry put in or taken out by other code makes it rebuild itself.
+  // Code that edits a title, original_title, aka or ext of an entry in place must do it through those functions.
+  const indexes = new WeakMap();  // db.media -> Index
+  const homes = new WeakMap();    // entry -> the Index that lists it (setDetails has no db)
+  const extKey = (k, v) => `${k}\u0000${v}`;
+  class Index {
+    constructor(list) {
+      this.list = list;
+      this.at = new Map();    // entry -> { rank, names, exts, id }; rank is its place in the list, lower is earlier
+      this.front = 0;         // a new title goes to the front of the list: a rank lower than all the others
+      this.names = new Map(); // cleaned name -> entries
+      this.exts = new Map();  // "tmdb\u0000603" -> entries
+      this.ids = new Map();   // entry id -> entries
+      list.forEach((m, i) => this.file(m, i));
+      this.mark();
+    }
+    mark() { this.len = this.list.length; this.head = this.list[0]; this.tail = this.list[this.len - 1]; }
+    fresh(list) { return list === this.list && list.length === this.len && list[0] === this.head && list[this.len - 1] === this.tail; }
+    put(map, key, m) { const b = map.get(key); if (b) b.push(m); else map.set(key, [m]); }
+    cut(map, key, m) {
+      const b = map.get(key);
+      if (!b) return;
+      const i = b.indexOf(m);
+      if (i >= 0) b.splice(i, 1);
+      if (!b.length) map.delete(key);
+    }
+    file(m, rank) {
+      const names = [...new Set([m.title, m.original_title, ...(m.aka || [])].map(normTitle))].filter(Boolean);  // "" never matches
+      const exts = Object.entries(m.ext || {}).filter(([, v]) => v).map(([k, v]) => extKey(k, v));
+      for (const k of names) this.put(this.names, k, m);
+      for (const k of exts) this.put(this.exts, k, m);
+      this.put(this.ids, m.id, m);
+      this.at.set(m, { rank, names, exts, id: m.id });
+      homes.set(m, this);
+    }
+    unfile(m) {
+      const f = this.at.get(m);
+      for (const k of f.names) this.cut(this.names, k, m);
+      for (const k of f.exts) this.cut(this.exts, k, m);
+      this.cut(this.ids, f.id, m);
+    }
+    refresh(m) {  // its names or ids changed
+      const f = this.at.get(m);
+      if (!f) return;
+      this.unfile(m);
+      this.file(m, f.rank);
+    }
+    add(m) { this.file(m, --this.front); this.mark(); }  // m was just put at the front of the list
+    remove(m) { this.unfile(m); this.at.delete(m); if (homes.get(m) === this) homes.delete(m); }
+    adopt(list) { this.list = list; indexes.set(list, this); this.mark(); }  // the list was replaced by a copy without some entries
+    before(a, b) { return this.at.get(a).rank < this.at.get(b).rank; }
+    get(id) { let hit = null; for (const m of this.ids.get(id) || []) if (!hit || this.before(m, hit)) hit = m; return hit; }
+
+    /** What findSame answers, never `skip` (the entry being checked, when it is looked up in its own list). */
+    find(db, c, skip) {
+      const ea = c.ext || {};
+      let same = null;
+      for (const k of Object.keys(ea)) {  // an entry with the same database id: the first one in the list
+        if (!ea[k]) continue;
+        for (const m of this.exts.get(extKey(k, ea[k])) || []) if (m !== skip && (!same || this.before(m, same)) && idsMatch(c, m) === true) same = m;
+      }
+      if (same) return same;
+      const key = normTitle(c.title);
+      const g = groupOf(db, c.type);
+      let best = null;
+      for (const m of key ? this.names.get(key) || [] : []) {  // the rules below are the old loop's, on the entries that carry the name
+        if (m === skip) continue;
+        const ids = idsMatch(c, m);
+        if (ids === true) return m;
+        if (ids === false) continue;
+        if (groupOf(db, m.type) !== g) continue;
+        if (!yearsMatch(c.year, m.year)) continue;
+        if (c.language && m.language && c.language !== m.language) continue;
+        const checked = m.verified === "verified";
+        const bestChecked = !!best && best.verified === "verified";
+        if (!best || (checked && !bestChecked) || (checked === bestChecked && this.before(m, best))) best = m;  // checked beats unchecked, then the earlier
+      }
+      return best;
+    }
+  }
+  function indexOf(db) {
+    const list = db.media;
+    let ix = indexes.get(list);
+    if (!ix || !ix.fresh(list)) { ix = new Index(list); indexes.set(list, ix); }
+    return ix;
+  }
+
   /** The stored entry a candidate is the same title as, or null. Same database id wins; else same title + same group
       (watch/read) + years within one + not two different languages. Anime and its manga stay separate on purpose. */
-  function findSame(db, c) {
-    const list = db.media || [];
-    const key = normTitle(c.title);
-    const g = groupOf(db, c.type);
-    let best = null;
-    for (const m of list) {
-      const ids = idsMatch(c, m);
-      if (ids === true) return m;
-      if (ids === false) continue;
-      if (groupOf(db, m.type) !== g) continue;
-      const names = [m.title, m.original_title, ...(m.aka || [])].map(normTitle);
-      if (!key || !names.includes(key)) continue;
-      if (!yearsMatch(c.year, m.year)) continue;
-      if (c.language && m.language && c.language !== m.language) continue;
-      if (!best || (m.verified === "verified" && best.verified !== "verified")) best = m;
-    }
-    return best;
-  }
+  function findSame(db, c) { return db.media ? indexOf(db).find(db, c, null) : null; }
 
   // ---------------------------------------------------------------- writing (the API other parts of the app use)
 
@@ -152,14 +230,15 @@ const Catalog = (() => {
     if (inTitle) title = title.slice(0, inTitle.index).trim();
     if (!title) return null;
     db.media = db.media || [];
+    const ix = indexOf(db);
     const cand = { ...c, title, type: typeId(db, c.type || "movie"), language: langCode(c.language), year: toYear(c.year) || (inTitle ? Number(inTitle[1]) : null) };
     const now = Date.now();
     const src = c.source ? { kind: c.source.kind || "manual", ref: clean(c.source.ref, 500), method: clean(c.source.method, 40),
       text: clean(c.source.text, 500), confidence: num01(c.source.confidence, c.confidence), at: c.source.at || now } : null;
-    let m = findSame(db, cand);
+    let m = ix.find(db, cand, null);
     const created = !m;
     if (!m) {
-      m = { id: newId(db, title), title, type: cand.type, year: cand.year || null, language: cand.language || "", original_title: "", aka: [],
+      m = { id: newId(ix, title), title, type: cand.type, year: cand.year || null, language: cand.language || "", original_title: "", aka: [],
         genres: [], country: "", poster: "", overview: "", ext: {}, status: "want", verified: "unverified", confidence: 0, sources: [],
         added_at: now, updated_at: now };
       db.media.unshift(m);
@@ -182,6 +261,7 @@ const Catalog = (() => {
     if (src && !m.sources.some((s) => sourceKey(s) === sourceKey(src))) m.sources.push(src);
     m.confidence = Math.max(m.confidence || 0, num01(cand.confidence, src && src.confidence));
     m.updated_at = now;
+    if (created) ix.add(m); else ix.refresh(m);  // its names or ids may have grown
     return { entry: m, created, merged: !created };
   }
 
@@ -217,9 +297,10 @@ const Catalog = (() => {
     m.verified_by = clean(by, 60);
     m.verified_at = Date.now();
     m.updated_at = Date.now();
+    const ix = indexOf(db);
+    ix.refresh(m);
     if (oldTitle !== m.title || facts.ext || facts.year) {  // it may now be a duplicate of another entry
-      const rest = { ...db, media: db.media.filter((x) => x !== m) };
-      const twin = findSame(rest, m);
+      const twin = ix.find(db, m, m);  // looked up among the others
       if (twin) return merge(db, twin.id, m.id);
     }
     return m;
@@ -234,7 +315,11 @@ const Catalog = (() => {
         year: toYear(x.year) || null, title: clean(x.title || "", 120) })).filter((x) => x.n > 0);
       if (d.seasons_by) m.seasons_by = clean(d.seasons_by, 80); else delete m.seasons_by;
     }
-    if (d && /^tt\d+$/.test(d.imdb || "")) m.ext = { ...(m.ext || {}), imdb: d.imdb };
+    if (d && /^tt\d+$/.test(d.imdb || "")) {
+      m.ext = { ...(m.ext || {}), imdb: d.imdb };
+      const ix = homes.get(m);
+      if (ix) ix.refresh(m);
+    }
   }
 
   /** Fold entry `fromId` into `intoId` (sources, names, genres). Returns the kept entry. */
@@ -252,7 +337,11 @@ const Catalog = (() => {
     keep.confidence = Math.max(keep.confidence || 0, drop.confidence || 0);
     if (drop.status && drop.status !== "want" && keep.status === "want") keep.status = drop.status;
     keep.updated_at = Date.now();
+    const ix = indexOf(db);
+    ix.refresh(keep);
+    ix.remove(drop);
     db.media = db.media.filter((x) => x !== drop);
+    ix.adopt(db.media);
     return keep;
   }
 
@@ -267,10 +356,19 @@ const Catalog = (() => {
     if (patch.status && STATUS[patch.status]) m.status = patch.status;
     if (patch.note != null) m.note = clean(patch.note, 2000);
     m.updated_at = Date.now();
+    indexOf(db).refresh(m);  // the title may have changed
     return m;
   }
-  function remove(db, id) { db.media = (db.media || []).filter((m) => m.id !== id); }
-  function get(db, id) { return (db.media || []).find((m) => m.id === id) || null; }
+  function remove(db, id) {
+    const old = db.media || [];
+    const ix = indexes.get(old);
+    db.media = old.filter((m) => m.id !== id);
+    if (ix && ix.fresh(old)) {  // the index follows the new array without being built again
+      for (const m of [...(ix.ids.get(id) || [])]) ix.remove(m);
+      ix.adopt(db.media);
+    }
+  }
+  function get(db, id) { return db.media ? indexOf(db).get(id) : null; }
 
   /** Entries the online check should look at: never checked (or changed since), newest first. */
   function toVerify(db, since = 0) {
@@ -350,10 +448,10 @@ const Catalog = (() => {
   }
   function toYear(v) { const m = String(v || "").match(/(18|19|20)\d\d/); return m ? Number(m[0]) : null; }
   function num01(...vs) { for (const v of vs) { const n = Number(v); if (v != null && v !== "" && isFinite(n)) return Math.max(0, Math.min(1, n)); } return 0; }
-  function newId(db, title) {
+  function newId(ix, title) {
     const base = "m-" + (normTitle(title).replace(/ /g, "-").slice(0, 40) || "title");
     let id = base;
-    for (let i = 2; (db.media || []).some((m) => m.id === id); i++) id = `${base}-${i}`;
+    for (let i = 2; ix.ids.has(id); i++) id = `${base}-${i}`;
     return id;
   }
   function fuzzyIn(w, hay) {  // one typo allowed
