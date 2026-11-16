@@ -2,16 +2,16 @@
 
 Read, in this order (about 10 minutes): `CLAUDE.md`, `docs/PROJECT_CONTINUATION.md`, then this file. The design documents `docs/design/S4-backup-restore.md` and `docs/design/A1-R4-retry-and-schema.md` are for the tasks listed below. Then VERIFY the live state, do not trust any file over the repository: `git fetch --all`, the open PR list, the default branch head and version, the latest GitHub Actions runs.
 
-## What was true when this was written (2026-11-16, about 04:00 UTC)
-- Default branch `ccr-d0c0b070-bdpssy` at `cf5d8ca`, app 1.3.11 / versionCode 18. Merged since the last record: #39 (docs), #38 (the agent team in `.claude/agents/`), #41 (CI runs tests once, flaky UI tests fixed).
-- Open and waiting for the owner: PR #37 (Task 4, all checks green, device checks E13-E19), PR #40 (R5: manual-only release publishing; only the owner merges), PR #33 (Task 2b, refresh and renumber, device checks E9-E11).
-- Agents in flight (check `git ls-remote --heads origin`): R4-1 `test/r4-1-upgrade-fixtures` (tests only), P2 `performance/p2-search-index-related`, then P3 from `wip/p3-watchlist-index`. They stopped once at the 5-hour usage limit; resume, do not restart.
+## What was true when this was written (2026-11-16, about 04:50 UTC)
+- Default branch `ccr-d0c0b070-bdpssy` at `19bbd58`, app 1.3.11 / versionCode 18. Merged since the last record: #42 (docs), #43 (R4-1 upgrade fixtures and round-trip tests), #45 (R4-1b review follow-ups): all tests or docs, nothing published.
+- Open and waiting for the owner (all publishing PRs, never merged by the AI): #37 (Task 4, device checks E13-E19), #44 (P2 search speed, 1.3.13 / 20, independent review SAFE TO MERGE, device check E20), #40 (R5: manual-only release publishing; only the owner merges), #33 (Task 2b, refresh and renumber, device checks E9-E11). Order: #37, #44, P3, R4-2.
+- In flight (check `git ls-remote --heads origin`): P3 `performance/p3-watchlist-index` (stacked on the P2 branch, 1.3.14 / 21). Agents stopped once at the 5-hour usage limit; resume, do not restart.
 
 ## Do this (in order)
-1. Open the PR list. For each of #37, #38, #33: re-check status; do not redo finished work.
-2. If the P2, P3, R3 branches exist: open one PR each, get the checks green, get an independent Opus review (`independent-reviewer`), fix Critical and High findings. R3 changes only CI and tests, so it may be merged under the standing conditions.
-3. Release rule: a PR that changes `android/app-shell/**` OR `.github/workflows/android-apk.yml` publishes a public release when merged (CI; the workflow is in its own push paths, so even a Dependabot bump of it publishes). The owner said not to publish automatically. So such PRs are verified and LEFT READY, not merged, until the owner decides (see "UNRESOLVED CONFLICT" in `docs/PROJECT_CONTINUATION.md` section 12). Propose "R5": make the publish step of `android-apk.yml` manual-only; the owner merges that one.
-4. Next unblocked task that publishes nothing: R4-1 (upgrade fixtures and round-trip tests, tests only), see `docs/design/A1-R4-retry-and-schema.md`.
+1. Open the PR list. For each of #37, #44, #40, #33: re-check status; do not redo finished work.
+2. If the P3 branch (`performance/p3-watchlist-index`) exists and its agent has reported: open its PR (stacked on #44), get the checks green, get an independent Opus review (`independent-reviewer`), fix Critical and High findings, leave it READY. P2 is PR #44, R3 and R4-1 are merged.
+3. Release rule: a PR that changes `android/app-shell/**` OR `.github/workflows/android-apk.yml` publishes a public release when merged (CI; the workflow is in its own push paths, so even a Dependabot bump of it publishes). The owner said not to publish automatically. So such PRs are verified and LEFT READY, not merged, until the owner decides (see "UNRESOLVED CONFLICT" in `docs/PROJECT_CONTINUATION.md` section 12). R5 (PR #40) makes the publish step manual-only; the owner merges that one.
+4. Next roadmap task: R4-2 (`schema_version` and the "newer library" rule), see `docs/design/A1-R4-retry-and-schema.md`; its prerequisite R4-1 is merged. It changes app code, so stack it on the P3 branch (1.3.15 / 22), add a data-integrity review, and leave it READY.
 5. Keep `docs/PROJECT_CONTINUATION.md` and this file current after every PR.
 
 ## Do not
