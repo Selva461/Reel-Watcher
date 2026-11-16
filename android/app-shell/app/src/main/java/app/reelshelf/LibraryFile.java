@@ -89,6 +89,8 @@ final class LibraryFile {
     private final int supported;
     /** The schema number of the NEWER file, rounded up to a whole number (0 unless the state is NEWER). */
     private long found;
+    /** The file that made the state NEWER: main, or the backup when main is damaged. This is the one "Save a copy" gives out. */
+    private File newerFile;
     private State state = State.MISSING;
     private boolean locked;
     /** The file on disk was read (or written) by this process and found good: only then may it become the backup. */
@@ -180,7 +182,7 @@ final class LibraryFile {
     /** The file's text; "" when there is none or it is locked (see {@link #state()}). Restores a good backup when needed. */
     synchronized String read() {
         Good now = good(main);
-        if (now != null && newer(now.schema)) return lockNewer(now.schema);  // before anything else, and whatever its shape: no restore, no rename, no write
+        if (now != null && newer(now.schema)) return lockNewer(now.schema, main);  // before anything else, and whatever its shape: no restore, no rename, no write
         if (now != null && now.shapeOk) {
             trusted = true;
             locked = false;
@@ -191,7 +193,7 @@ final class LibraryFile {
         Good old = good(bak);
         // The file is damaged, so nothing can be said about it, but the backup was saved by a newer Reel Shelf. Restoring
         // it is the newer version's job (it knows the format): this one leaves both files exactly as they are.
-        if (old != null && newer(old.schema)) return lockNewer(old.schema);
+        if (old != null && newer(old.schema)) return lockNewer(old.schema, bak);
         if (old != null && old.shapeOk) {
             try {
                 if (hadMain) remember(quarantine(main));
@@ -258,16 +260,18 @@ final class LibraryFile {
      * (2, 1.5, a number too big for a long: it is a bigger number than we know). Everything else is read as before: no key,
      * null, 0, a negative number, 1 or 1.0, and a value that is not a number at all ("2", true, a list). No release ever
      * wrote one of those, so it is no sign of a newer Reel Shelf, and locking the library for it would take away a library
-     * nothing is known to be wrong with. The test is on the double value: a number a double cannot hold (1e999) is newer, and
-     * NaN (not valid JSON anyway) is not. local.js (isNewer) and shots.js (load) apply the same rule, and the tests of both
-     * use the same list of odd values.
+     * nothing is known to be wrong with. The test is on the double value, so a number too big for a double (1e999) is newer,
+     * and NaN (not valid JSON anyway) is not. That 1e999 is read as a number at all is verified on the JVM org.json that
+     * the unit tests use only, NOT on Android's own org.json; no release writes such a value, so nothing depends on it.
+     * local.js (isNewer) and shots.js (load) apply the same rule, and the tests of both use the same list of odd values.
      */
     private boolean newer(Object schema) {
         return schema instanceof Number && ((Number) schema).doubleValue() > supported;
     }
 
-    private String lockNewer(Object schema) {
+    private String lockNewer(Object schema, File from) {
         found = (long) Math.ceil(((Number) schema).doubleValue());  // a whole number, at most Long.MAX_VALUE
+        newerFile = from;
         trusted = false;
         locked = true;
         state = State.NEWER;
@@ -374,6 +378,7 @@ final class LibraryFile {
      * place, else the one just set aside. Null when there is none.
      */
     synchronized File unreadableFile() {
+        if (state == State.NEWER && newerFile != null && newerFile.isFile()) return newerFile;  // the newer library itself, even when main is a cut file beside a newer backup  // the newer library itself, even when main is a cut file beside a newer backup
         if (locked) return main.exists() ? main : bak.exists() ? bak : null;
         if (state == State.OK || state == State.MISSING) return main.isFile() ? main : null;
         return setAside != null && setAside.isFile() ? setAside : null;

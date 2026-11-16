@@ -536,6 +536,37 @@ public class LibraryFileTest {
     }
 
     @Test
+    public void saveACopyGivesTheNewerLibraryEvenWhenMainIsACutFileBesideANewerBackup() throws Exception {
+        File dir = tmp.newFolder();
+        String cut = NEWER.substring(0, 20);
+        put(new File(dir, "reels.json"), cut);
+        put(new File(dir, "reels.json.bak"), NEWER);
+        String[] before = names(dir);
+        LibraryFile f = LibraryFile.reels(dir);
+        f.read();
+        assertEquals(LibraryFile.State.NEWER, f.state());
+        assertEquals("the file that made it NEWER, not the cut main", f.bak, f.unreadableFile());
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        assertEquals(NEWER.length(), f.copyUnreadableTo(out));
+        assertEquals("the copy is the newer library, byte for byte", NEWER, out.toString("UTF-8"));
+        assertEquals(cut, get(f.main));
+        assertEquals(NEWER, get(f.bak));
+        assertArrayEquals("every file is still there, none added", before, names(dir));
+        assertEquals(0, badFiles(dir, "reels.json").length);
+        // the normal case: a newer main is the file given out, with an older backup beside it
+        File dir2 = tmp.newFolder();
+        put(new File(dir2, "reels.json"), NEWER);
+        put(new File(dir2, "reels.json.bak"), V2);
+        LibraryFile g = LibraryFile.reels(dir2);
+        g.read();
+        assertEquals(g.main, g.unreadableFile());
+        ByteArrayOutputStream out2 = new ByteArrayOutputStream();
+        assertEquals(NEWER.length(), g.copyUnreadableTo(out2));
+        assertEquals(NEWER, out2.toString("UTF-8"));
+        assertEquals(V2, get(g.bak));
+    }
+
+    @Test
     public void aNewerFileWhoseShapeChangedIsNewerNotDamaged() throws Exception {
         File dir = tmp.newFolder();
         String changed = "{\"schema_version\":2,\"reels\":{\"AAAAA1\":{\"status\":\"new\"}}}";  // "reels" is a map now: the old shape check would call this damaged
@@ -580,7 +611,8 @@ public class LibraryFileTest {
             {"1", "ok"}, {"1.0", "ok"}, {"1e0", "ok"},
             {"\"2\"", "ok"}, {"\"99\"", "ok"}, {"\"\"", "ok"}, {"true", "ok"}, {"[2]", "ok"}, {"{\"n\":2}", "ok"},  // not a number: no release wrote one
             {"2", "newer"}, {"99", "newer"}, {"2.0", "newer"}, {"1.5", "newer"}, {"1.0000001", "newer"},
-            {"9999999999999999999999", "newer"}, {"1e308", "newer"}, {"1e999", "newer"},  // huge
+            {"9999999999999999999999", "newer"}, {"1e308", "newer"},  // huge
+            {"1e999", "newer"},  // verified on the JVM org.json of these unit tests only, NOT on Android's own org.json (no release writes such a value)
     };
 
     @Test
@@ -603,6 +635,7 @@ public class LibraryFileTest {
 
     @Test
     public void theNumberReportedForANewerFileIsRoundedUpAndNeverBelowWhatIsSupported() throws Exception {
+        // 1e999: verified on the JVM org.json of these unit tests only, NOT on Android's own org.json (no release writes such a value)
         String[][] cases = {{"2", "2"}, {"99", "99"}, {"1.5", "2"}, {"1.0000001", "2"}, {"1e999", String.valueOf(Long.MAX_VALUE)}};
         for (String[] c : cases) {
             File dir = tmp.newFolder();
