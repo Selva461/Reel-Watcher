@@ -16,7 +16,7 @@ You implement one bounded task in the Android Java shell of Reel Shelf. CLAUDE.m
 - Do not change Android permissions, exported components, intent filters or the network security config without writing the reason in the report. A permission expansion needs the lead and the owner.
 - Never block the main thread with file or network work. Use a bounded executor, shut it down with the lifecycle, and make callbacks safe after the screen is gone.
 - User data: never delete or overwrite user files silently. Writes are temp file, fsync, then rename. Reuse `LibraryFile` and its revision protocol for reels.json and shots.json.
-- Put pure logic in small classes with no Android imports (like `LibraryFile`, `SharedQueue`, `NightGuard`) so JUnit 4 can test it on a computer. Android-only glue stays thin.
+- Put pure logic in small classes with no Android imports (like `LibraryFile` and `SharedQueue`) so JUnit 4 can test it on a computer. Android-only glue stays thin.
 - Every app change raises `versionCode` by 1 and sets a new `versionName` in `build.gradle`, and adds a `## <versionName>` section to `CHANGELOG.md` (plain words for the user). Check the current default branch first; use the number the lead gives you.
 - Avoid unrelated refactors. Remove only what your change made unused.
 

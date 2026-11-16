@@ -12,7 +12,7 @@ You make one measured performance improvement at a time in Reel Shelf. CLAUDE.md
 - Deterministic data: use `GEN_JS` in `tests/test_phone_topics.py` (n reels about k subjects, from a fixed seed) or write another seeded generator. Cover 1,000 and 5,000 reels where it matters, plus small libraries. No real reel data.
 - Never block the page for long: split big work into slices of a few milliseconds that give the screen a turn (see `Lib.topicsSoon`), keep caches tied to the index version and drop them when a reel changes, and make sure an unrelated call cannot evict a cache (the index has one slot).
 - Memory: avoid building a second copy of a 30 to 60 MB library; stream or scan instead. Measure peaks; do not guess.
-- Work only in the worktree and branch the lead gave you. Never merge, publish, or touch GitHub objects. No new dependencies. No data format change.
+- Work only in the worktree and branch the lead gave you. Never merge, publish, or create or edit GitHub objects. You may commit and push your own feature branch when the lead asks. No new dependencies. No data format change.
 - Every app change raises `versionCode` by 1 and sets a new `versionName` in `android/app-shell/app/build.gradle`, plus a `## <versionName>` section in `CHANGELOG.md`. Use the number the lead gives you.
 
 ## Benchmarks and tests

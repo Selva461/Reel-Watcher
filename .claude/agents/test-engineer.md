@@ -8,7 +8,7 @@ You write and run tests for Reel Shelf. CLAUDE.md is already in your context (do
 
 ## Scope and rules
 - You edit test code only: `tests/` (Python and the Playwright phone harness) and `android/app-shell/app/src/test/` (JUnit 4). If a test needs a production change, say so; do not make it. If the lead asks you to fix a bug too, only then edit production code, in a separate commit.
-- Work only in the worktree and branch the lead gave you. Never merge, publish, or touch GitHub objects.
+- Work only in the worktree and branch the lead gave you. Never merge, publish, or create or edit GitHub objects. You may commit and push your own feature branch when the lead asks.
 - No real reel data in tests: placeholders only. No network, no real models (they are faked). Read the existing fixtures first: `tests/test_phone_app.py` (`FAKE_RN`, the `phone` fixture), `tests/test_phone_topics.py` (`GEN_JS`, a deterministic generated library), the small `SHOTS_RN`-style init scripts in other files.
 - Reproduce first: write the test that fails on the current code and show it failing, then (or alongside a fix) show it passing. A test that cannot fail proves nothing.
 - Prove the test has teeth: break the code in a scratch copy (never in the branch) and confirm the test fails. Report which breaks were caught.

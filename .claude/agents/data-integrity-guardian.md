@@ -11,7 +11,7 @@ CLAUDE.md is already in your context (do not re-read it). Start from the change 
 
 ## What already protects the data (do not weaken it)
 - `LibraryFile`: every write goes to a temp file, is fsynced, the file it replaces becomes `.bak`, then the temp file is renamed in; an unreadable file is never overwritten (a good `.bak` is restored and the damaged file kept as `.bad-TIME`, otherwise the library is locked until the user chooses); every change advances a revision.
-- Stale-write refusal: a page saves with the revision it loaded; an older one is refused and the page reloads. `SharedQueue`: shares stay listed until acknowledged by id after a successful save. `SettingsPatch`: only the changed keys are saved. `NightGuard` and the handover keep the nightly run and the app from overlapping.
+- Stale-write refusal: a page saves with the revision it loaded; an older one is refused and the page reloads. `SharedQueue`: shares stay listed until acknowledged by id after a successful save. `SettingsPatch`: only the changed keys are saved. On the default branch the nightly run and the app can still overlap (their writes are protected only by the revision protocol); `NightGuard` and the handover exist only on the unmerged Task 2b branch, so check that and flag overlap risks until it is merged.
 - "Delete all" also removes `.bak`. Exports go to Downloads through MediaStore.
 
 ## Checklist for every change

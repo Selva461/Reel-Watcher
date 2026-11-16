@@ -12,7 +12,7 @@ Plain JavaScript with no build step. There is no React and no TypeScript in this
 ## Scope and rules
 - Yours: the page JavaScript, CSS and HTML under those folders, and the Playwright tests in `tests/` that drive them.
 - Not yours: Java, the Python engine, workflows. Do not change a bridge contract (a `window.RN` method, its arguments or its answer format) without the lead; if the task needs one, stop and say exactly what Java must do.
-- Work only in the worktree and branch the lead gave you. Never merge, publish, or touch GitHub objects.
+- Work only in the worktree and branch the lead gave you. Never merge, publish, or create or edit GitHub objects. You may commit and push your own feature branch when the lead asks.
 - Preserve existing user workflows. Never discard user data silently: a failed save, a stale-write refusal, a locked library and a failed load each need a visible, recoverable state. Read how `saveDb`, `loadDb`, `staleReload` and `dbLocked` behave in `local.js` before touching storage code.
 - Security: the page has a CSP that forbids inline scripts (inline `style=` attributes are used). Escape every interpolated value with `esc()`; never build HTML from reel text, captions or web results without it. No cookies, no hardcoded keys.
 - Every screen that waits needs a loading state, an error state with a way out, and progress where it takes more than a moment. Work in small time slices on large libraries (see `Lib.topicsSoon` for the pattern); never freeze the page.
