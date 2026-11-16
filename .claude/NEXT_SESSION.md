@@ -2,10 +2,10 @@
 
 Read, in this order (about 10 minutes): `CLAUDE.md`, `docs/PROJECT_CONTINUATION.md`, then this file. The design documents `docs/design/S4-backup-restore.md` and `docs/design/A1-R4-retry-and-schema.md` are for the tasks listed below. Then VERIFY the live state, do not trust any file over the repository: `git fetch --all`, the open PR list, the default branch head and version, the latest GitHub Actions runs.
 
-## What was true when this was written (2026-11-15, about 17:20 UTC)
-- Default branch `ccr-d0c0b070-bdpssy` at `f6a3f29`, app 1.3.11 / versionCode 18.
-- Open and waiting: PR #37 (Task 4, all checks green, waits for the owner's device checks E13-E19 and counts as a release), PR #38 (subagent team in `.claude/agents/` and CLAUDE.md rules), PR #33 (Task 2b, needs a refresh and renumber, owner device checks E9-E11).
-- The P2, P3, R3 and R4-1 agents stopped at the 5-hour usage limit (2026-11-15 17:25 UTC). Partial, unreviewed work is saved as `wip/p2-search-index-related`, `wip/p3-watchlist-index`, `wip/r3-single-test-run` (see `docs/PROJECT_CONTINUATION.md` section 3). Continue from those branches; do not start over, and do not merge them as they are. Nothing was merged overnight.
+## What was true when this was written (2026-11-16, about 04:00 UTC)
+- Default branch `ccr-d0c0b070-bdpssy` at `cf5d8ca`, app 1.3.11 / versionCode 18. Merged since the last record: #39 (docs), #38 (the agent team in `.claude/agents/`), #41 (CI runs tests once, flaky UI tests fixed).
+- Open and waiting for the owner: PR #37 (Task 4, all checks green, device checks E13-E19), PR #40 (R5: manual-only release publishing; only the owner merges), PR #33 (Task 2b, refresh and renumber, device checks E9-E11).
+- Agents in flight (check `git ls-remote --heads origin`): R4-1 `test/r4-1-upgrade-fixtures` (tests only), P2 `performance/p2-search-index-related`, then P3 from `wip/p3-watchlist-index`. They stopped once at the 5-hour usage limit; resume, do not restart.
 
 ## Do this (in order)
 1. Open the PR list. For each of #37, #38, #33: re-check status; do not redo finished work.
