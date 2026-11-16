@@ -558,9 +558,12 @@ def test_the_index_notices_what_other_code_does_to_the_list(phone):
 
 # ---------------------------------------------------------------- 3. fast, and no longer reading the whole list
 
-# Budgets for adding N titles (Catalog.addMany) and then checking N of them (Catalog.verify), in milliseconds. Desktop Chromium on the
-# machine these were set on measured 35 ms and 43 ms (1,000) and 140 ms and 1.2 s (5,000) on a loaded 4-core machine; the old code took about 1 s and 20 s to add, and 0.9 s and 30 s to check.
-BUDGET_MS = {1000: (300, 300), 5000: (1500, 6000)}
+# Budgets for adding N titles (Catalog.addMany) and then checking N of them (Catalog.verify), in milliseconds: (add, check) for 1,000
+# and for 5,000 titles. Desktop Chromium (not a phone) on a busy 4-core machine measured, with this code: 1,000 titles 30 to 43 ms to
+# add and 30 to 52 ms to check; 5,000 titles 124 to 146 ms to add and 1.1 to 1.3 s to check (the check is mostly the cheap pass that
+# compares the index with the list, one per call). The old code took 0.6 s and 0.4 to 0.55 s for 1,000, and 12 s and 14 s for 5,000.
+# So each budget is 5 times or more above what the new code needed, and below what the old code needed.
+BUDGET_MS = {1000: (300, 300), 5000: (1500, 7000)}
 
 
 @pytest.mark.parametrize("n", [1000, 5000])
