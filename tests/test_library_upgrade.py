@@ -3,7 +3,7 @@
 tests/fixtures/library/<version>/ holds reels.json and shots.json exactly as the page code of that release wrote them
 (see its README and tests/fixtures/make_library_fixtures.py; the data is synthetic). Each is loaded by the CURRENT page
 (loadDb, Shots.load), the page saves it again the way it does in use, and the saved text is compared with the loaded one
-by a recursive diff. The only differences allowed are the ones listed in EXPECTED below, with the reason for each.
+by a recursive diff. The only differences allowed are the ones listed by expected() below, with the reason for each.
 Anything else (a lost reel, a lost or changed field, a lost screenshot record, an extra key) fails the test.
 
 No network, no device: Chromium at phone size with the fake window.RN of test_phone_app.py."""
@@ -115,10 +115,21 @@ def expected(version):
 
 
 # What Shots.process adds to shots.json: the list of reel captions already read ("reels": code -> signature). A reel whose
-# caption was read after the last Process (FIXA0006, FIXA0007 have none) is read now and gets a signature. Nothing else
-# is added, and no picture record (seen) is ever changed.
-def expected_shots_additions(before, after):
-    return [("added", ("reels", c), after["reels"][c]) for c in after["reels"] if c not in before["reels"]]
+# caption was read after the last Process (FIXA0006 here) is read now and gets a signature. Nothing else is added, and
+# no picture record (seen) is ever changed. An added entry must be for a reel that is in the library, and its value must
+# have the shape the page writes (shots.js fromReels): "<length of the caption text>:<the reel's notes_at, or 0>", so
+# FIXA0006 (a caption, no notes) is "97:0".
+def expected_shots_additions(before, after, library):
+    reels = {r["code"]: r for r in library["reels"]}
+    out = []
+    for code, sig in after["reels"].items():
+        if code in before["reels"]:
+            continue
+        assert code in reels, "Process recorded a reel that is not in the library: %s" % code
+        m = re.fullmatch(r"(\d+):(\d+)", sig)
+        assert m and int(m[1]) > 0 and int(m[2]) == (reels[code].get("notes_at") or 0), "unexpected signature %r for %s" % (sig, code)
+        out.append(("added", ("reels", code), sig))
+    return out
 
 
 # ---------------------------------------------------------------- the fake phone
@@ -135,9 +146,16 @@ COUNT_RN = r"""
 """
 LINK = "https://www.instagram.com/reel/SHARE0001/"
 
+# The page's clock is pinned to the last timestamp in the fixtures (the generator's clock at its last step, 2026-01-06
+# 00:00 UTC), as in make_library_fixtures.py, so a rule that depends on the date (a retry, an age limit) cannot make
+# these results depend on the day the tests run. test_the_fixtures_are_there... checks that this really is their last timestamp.
+FIXTURES_NOW = 1767657600000
+FIXED_CLOCK = "window.__now = %d; Date.now = () => window.__now;" % FIXTURES_NOW
+
 
 def open_fixture(pg, version=None, reels=None, shots=None, **extra):
     r, s = texts(version) if version else ("", "")
+    pg.context.add_init_script(FIXED_CLOCK)
     pg.context.add_init_script(SHOTS_RN)
     pg.context.add_init_script(COUNT_RN)
     pg.open_with({"db": r if reels is None else reels, "shotsDb": s if shots is None else shots, **extra})
@@ -151,11 +169,21 @@ def shape_ok(reels, shots):
     return d, s
 
 
+def timestamps(value):
+    """Every millisecond timestamp (a number from 2020 on) anywhere in a parsed JSON value."""
+    if isinstance(value, dict):
+        value = value.values()
+    elif not isinstance(value, list):
+        return [value] if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 1.6e12 else []
+    return [t for v in value for t in timestamps(v)]
+
+
 def test_the_fixtures_are_there_for_every_released_version_that_has_a_tag():
     assert VERSIONS, "tests/fixtures/library is missing"
     assert NEWEST in VERSIONS and "1.3.6" in VERSIONS and "1.3.9" not in VERSIONS  # 1.3.9 was never released (no tag)
     for v in VERSIONS:
         assert (FIXTURES / v / "reels.json").is_file() and (FIXTURES / v / "shots.json").is_file(), v
+    assert max(t for v in VERSIONS for name in texts(v) for t in timestamps(json.loads(name))) == FIXTURES_NOW
 
 
 def test_the_diff_finds_what_it_must():
@@ -175,6 +203,7 @@ def test_a_library_from_every_release_is_saved_back_without_losing_anything(phon
     before = json.loads(texts(version)[0])
     codes = [r["code"] for r in before["reels"]]
     open_fixture(phone, version)
+    assert phone.evaluate("() => Date.now()") == FIXTURES_NOW
     # the library as the page saves it in use (every change of a reel ends in saveDb)
     assert phone.evaluate("() => saveDb()") is True
     reels_text = phone.rn()["db"]
@@ -199,7 +228,7 @@ def test_the_screenshot_list_and_the_library_survive_a_process_run(phone, versio
     after, after_shots = shape_ok(st["db"], st["shotsDb"])
     assert after_shots["v"] == before_shots["v"] == 1
     assert [r["code"] for r in after["reels"]] == [r["code"] for r in before["reels"]]
-    check_diff(diff(before_shots, after_shots), expected_shots_additions(before_shots, after_shots), "shots.json of " + version)
+    check_diff(diff(before_shots, after_shots), expected_shots_additions(before_shots, after_shots, after), "shots.json of " + version)
     assert after_shots["seen"] == before_shots["seen"] and len(before_shots["seen"]) == 5, "no screenshot record is lost or changed"
     check_diff(diff(before, after), expected(version), "reels.json of %s after Process" % version)
 
@@ -289,3 +318,77 @@ def test_the_old_migrations_of_loaddb_do_what_the_allowlist_says_and_nothing_mor
         ("added", ("verify_rules",), 4),  # Verify.migrate on a library from before the rules
         SCHEMA_STAMP,  # loadDb: a library with no schema_version gets 1
     ], "the hand-made library")
+
+
+# The migrations of Verify.migrate that DROP or DOWNGRADE titles. Every fixture holds only titles they leave alone (one
+# verified by two sources, one "not found"), so this HAND-MADE library, not written by any release, holds every case.
+# What the page does (verify.js, migrate), in this order, once per change of rules (`verify_rules`, absent = 0):
+#   rules < 2  a title with verified "conflict", or "unverified" with a `checked_at`, is put back to be checked again:
+#              verified "unverified", `checked_at` and `review` dropped
+#   rules < 4  a title verified by ONE source (verified_by without a "+", and not "you" or "phone AI") is downgraded:
+#              verified "unverified", `checked_at` and `check` dropped (verified_by and verified_at stay);
+#              a title with `seasons` but no `seasons_by` loses `details_at` (looked up again)
+#   rules < 3  every title that looks like a comment line or button ("12 likes Reply", "View 4 replies") is DELETED,
+#              unless it is verified
+#   then       verify_rules becomes 4
+def _title(id_, text, **kw):
+    m = {"id": id_, "title": text, "type": "movie", "year": None, "language": "", "aka": [], "genres": [], "ext": {}, "status": "want",
+         "verified": "unverified", "confidence": 0.6, "updated_at": 1, "added_at": 1,
+         "sources": [{"kind": "screenshot", "ref": "content://hand/1", "method": "ocr", "text": text, "confidence": 0.6, "at": 1}]}
+    m.update(kw)
+    return m
+
+
+CHECKED = 1767225600000
+SINGLE_CHECK = {"verdict": "verified", "by": "tmdb", "confidence": 0.9}
+REVIEW = {"choices": [{"title": "Hand Made Film", "year": 2001}]}
+HAND_TITLES = [
+    _title("m-single", "Single Source Film", verified="verified", verified_by="tmdb", verified_at=CHECKED, checked_at=CHECKED, check=SINGLE_CHECK),
+    _title("m-two", "Two Source Film", verified="verified", verified_by="tmdb+wikidata", verified_at=CHECKED, checked_at=CHECKED, check=SINGLE_CHECK),
+    _title("m-you", "Chosen By You", verified="verified", verified_by="you", verified_at=CHECKED, checked_at=CHECKED),
+    _title("m-ai", "Chosen By The Phone", verified="verified", verified_by="phone AI", verified_at=CHECKED, checked_at=CHECKED),
+    _title("m-conflict", "Waiting For You", verified="conflict", checked_at=CHECKED, review=REVIEW),
+    _title("m-notfound", "Not Found Film", checked_at=CHECKED, check={"verdict": "not_found"}),
+    _title("m-fresh", "Never Checked Film"),
+    _title("m-chrome", "12 likes Reply"),
+    _title("m-chrome-verified", "View 4 replies", verified="verified", verified_by="tmdb+wikidata", verified_at=CHECKED),
+    _title("m-conflict-chrome", "View 4 replies", verified="conflict", checked_at=CHECKED, review=REVIEW),
+    _title("m-seasons", "Seasons Looked Up", verified="verified", verified_by="tmdb+wikidata", seasons=[{"n": 1, "episodes": 8}], details_at=CHECKED),
+    _title("m-seasons-by", "Seasons Checked Twice", verified="verified", verified_by="tmdb+wikidata", seasons=[{"n": 1}], seasons_by="tmdb+anilist", details_at=CHECKED),
+]
+H = {m["id"]: m for m in HAND_TITLES}
+SINGLE = [("changed", ("media", "m-single", "verified"), "verified", "unverified"),
+          ("removed", ("media", "m-single", "checked_at"), CHECKED),
+          ("removed", ("media", "m-single", "check"), SINGLE_CHECK)]
+SEASONS = [("removed", ("media", "m-seasons", "details_at"), CHECKED)]
+# the exact differences, per rule version the library carries; the other titles must come back untouched
+HAND_EXPECTED = {
+    0: [("added", ("verify_rules",), 4)] + SINGLE + SEASONS + [
+        ("changed", ("media", "m-conflict", "verified"), "conflict", "unverified"),
+        ("removed", ("media", "m-conflict", "checked_at"), CHECKED),
+        ("removed", ("media", "m-conflict", "review"), REVIEW),
+        ("removed", ("media", "m-notfound", "checked_at"), CHECKED),
+        ("removed", ("media", "m-chrome"), H["m-chrome"]),                    # rule 3
+        ("removed", ("media", "m-conflict-chrome"), H["m-conflict-chrome"])],  # reset by rule 2, then deleted by rule 3
+    2: [("changed", ("verify_rules",), 2, 4)] + SINGLE + SEASONS + [  # rule 2 is done: the conflict and the not found stay as they are
+        ("removed", ("media", "m-chrome"), H["m-chrome"]),
+        ("removed", ("media", "m-conflict-chrome"), H["m-conflict-chrome"])],  # "conflict" is not "verified": deleted
+    3: [("changed", ("verify_rules",), 3, 4)] + SINGLE + SEASONS,              # rules 2 and 3 are done: nothing is deleted or reset
+}
+HAND_KEPT = {0: ["m-single", "m-two", "m-you", "m-ai", "m-conflict", "m-notfound", "m-fresh", "m-chrome-verified", "m-seasons", "m-seasons-by"]}
+HAND_KEPT[2] = HAND_KEPT[0]
+HAND_KEPT[3] = HAND_KEPT[0] + ["m-chrome", "m-conflict-chrome"]
+
+
+@pytest.mark.parametrize("rules", [0, 2, 3])
+def test_hand_made_titles_that_the_verify_migration_downgrades_resets_or_deletes(phone, rules):
+    """HAND-MADE (see the comment above): exactly the listed titles change, every other title and field comes back as it was."""
+    lib = {"reels": [], "inbox": [], "media": HAND_TITLES, "mediaTypes": []}
+    if rules:
+        lib["verify_rules"] = rules
+    open_fixture(phone, reels=json.dumps(lib))
+    assert phone.evaluate("() => saveDb()") is True
+    after = json.loads(phone.rn()["db"])
+    check_diff(diff(lib, after), HAND_EXPECTED[rules] + [SCHEMA_STAMP], "the hand-made titles at rules %d" % rules)  # SCHEMA_STAMP: loadDb adds schema_version 1 (R4-2)
+    assert sorted(m["id"] for m in after["media"]) == sorted(HAND_KEPT[rules]), "no title is lost beyond the listed ones"
+    assert after["verify_rules"] == 4
