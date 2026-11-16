@@ -16,7 +16,7 @@ Every reel code, creator, caption, title, brand, quote and note is invented (`FI
 1. `git archive v<version> android/app-shell/app/src/main/assets/local`: the page code of that release only.
 2. Opens that page in Chromium at phone size with the fake `window.RN` of `tests/test_phone_app.py` (plus the screenshot
    bridge of `tests/test_shots.py`), a fixed clock, and one fixed scenario, played with that page's own functions:
-   five things shared while the app was closed (three reel links, one YouTube short, a Meta AI answer for a new reel with
+   six things shared while the app was closed (three reel links, one YouTube short, a Meta AI answer for a new reel with
    a PRODUCTS line, one loose answer that stays in the inbox), an Instagram export with a collection, "Start" without
    the AI model (quick notes), "Start" with the model (one reel gets notes, the others fail), five screenshots read
    (titles, a quote, a product), an online check answered for two titles (one verified, one not found), "Ask Meta AI" on
@@ -34,21 +34,24 @@ Never fix a fixture by hand. If a fixture is wrong, change the generator and reg
 
 ## What is in them
 
-Every version has reels in the statuses `new`, `ready` or `ready_no_text`, `done` (notes by `phone`, by `meta`),
-`failed` (with quick notes from `auto`) and `working`, an inbox entry, `media` (the watchlist: verified, not found,
-typed, from a reel caption), `mediaTypes`, and `shots.json` with five pictures. Later versions add keys:
+Every version has reels in the statuses `new`, `ready` (`ready_no_text` from 1.3.0), `done` (notes by `phone` and by
+`meta`), `failed` (with quick notes from `auto`) and `working`, an inbox entry, `media` (the watchlist: one verified, one
+not found, one typed, some read from a reel caption), `mediaTypes`, and `shots.json` with five pictures. What the page of
+each release adds (checked against the files):
 
-| Versions | What the page of that release writes |
+| Versions | Difference in what the page writes |
 |---|---|
-| 1.0.0 | `reels`, `inbox`, `media`, `mediaTypes` (no quotes, no `lastNight`) |
-| 1.1.0, 1.2.0 | adds `quotes`, `lastNight` |
-| 1.3.0 to 1.3.2 | same keys, 1.3.x reel fields |
-| 1.3.3 to 1.3.5 | adds `verify_rules` (the title-check rule version) |
+| 1.0.0 | `reels`, `inbox`, `media`, `mediaTypes` only (no `quotes`, no `lastNight`) |
+| 1.1.0, 1.2.0 | adds `quotes` and `lastNight` |
+| 1.3.0 to 1.3.2 | reels gain `content` and `video_tried`; the new status `ready_no_text` |
+| 1.3.3 | adds `verify_rules` (2) |
+| 1.3.4 | `verify_rules` 3; titles gain `details_at` |
+| 1.3.5 | `verify_rules` 4 |
 | 1.3.6 to 1.3.11 | adds `products` |
 
-Several versions give byte-identical files (1.1.0 and 1.2.0; 1.3.0 to 1.3.2; 1.3.6, 1.3.7, 1.3.8, 1.3.10 and 1.3.11;
-and `shots.json` is the same in all of them). That is a finding, not a mistake: between 1.3.6 and 1.3.11 the code that
-writes the library did not change shape (only how it is protected and shown), so the same scenario writes the same
-bytes. They are kept per version anyway, so a future change that makes them differ is seen at once.
+Several versions give byte-identical files: 1.1.0 and 1.2.0; 1.3.0, 1.3.1 and 1.3.2; 1.3.6, 1.3.7, 1.3.8, 1.3.10 and
+1.3.11. `shots.json` is the same in all fourteen. That is a finding, not a mistake: the code that writes the library did not
+change shape between those releases (only how it is protected and shown), so the same scenario writes the same bytes.
+They are kept per version anyway, so a future release that writes something different shows up at once.
 
 There is no v1.3.9 tag (1.3.9 was never released), so there is no `1.3.9/`.
