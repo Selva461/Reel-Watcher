@@ -1,7 +1,10 @@
 name: Tests
 
 on:
+  # A pull request commit is already tested by pull_request below; running on push as well started the same
+  # ~5.5 minute run twice for every commit. Push only tests the default branch, after each merge.
   push:
+    branches: [ccr-d0c0b070-bdpssy]
   pull_request:
   schedule:
     - cron: "17 4 * * 1"  # weekly: catches newly published advisories in unchanged dependencies
