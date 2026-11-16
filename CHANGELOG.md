@@ -5,6 +5,15 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.13
+- Searching and opening a reel are much faster in a big library. With 5,000 reels, a search in the Library box or in **Ask**
+  now takes a few hundredths of a second instead of a quarter of a second, and a reel's screen opens about ten times
+  faster (the "Related reels" part was almost all of its time). Reels, order, scores and the lines shown for each are
+  exactly the same as before.
+- The words of your library are no longer re-read each time you type or open a reel: they are checked cheaply, and only
+  a reel you changed is read again. Changing a reel makes the next search or reel screen do a little more work once.
+- Not changed: the first search after the app starts still reads the whole library (a second or two with 5,000 reels).
+
 ## 1.3.11
 - A reel's "Topic: ..." link now always opens the group it counted. In a library of more than 500 reels, one subject
   could be cut into a big group and a small piece with the same words, and the link of a reel in the small piece

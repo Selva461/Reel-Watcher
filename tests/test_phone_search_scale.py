@@ -165,8 +165,8 @@ window.sameIndex = (a, b) => {
 };
 
 // the page's search, find and related-reels against REF: every question, at several limits, twice (the second time with what the
-// first one kept), and every reel in `targets`
-window.battery = (reels, queries, targets) => {
+// first one kept), and every reel in `targets`. withFilter: also the new fourth argument of Notes.search (not in the old code)
+window.battery = (reels, queries, targets, withFilter = false) => {
   const bad = [];
   let checked = 0, nonEmpty = 0;
   const check = (what, got, was) => { checked++; if (was.length) nonEmpty++; const m = sameHits(got, was); if (m) bad.push(what + ": " + m); };
@@ -184,7 +184,7 @@ window.battery = (reels, queries, targets) => {
           check("search " + JSON.stringify(q) + " limit " + lim, Notes.search(reels, q, lim), s.slice(0, lim));
         }
       }
-      check("search " + JSON.stringify(q) + " with a filter", Notes.search(reels, q, 8, (r) => accept(r)), s.filter((h) => accept(h.reel)).slice(0, 8));
+      if (withFilter) for (const lim of [1, 8, N]) check("search " + JSON.stringify(q) + " with a filter, limit " + lim, Notes.search(reels, q, lim, (r) => accept(r)), s.filter((h) => accept(h.reel)).slice(0, lim));
       check("search " + JSON.stringify(q) + " default limit", Notes.search(reels, q), s.slice(0, 20));
     }
     for (const t of targets) {
@@ -276,6 +276,21 @@ def test_generated_libraries_give_the_same_answers_as_before(phone, n):
     assert out["nonEmpty"] > 0.4 * out["checked"], out      # most of the questions find something
 
 
+def test_search_can_keep_only_the_reels_a_filter_accepts_before_it_cuts_to_the_limit(phone):
+    # the operators of Lib.find (a tag, an exact phrase, a word to leave out) are checked on the ranked reels, so the lines are only
+    # worked out for the reels shown. Notes.search(reels, q, limit, accept) is that: the first `limit` reels accept says yes to.
+    _decorated(phone, 300)
+    out = phone.evaluate("""() => {
+      const rs = db.reels, qs = questions(rs).slice(0, 16);
+      const r = battery(rs, qs, [], true);
+      const asked = [];
+      const hits = Notes.search(rs, qs[0], 5, (reel) => { asked.push(reel.code); return /[0-4]$/.test(reel.code); });
+      return { r, asked: asked.length, got: hits.length, all: Notes.search(rs, qs[0], rs.length).length };
+    }""")
+    assert out["r"]["nBad"] == 0 and out["r"]["nonEmpty"] > 100, out
+    assert out["got"] == 5 and out["asked"] < out["all"], out    # it stops when it has the five: the rest is never asked about
+
+
 def test_ties_keep_the_order_of_the_library(phone):
     _decorated(phone, 300)
     out = phone.evaluate("""() => {
@@ -331,10 +346,12 @@ def test_what_is_kept_follows_the_changes_of_the_library(phone):
 
       // an edit of a word: the new word is found, and the reels related to it follow
       out.quinoaBefore = codes("quinoa");
+      out.phraseBefore = codes('"high protein"');          // the exact words of the old topic: kept for that reel
       rs[6].notes.topic = "Quinoa bowl";
       const ix1 = Notes.index(rs);
       out.rebuilt = ix1 !== ix0 && ix1.N === 7;
       out.quinoa = codes("quinoa");
+      out.phraseAfter = codes('"high protein"');
       same("topic edited");
 
       // an edit inside a list, in place
@@ -369,6 +386,7 @@ def test_what_is_kept_follows_the_changes_of_the_library(phone):
     assert out["bad"] == [], out
     assert out["keptIx"] and out["keptAfterQuery"]
     assert out["quinoaBefore"] == [] and out["rebuilt"] and out["quinoa"] == ["FOOD01"]
+    assert out["phraseBefore"] == ["FOOD01"] and out["phraseAfter"] == []       # the exact words are read again from the changed reel
     assert out["inList"]
     assert out["typoBefore"] == ["FOOD01"] and out["added"] and out["quinoaAdded"][:2] in (["FOOD01", "FOOD02"], ["FOOD02", "FOOD01"])
     assert out["typoAfter"] and "FOOD02" in out["typoAfter"]        # the typo's matches are worked out again for the new words
@@ -396,12 +414,35 @@ def test_a_word_added_by_one_reel_is_found_through_a_typo_of_it(phone):
     assert out["bad"] == 0
 
 
+def test_related_reels_reuse_what_they_worked_out_until_the_library_changes(phone):
+    # Counted, not timed (so it holds on any machine): the work of a related-reels call is mostly Math.log. The lengths of all the
+    # reels' vectors (one log for every word of every reel) are worked out once for a version of the index, not for each call.
+    _generated(phone, 1000)
+    out = phone.evaluate("""() => {
+      const rs = db.reels, ix = Notes.index(rs);
+      const total = ix.docs.reduce((a, d) => a + d.tf.size, 0);
+      const logs = (fn) => { const real = Math.log; let n = 0; Math.log = (x) => { n++; return real(x); }; try { fn(); } finally { Math.log = real; } return n; };
+      const first = logs(() => Notes.related(rs, rs[3], 4));
+      const second = logs(() => Notes.related(rs, rs[4], 4));
+      const third = logs(() => Notes.related(rs, rs[5], 4));
+      rs[9].notes.topic += " changed";                       // one reel changed: every reel's weights move a little
+      const afterEdit = logs(() => Notes.related(rs, rs[4], 4));
+      const againAfterEdit = logs(() => Notes.related(rs, rs[4], 4));
+      return { total, first, second, third, afterEdit, againAfterEdit };
+    }""")
+    t = out["total"]
+    assert out["first"] > t and out["afterEdit"] > t, out                           # a new version: worked out for every reel
+    assert out["second"] < 0.3 * t and out["third"] < 0.3 * t and out["againAfterEdit"] < 0.3 * t, out   # an unchanged one: only the dot products
+
+
 # ---------------------------------------------------------------- 3. fast enough, with room for a slow runner
 
 # Best of five warm calls on 1,000 and 5,000 generated reels, desktop Chromium (not a phone), a loaded 4-core machine. Measured here
 # first, as [before the speed-up, after]: ask a common word at 5,000: [190-240 ms, 12-20]; related reels at 5,000: [570-600, 50-90];
 # at 1,000: ask [45-55, 2-6], related [120, 8]. A budget is several times what the new code took, and below what the old code took.
-BUDGET_MS = {1000: {"find": 30, "related": 60, "index": 20}, 5000: {"find": 100, "related": 250, "index": 60}}
+# "index" is only a sanity limit: a current index took 2-20 ms before as well (the old way of checking it was slower, not slow enough
+# to tell apart from a slow runner), so it is not what makes this test fail on the old code.
+BUDGET_MS = {1000: {"find": 30, "related": 60, "index": 15}, 5000: {"find": 100, "related": 250, "index": 50}}
 
 
 @pytest.mark.parametrize("n", [1000, 5000])
