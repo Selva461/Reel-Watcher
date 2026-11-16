@@ -10,7 +10,7 @@ Read, in this order (about 10 minutes): `CLAUDE.md`, `docs/PROJECT_CONTINUATION.
 ## Do this (in order)
 1. Open the PR list. For each of #37, #38, #33: re-check status; do not redo finished work.
 2. If the P2, P3, R3 branches exist: open one PR each, get the checks green, get an independent Opus review (`independent-reviewer`), fix Critical and High findings. R3 changes only CI and tests, so it may be merged under the standing conditions.
-3. Release rule: a PR that changes `android/app-shell/**` publishes a public release when merged (CI). The owner said not to publish automatically. So such PRs are verified and LEFT READY, not merged, until the owner decides (see "UNRESOLVED CONFLICT" in `docs/PROJECT_CONTINUATION.md` section 12). Propose "R5": make the publish step of `android-apk.yml` manual-only; the owner merges that one.
+3. Release rule: a PR that changes `android/app-shell/**` OR `.github/workflows/android-apk.yml` publishes a public release when merged (CI; the workflow is in its own push paths, so even a Dependabot bump of it publishes). The owner said not to publish automatically. So such PRs are verified and LEFT READY, not merged, until the owner decides (see "UNRESOLVED CONFLICT" in `docs/PROJECT_CONTINUATION.md` section 12). Propose "R5": make the publish step of `android-apk.yml` manual-only; the owner merges that one.
 4. Next unblocked task that publishes nothing: R4-1 (upgrade fixtures and round-trip tests, tests only), see `docs/design/A1-R4-retry-and-schema.md`.
 5. Keep `docs/PROJECT_CONTINUATION.md` and this file current after every PR.
 
