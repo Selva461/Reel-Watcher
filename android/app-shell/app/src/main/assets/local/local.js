@@ -282,7 +282,8 @@ function bindIgWaiting() {
 
 let run = null;  // {codes, i, step, stop, done, failed, current}
 
-function needsWork(r, ready) {
+function needsWork(r, ready, now = Date.now()) {
+  if ((r.tries || 0) >= Notes.RETRY_CAP || (r.next_try_at || 0) > now) return false;  // failed again and again, or waiting for its next try
   if (r.notes && !(r.notes_by === "auto" && (ready || (!Notes.isYoutube(r) && !r.video_tried)))) return false;
   if (r.file) return !r.video_tried || (ready && Notes.material(r) >= 30 && r.status !== "ready_no_text");  // a video on the phone
   if (!r.url) return false;
@@ -524,12 +525,33 @@ function byUsefulThenNewest(a, b) {
   return ka - kb || (b.added_at || 0) - (a.added_at || 0);
 }
 
+/** The night's reels: 3 never-tried (useful first, newest first), then 1 of the oldest waiting (due retries come in here), up to max. */
+function nightQueue(reels, ready, now, max) {
+  const cand = reels.filter((x) => needsWork(x, ready, now));
+  const qa = cand.filter((x) => !x.tries).sort(byUsefulThenNewest);
+  const qb = cand.slice().sort((a, b) => (a.added_at || 0) - (b.added_at || 0));
+  const out = [], seen = new Set();
+  let ia = 0, ib = 0;
+  const next = (q, i) => { while (i < q.length && seen.has(q[i].code)) i++; return i; };
+  while (out.length < max) {
+    for (let k = 0; k < 4 && out.length < max; k++) {
+      let x;
+      if (k < 3) { ia = next(qa, ia); x = qa[ia]; if (!x) { ib = next(qb, ib); x = qb[ib]; } }
+      else { ib = next(qb, ib); x = qb[ib]; if (!x) { ia = next(qa, ia); x = qa[ia]; } }
+      if (!x) return out;
+      seen.add(x.code); out.push(x);
+    }
+  }
+  return out;
+}
+
 async function startRun(codes) {
   if (run && !run.finished) { location.hash = "#/run"; return; }
   if (!codes) await scanVideos();  // reel videos saved since last time are read too
   const ready = !!modelInfo().ready;
   const list = (codes || db.reels.filter((r) => needsWork(r, ready)).sort(byUsefulThenNewest).map((r) => r.code)).filter((c) => reel(c));
   run = { codes: list, i: 0, step: "", stop: false, done: 0, failed: 0, current: "", finished: false, log: [], ready };
+  let streak = { key: "", n: 0 }, tripped = false;  // failures in a row with the same reason: a broken model stops the run
   sync("allowWork");
   workTick();  // the notification appears now, while the app is on screen
   location.hash = "#/run";
@@ -564,17 +586,27 @@ async function startRun(codes) {
         if (Notes.material(r) >= 30) writeWithoutAi(r);
         else r.status = Notes.isYoutube(r) ? "ready_no_text" : "ready";
       }
-      if (r.notes) r.status = "done";
+      if (r.notes) { r.status = "done"; delete r.tries; delete r.next_try_at; delete r.last_fail; delete r.last_fail_at; }
+      streak = { key: "", n: 0 };
     } catch (e) {
       if (run.stop || e.message === "stopped") { r.status = "new"; break; }
       if (/slow down/.test(e.message)) { r.status = "new"; run.note = e.message; break; }
       r.status = "failed";
       r.error = e.message;
       run.failed++;
+      const now = Date.now(), key = String(e.message).split(":")[0].slice(0, 40);
+      r.tries = (r.tries || 0) + 1;
+      r.last_fail_at = now;
+      r.last_fail = String(e.message).slice(0, 300);
+      const wait = Notes.retryAfter(r.tries);
+      r.next_try_at = wait === null ? 0 : now + wait;  // parked at the cap: needsWork stops on tries, not on the time
+      streak = { key, n: streak.key === key ? streak.n + 1 : 1 };
+      if (streak.n >= 3) { run.note = `The on-phone AI failed 3 times in a row: ${r.last_fail}`; tripped = true; }
     }
     run.log.unshift({ code: r.code, ok: r.status === "done", text: r.status === "done" ? (r.notes.topic || "Notes written") : r.error || (r.caption ? "Caption read, too short for notes" : "No caption from Instagram") });
     saveDb();
     paintRun();
+    if (tripped) break;
   }
   run.finished = true;
   run.step = "";
@@ -627,8 +659,8 @@ async function overnightRun(auto) {
       await scanVideos();
       // reels read before videos were read are read again only after you tried it yourself (Try on 5 or Start)
       const ready = !!modelInfo().ready;
-      await startRun(db.reels.filter((x) => needsWork(x, ready) && (settings.rereadOk || !x.caption_read || Notes.isYoutube(x)))
-        .sort(byUsefulThenNewest).slice(0, settings.nightMax || 200).map((x) => x.code));  // useful first, then memes; capped per night
+      await startRun(nightQueue(db.reels.filter((x) => settings.rereadOk || !x.caption_read || Notes.isYoutube(x)), ready, Date.now(), settings.nightMax || 200)
+        .map((x) => x.code));  // 3 new (useful first) to 1 oldest, capped per night
       say(`Reel notes: ${run ? run.done : 0} written, ${run ? run.failed : 0} failed`);
     }
     if (!night.stop && typeof Shots !== "undefined") {
