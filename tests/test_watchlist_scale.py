@@ -4,8 +4,9 @@ few entries that can be the same title. These tests pin three things, in the pho
 
 1. the answers are the old answers: the same questions put to the new Catalog and to a frozen copy of the old one
    (tests/catalog_before_index.js) on generated lists full of near-duplicates give the same answer every time;
-2. the index is never stale: after add, merge, rename, remove, details, a different list loaded, a stale reload, "delete all" and
-   an empty library, every answer is what a fresh read of the whole list gives;
+2. the index is never stale: after add, merge, rename, remove, details, a different list loaded, a stale reload, "delete all", an
+   empty library, and what other code does to the list (an entry put in, taken out or moved, a title edited in place, the checked
+   flag or a status changed, a list imported), every answer is what a fresh read of the whole list gives, ties included;
 3. it is fast: adding N titles and checking N titles stays within a budget the old code missed by a wide margin, and a lookup no
    longer cleans every stored name (counted, so this part does not depend on the speed of the machine).
 
@@ -155,6 +156,26 @@ function equivalence(New, Ref, genTitles, n, seed, probesPer) {
       } else if (roll < 0.43) {
         const patch = [{ title: a.title + " Redux" }, { title: o.title }, { type: "manga", year: 1999 }, { language: "ko" }, { status: "done", note: "n" }][below(5)];
         differ("update", ...both((C, db) => { const r = C.update(db, a.id, patch); return r && r.id; }));
+      } else if (roll < 0.55) {  // changes made outside Catalog (the same on both lists): edits in place, moves, entries put in or taken out
+        const imported = [0, 1, 2].map((j) => ({ id: "imp-" + i + "-" + j, title: [o.title, "Imported " + i, o2.title][j], type: ["movie", "series", "book"][j], year: o.year, language: "", original_title: "", aka: [],
+          genres: [], country: "", poster: "", overview: "", ext: {}, status: "want", verified: ["unverified", "verified", "unverified"][j], confidence: 0, sources: [], added_at: i, updated_at: i }));
+        const here = (db, id) => db.media.find((m) => m.id === id);
+        const act = [
+          (db) => { here(db, a.id).title = o.title; },                                   // a title edited in place, onto another one's
+          (db) => { here(db, a.id).title = "Zed " + i; },                                // and onto a new one
+          (db) => { here(db, a.id).original_title = o.title; },
+          (db) => { here(db, a.id).aka = [o2.title, "Alias " + i]; },
+          (db) => { here(db, a.id).ext = { tmdb: (o.ext || {}).tmdb || "e" + i }; },
+          (db) => { const m = here(db, a.id); m.verified = m.verified === "verified" ? "unverified" : "verified"; },  // the tie-break reads this
+          (db) => { here(db, a.id).status = "done"; },                                   // not part of any answer
+          (db) => { db.media.reverse(); },                                               // a new order
+          (db) => { const m = here(db, a.id); db.media.splice(db.media.indexOf(m), 1); db.media.unshift(m); },  // one entry moved to the front
+          (db) => { db.media.sort((p, q) => (p.title < q.title ? -1 : p.title > q.title ? 1 : 0)); },
+          (db) => { db.media.push(...clone(imported)); },                                // entries imported at the end
+          (db) => { db.media.unshift(...clone(imported)); },                             // or at the front
+          (db) => { db.media.splice(db.media.indexOf(here(db, a.id)), 1); },             // one taken out
+        ][below(13)];
+        both((C, db) => act(db));
       }
       if (i === Math.floor(n / 3)) { const copy = JSON.stringify(B.media); A.media = JSON.parse(copy); B.media = JSON.parse(copy); }  // the list is read from the file again
       if (i === Math.floor(0.85 * n)) { A.media = []; B.media = []; }                                                                   // an empty list
@@ -456,37 +477,90 @@ def test_delete_all_keeps_the_watchlist_and_it_is_still_found(phone):
     assert after["bad"] == [] and after["found"] == before["found"] and after["size"] == before["size"]   # the watchlist is kept, and found as before
 
 
-def test_other_code_that_changes_the_list_in_place_makes_the_index_start_again(phone):
+def test_the_index_notices_what_other_code_does_to_the_list(phone):
+    """The invalidation matrix. Nothing in the app edits an entry's names behind Catalog's back today, but the answers must still be
+    the old ones if something does: an entry put in, taken out or moved, a title (or original title, other names, ids) given a new
+    value, the checked flag flipped, a status changed, a list imported. Every step is compared with the old code reading the whole
+    list, and the entries that tie are asked about so that the order of the list decides, as before."""
     _ready(phone)
     r = phone.evaluate(r"""() => {
       const db = { media: [] };
       Catalog.addMany(db, genTitles(120, 41, 0.3));
-      const out = {};
-      const look = (name) => { const a = agree(db); out[name] = { bad: a.bad, stale: a.stale, size: db.media.length }; };
-      look("built");
-      db.media = db.media.filter((m, i) => i % 3);                       // a new array, like Verify.migrate's filter
-      look("filtered");
-      const taken = db.media.splice(2, 3);                               // entries taken out in place
-      look("spliced out");
-      db.media.push(...taken);                                           // and put back at the end
-      look("pushed");
-      db.media.unshift({ ...taken[0], id: "m-copy", title: "A Copy Put In Front" });
-      look("unshifted");
-      out.copyFound = ask(db, { title: "A Copy Put In Front" }) === db.media[0];
-      db.media.length = 0;                                               // emptied in place
-      look("emptied");
+      const out = { steps: {}, facts: {} };
+      const step = (name, extra) => { const a = agree(db, extra); out.steps[name] = { probes: a.probes, found: a.found, stale: a.stale, bad: a.bad, size: db.media.length }; };
+      const raw = (id, title, over) => ({ id, title, type: "movie", year: null, language: "", original_title: "", aka: [], genres: [], country: "", poster: "", overview: "",
+        ext: {}, status: "want", verified: "unverified", confidence: 0, sources: [], added_at: 1, updated_at: 1, ...over });
+      const twinA = Catalog.add(db, { title: "Twin Name", language: "ko" }).entry;
+      const twinB = Catalog.add(db, { title: "Twin Name", language: "ja" }).entry;  // added last: first in the list
+      const twin = () => ask(db, { title: "Twin Name" });                           // no language: both match, the list decides
+      const unique = Catalog.add(db, { title: "Unique Old Name" }).entry;
+      step("built", [{ title: "Twin Name" }]);
+      const f = out.facts;
+      f.first = twin() === twinB;
+      // reorder
+      db.media.reverse();
+      f.reversed = twin() === twinA;
+      step("reversed", [{ title: "Twin Name" }]);
+      db.media.splice(db.media.indexOf(twinB), 1); db.media.unshift(twinB);
+      f.moved = twin() === twinB;
+      step("moved to the front", [{ title: "Twin Name" }]);
+      db.media.sort((p, q) => (p.title < q.title ? -1 : p.title > q.title ? 1 : 0));
+      step("sorted", [{ title: "Twin Name" }]);
+      f.sorted = twin() === (db.media.indexOf(twinA) < db.media.indexOf(twinB) ? twinA : twinB);
+      // the checked flag is read by the tie-break, and flipped here without Catalog
+      twinA.verified = "verified"; twinB.verified = "unverified";
+      f.checkedWins = twin() === twinA;
+      twinA.verified = "unverified"; twinB.verified = "verified";
+      f.checkedWinsOther = twin() === twinB;
+      step("checked flipped", [{ title: "Twin Name" }]);
+      // a title, original title, other names and ids given new values in place
+      unique.title = "Brand New Spelling";
+      f.titleEdit = [ask(db, { title: "Unique Old Name" }), ask(db, { title: "Brand New Spelling" }) === unique];
+      step("title edited", [{ title: "Unique Old Name" }, { title: "Brand New Spelling" }]);
+      unique.original_title = "Via Original"; unique.aka = ["Via Alias"]; unique.ext = { tmdb: "edit-1" };
+      f.nameEdits = [ask(db, { title: "Via Original" }) === unique, ask(db, { title: "Via Alias" }) === unique, ask(db, { title: "?", ext: { tmdb: "edit-1" } }) === unique];
+      step("names and ids edited", [{ title: "Via Original" }, { title: "Via Alias" }, { title: "?", ext: { tmdb: "edit-1" } }]);
+      unique.aka = [];
+      f.akaCleared = ask(db, { title: "Via Alias" });
+      // a status changed, by Catalog and by hand: no answer depends on it
+      Catalog.update(db, unique.id, { status: "done" }); unique.status = "watching";
+      step("status changed", [{ title: "Brand New Spelling" }]);
+      f.statusKept = ask(db, { title: "Brand New Spelling" }) === unique;
+      // entries imported at the end and in front, and taken out by hand
+      const late = raw("imp-late", "Imported Late"), early = raw("imp-early", "Imported Early", { ext: { tmdb: "imp-1" } });
+      db.media.push(late); db.media.unshift(early);
+      f.imported = [ask(db, { title: "Imported Late" }) === late, ask(db, { title: "Imported Early" }) === early, ask(db, { title: "?", ext: { tmdb: "imp-1" } }) === early];
+      step("imported", [{ title: "Imported Late" }, { title: "Imported Early" }]);
+      db.media.splice(db.media.indexOf(late), 1);
+      f.takenOut = ask(db, { title: "Imported Late" });
+      step("taken out by hand", [{ title: "Imported Late" }]);
+      // a whole new list (an import that replaces it, or Verify.migrate's filter), and an emptied one
+      db.media = db.media.filter((m, i) => i % 3);
+      step("filtered");
+      db.media = [raw("only", "Only One Left")];
+      f.replaced = [ask(db, { title: "Only One Left" }) !== null, ask(db, { title: "Twin Name" })];
+      step("replaced");
+      db.media.length = 0;
+      f.emptied = ask(db, { title: "Only One Left" });
+      step("emptied");
       return out;
     }""")
-    for name in ("built", "filtered", "spliced out", "pushed", "unshifted", "emptied"):
-        assert r[name]["bad"] == [] and r[name]["stale"] == 0, name
-    assert r["copyFound"] is True and r["emptied"]["size"] == 0
+    for name, s in r["steps"].items():
+        assert s["bad"] == [] and s["stale"] == 0, name
+    assert r["steps"]["built"]["found"] > 100
+    f = r["facts"]
+    assert f["first"] and f["reversed"] and f["moved"] and f["sorted"]
+    assert f["checkedWins"] and f["checkedWinsOther"]
+    assert f["titleEdit"] == [None, True] and f["nameEdits"] == [True, True, True] and f["akaCleared"] is None
+    assert f["statusKept"] and f["imported"] == [True, True, True] and f["takenOut"] is None
+    assert f["replaced"] == [True, None] and f["emptied"] is None
 
 
 # ---------------------------------------------------------------- 3. fast, and no longer reading the whole list
 
 # Budgets for adding N titles (Catalog.addMany) and then checking N of them (Catalog.verify), in milliseconds. Desktop Chromium on the
-# machine these were set on measured MEASURED; the old code took about 1 s and 20 s to add, and 0.9 s and 30 s to check.
-BUDGET_MS = {1000: (1000, 1000), 5000: (5000, 5000)}
+# machine these were set on measured 35 ms and 43 ms (1,000) and 140 ms and 1.2 s (5,000) on a loaded 4-core machine; the old code took about 1 s and 20 s to add, and 0.9 s and 30 s to check.
+BUDGET_MS = {1000: (300, 300), 5000: (1500, 6000)}
 
 
 @pytest.mark.parametrize("n", [1000, 5000])
@@ -540,6 +614,12 @@ def test_a_lookup_no_longer_cleans_every_stored_name(phone):
         db.media = db.media.slice();                                                                        // a new array: one new index
         out.rebuild = count(() => { Catalog.findSame(db, { title: "After the new array", type: "movie" }); });
         out.afterRebuild = count(() => { Catalog.findSame(db, { title: "Once more", type: "movie" }); });
+        const e = db.media[3];
+        e.title = "Edited in place";                                                                         // one entry edited outside Catalog
+        out.edited = count(() => { out.editedFound = Catalog.findSame(db, { title: "Edited in place", type: e.type }) === e; });  // only that entry is filed again
+        db.media.reverse();                                                                                 // a new order: the index is built again
+        out.reordered = count(() => { Catalog.findSame(db, { title: "Once more", type: "movie" }); });
+        out.afterReorder = count(() => { Catalog.findSame(db, { title: "Once more", type: "movie" }); });
         out.left = db.media.length;
         return out;
       } finally { String.prototype.normalize = real; }
@@ -549,3 +629,5 @@ def test_a_lookup_no_longer_cleans_every_stored_name(phone):
     assert r["remove"] < 5 and r["afterRemove"] < 60 and r["merge"] < 60 and r["afterMerge"] < 60
     assert r["rebuild"] > 1000                       # the names of the whole list, once, for a list that is new
     assert r["afterRebuild"] < 10
+    assert r["editedFound"] is True and r["edited"] < 20   # a title edited outside Catalog is noticed, and only its own names are cleaned again
+    assert r["reordered"] > 1000 and r["afterReorder"] < 10
