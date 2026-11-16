@@ -144,7 +144,11 @@ final class LocalBridge {
         return fileOf(which).revision() != revOf(which);
     }
 
-    /** {"state": ok|missing|recovered|unreadable|started_new, "bad": name of the damaged file set aside, "notice": ...}. which: "reels" or "shots". */
+    /**
+     * {"state": ok|missing|recovered|unreadable|started_new|newer, "bad": name of the damaged file set aside, "notice": ...}.
+     * "newer" (saved by a newer Reel Shelf, locked and untouched) adds "found" (its schema number) and "supported" (the
+     * newest this build reads). which: "reels" or "shots".
+     */
     @JavascriptInterface
     public String libraryInfo(String which) {
         if (!ok()) return "{}";
@@ -154,10 +158,27 @@ final class LocalBridge {
             o.put("state", f.state().name().toLowerCase(java.util.Locale.ROOT));
             o.put("bad", f.badName());
             o.put("notice", act.isNight() ? "" : f.takeNotice());  // the nightly run has no screen to say it on
+            if (f.state() == LibraryFile.State.NEWER) {
+                o.put("found", f.found());
+                o.put("supported", f.supported());
+            }
         } catch (JSONException ignored) {
             // not reachable
         }
         return o.toString();
+    }
+
+    /** This app's version name (versionName in build.gradle), for the screen that says a newer library cannot be opened. "" when unknown. */
+    @JavascriptInterface
+    @SuppressWarnings("deprecation")
+    public String appVersion() {
+        if (!ok()) return "";
+        try {
+            String v = act.ctx().getPackageManager().getPackageInfo(act.ctx().getPackageName(), 0).versionName;
+            return v == null ? "" : v;
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     /** Sets the damaged file aside (renamed, kept) and unlocks for a new one. False when that did not work: nothing is then changed. */
