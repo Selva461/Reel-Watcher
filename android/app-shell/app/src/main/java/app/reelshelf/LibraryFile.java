@@ -101,6 +101,8 @@ final class LibraryFile {
     private String notice = "";
     /** Advances whenever the file's content changes (a save, a restore from the backup, a start-new). In memory: pages cannot outlive the process. */
     private long revision;
+    /** {@link #read()} has run at least once in this process, so {@link #state} says something about the file on disk. */
+    private boolean loaded;
 
     private LibraryFile(File dir, String name, Shape shape, String schemaKey, int supported) {
         this.main = new File(dir, name);
@@ -181,6 +183,7 @@ final class LibraryFile {
 
     /** The file's text; "" when there is none or it is locked (see {@link #state()}). Restores a good backup when needed. */
     synchronized String read() {
+        loaded = true;
         Good now = good(main);
         if (now != null && newer(now.schema)) return lockNewer(now.schema, main);  // before anything else, and whatever its shape: no restore, no rename, no write
         if (now != null && now.shapeOk) {
@@ -224,7 +227,7 @@ final class LibraryFile {
     }
 
     /** A file that is a whole JSON object: its text, whether it has the right shape, and what it says about its schema (null when nothing). */
-    private static final class Good {
+    static final class Good {
         final String text;
         final boolean shapeOk;
         final Object schema;
@@ -241,6 +244,11 @@ final class LibraryFile {
      * Shelf may have changed it (that is what a new schema number is for), and it is then still "newer", not "damaged".
      */
     private Good good(File f) {
+        return inspect(f, shape, schemaKey);
+    }
+
+    /** The one place a library file is parsed: whole object, nothing after it, no NUL. Null when it is not that. schemaKey may be null. */
+    static Good inspect(File f, Shape shape, String schemaKey) {
         try {
             if (!f.isFile() || f.length() == 0) return null;
             String s = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
@@ -249,10 +257,16 @@ final class LibraryFile {
             Object v = t.nextValue();
             if (!(v instanceof JSONObject) || t.nextClean() != 0) return null;  // not an object, or something after it
             JSONObject o = (JSONObject) v;
-            return new Good(s, shape.ok(o), o.opt(schemaKey));
+            return new Good(s, shape.ok(o), schemaKey == null ? null : o.opt(schemaKey));
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /** Whether f is a usable library file of this shape: the same rules {@link #read()} applies to the file on disk. (A newer schema is a separate question: see {@link #isNewer}.) */
+    static boolean isValid(File f, Shape shape) {
+        Good g = inspect(f, shape, null);
+        return g != null && g.shapeOk;
     }
 
     /**
@@ -266,6 +280,11 @@ final class LibraryFile {
      * local.js (isNewer) and shots.js (load) apply the same rule, and the tests of both use the same list of odd values.
      */
     private boolean newer(Object schema) {
+        return isNewer(schema, supported);
+    }
+
+    /** The rule above, for any schema value and any supported number (the backup check applies it to a backup's files). */
+    static boolean isNewer(Object schema, int supported) {
         return schema instanceof Number && ((Number) schema).doubleValue() > supported;
     }
 
@@ -352,6 +371,89 @@ final class LibraryFile {
     private void remember(File bad) {
         setAside = bad;
         badName = bad.getName();
+    }
+
+    // ------------------------------------------------------------------ backup and restore (see LibraryBackup)
+
+    private void ensureRead() {
+        if (!loaded) read();
+    }
+
+    /**
+     * Makes dest a copy of the file as it is now, under the lock, in microseconds: a hard link. That is safe because
+     * this class never changes main in place (a save writes a temp file and renames it; a restore renames), so the linked
+     * file never changes whatever is saved or restored afterwards. When linking is not possible the file is copied, still
+     * under the lock. Returns false when there is no file (nothing is made), throws when the library is locked
+     * (unreadable or NEWER: a backup is never made of a file this build cannot vouch for) or dest already exists.
+     */
+    synchronized boolean snapshotTo(File dest) throws IOException {
+        return snapshot(dest, true);
+    }
+
+    /** {@link #snapshotTo} with the hard link switched off, so the copy fallback can be tested. */
+    synchronized boolean snapshot(File dest, boolean tryLink) throws IOException {
+        ensureRead();
+        if (locked) throw new IOException("The library is locked (" + state + "): no backup is made of it");
+        if (!main.isFile()) return false;
+        File dir = dest.getParentFile();
+        if (dir != null) dir.mkdirs();
+        if (tryLink) {
+            try {
+                Files.createLink(dest.toPath(), main.toPath());
+                return true;
+            } catch (java.nio.file.FileAlreadyExistsException e) {
+                throw e;
+            } catch (IOException | UnsupportedOperationException | SecurityException e) {
+                // fall through to a copy
+            }
+        }
+        Files.copy(main.toPath(), dest.toPath());  // never overwrites
+        return true;
+    }
+
+    /**
+     * Installs staged (a file {@link LibraryBackup#check} accepted) as the file. Rules:
+     * - NEWER (main, or a newer backup beside a damaged main): REFUSED with an IOException and nothing at all is touched.
+     *   A newer library is never replaced, renamed or set aside by an older build.
+     * - UNREADABLE: allowed. Restoring is a recovery path: the unreadable file is set aside like any other.
+     * - The file in place is renamed to NAME.before-restore-STAMP (a name that never exists yet): never deleted, never
+     *   overwritten, so a second restore keeps a second one. The backup (NAME.bak) is left exactly as it is.
+     * - It works while locked, and unlocks. The revision advances, so a page that loaded earlier has its next save refused as stale.
+     * - If staged cannot be moved into place, the set-aside file is moved back and an IOException is thrown (state unchanged).
+     * staged is checked again here (whole object, shape, not newer): installing a bad file would lock the library.
+     * Returns the set-aside file, or null when there was no file.
+     */
+    synchronized File replaceWith(File staged) throws IOException {
+        ensureRead();
+        if (state == State.NEWER) throw new IOException("Saved by a newer Reel Shelf: it is never replaced by an older one");
+        if (!staged.isFile()) throw new IOException("Nothing to restore from: " + staged);
+        Good g = inspect(staged, shape, schemaKey);
+        if (g == null || !g.shapeOk || newer(g.schema)) throw new IOException("The file to restore is not a usable " + main.getName());
+        File aside = null;
+        if (main.exists()) {
+            String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date());
+            aside = new File(main.getParentFile(), main.getName() + ".before-restore-" + stamp);
+            for (int i = 2; aside.exists(); i++) aside = new File(main.getParentFile(), main.getName() + ".before-restore-" + stamp + "-" + i);
+            move(main, aside);  // fails: nothing has changed
+        }
+        try {
+            move(staged, main);
+        } catch (IOException e) {
+            if (aside != null) {
+                try {
+                    move(aside, main);
+                } catch (IOException back) {
+                    e.addSuppressed(back);  // main is missing but the set-aside file and .bak are there; the next read() restores from .bak
+                }
+            }
+            throw e;
+        }
+        trusted = true;
+        locked = false;
+        state = State.OK;
+        notice = "restored";
+        revision++;
+        return aside;
     }
 
     // ------------------------------------------------------------------ recovery you choose
