@@ -2,10 +2,11 @@
 
 Read, in this order (about 10 minutes): `CLAUDE.md`, `docs/PROJECT_CONTINUATION.md`, then this file. The design documents `docs/design/S4-backup-restore.md` and `docs/design/A1-R4-retry-and-schema.md` are for the tasks listed below. Then VERIFY the live state, do not trust any file over the repository: `git fetch --all`, the open PR list, the default branch head and version, the latest GitHub Actions runs.
 
-## What was true when this was written (2026-11-16, about 04:50 UTC)
-- Default branch `ccr-d0c0b070-bdpssy` at `19bbd58`, app 1.3.11 / versionCode 18. Merged since the last record: #42 (docs), #43 (R4-1 upgrade fixtures and round-trip tests), #45 (R4-1b review follow-ups): all tests or docs, nothing published.
-- Open and waiting for the owner (all publishing PRs, never merged by the AI): #37 (Task 4, device checks E13-E19), #44 (P2 search speed, 1.3.13 / 20, independent review SAFE TO MERGE, device check E20), #40 (R5: manual-only release publishing; only the owner merges), #33 (Task 2b, refresh and renumber, device checks E9-E11). Order: #37, #44, P3, R4-2.
-- In flight (check `git ls-remote --heads origin`): P3 `performance/p3-watchlist-index` (stacked on the P2 branch, 1.3.14 / 21). Agents stopped once at the 5-hour usage limit; resume, do not restart.
+## What was true when this was written (2026-11-17, about 08:40 UTC)
+- Default branch `ccr-d0c0b070-bdpssy` at `f313e2d` or newer, app 1.3.11 / versionCode 18, nothing published since v1.3.11. Merged since the last record: #49 (Python lock bump), #50 (setup-uv v10.2.0).
+- Open and waiting for the owner (all publishing PRs, never merged by the AI): #37 Task 4 (device checks E13-E19), #44 P2 (E20), #47 P3 (E21), #48 R4-2 (E22-E24), #40 R5 (manual-only publishing; only the owner merges), #33 Task 2b (refresh and renumber). Stack order #37, #44, #47, #48, then A1, S4-1.
+- In flight (check `git ls-remote --heads origin` and the worktrees under the session scratchpad): A1 `stabilize/a1-retry-cap` (1.3.16/23), S4-1 `stabilize/s4-1-backup-core` (1.3.17/24), the PC web settings race `fix/webapp-settings-race` (no publishing path: PR, Opus review, may merge), R4-2 closing. The 5-hour usage limit stopped the agents twice: push a WIP checkpoint, then resume with SendMessage, do not restart. Fable agents need usage credits: use Opus or Sonnet.
+- Designs in `docs/design/`: S4, A1/R4, 5a/5b, A2.
 
 ## Do this (in order)
 1. Open the PR list. For each of #37, #44, #40, #33: re-check status; do not redo finished work.
