@@ -5,6 +5,21 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.16
+- A reel that fails no longer comes back on every Start and every night. If the on-phone AI cannot write the notes for
+  a reel, Reel Shelf tries again after 12 hours, then after 3 days, and after the third failure it **stops trying and
+  waits for you**. Stopping the run, the battery or heat stop, leaving the app and Instagram's "slow down" do not count
+  as failures.
+- The reel page says what happened ("Tried 2 times, last on 14 Nov: ... Next try after 17 Nov." or "Stopped trying after
+  3 tries: ...") and has a **Try again now** button. The Inbox shows "N reels could not be finished", which opens a list
+  with **Try all again**. The Start screen says how many reels wait for a retry and how many stopped.
+- If the AI fails 3 times in a row for the same reason, the run stops with a note, so a broken model cannot use up a
+  whole night or mark many reels.
+- The nightly run now does three new reels, then one of the oldest waiting reels, so with more waiting reels than the
+  nightly limit the old ones are no longer left behind forever. Start by hand is unchanged (useful reels first).
+- Your library file gets four optional fields on a reel that failed (`tries`, `last_fail_at`, `last_fail`,
+  `next_try_at`); older versions keep them. Nothing was tried on a phone yet.
+
 ## 1.3.15
 - Your library now carries a small version number (`"schema_version": 1` in the library file), and Reel Shelf checks it
   every time it opens the library. If a future Reel Shelf ever saves your library in a layout this version cannot read,

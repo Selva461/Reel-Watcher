@@ -175,6 +175,13 @@ def test_a_success_in_between_resets_the_breaker(phone):
     assert phone.evaluate("() => run.note") == "The on-phone AI failed 3 times in a row: The AI model failed: out of memory"
 
 
+def test_failures_with_different_reasons_do_not_trip_the_breaker(phone):
+    start(phone, [waiting("R%02d" % i, added=2000 - i) for i in range(5)])
+    phone.evaluate("""() => { let n = 0; RN.generate = (id) => window.__rn.calls.push(['generate']) && setTimeout(() => rnDone(id, false, 'Reason number ' + (++n) + ': x'), 5); }""")
+    run_start(phone)
+    assert generate_calls(phone) == 5 and phone.evaluate("() => run.note") is None
+
+
 # ---------------------------------------------------------------- the night queue
 
 def test_night_queue_with_1000_waiting_and_a_cap_of_200_includes_the_50_oldest_without_duplicates(phone):
