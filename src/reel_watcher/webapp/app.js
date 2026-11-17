@@ -673,14 +673,19 @@ async function settingsScreen() {
     <div class="card stack"><strong>Something not working?</strong><span class="small muted">Copies a report with the version, settings, recent problems and the last self-check (no pictures, no file contents). Paste it in your message.</span>
       <button class="btn" id="appdbg">Copy debug report</button></div>`;
   versionCard();
-  showCheck(await api("/api/selfcheck"));
   bind("#appdbg", "click", () => copyDebug("/api/debug"));
-  bind("#chk", "click", async () => { showCheck(await api("/api/selfcheck", { method: "POST", body: {} })); });
+  bind("#chk", "click", async () => { checkSeq++; showCheck(await api("/api/selfcheck", { method: "POST", body: {} })); });
   bind("#region", "change", async (e, el) => { await api("/api/settings", { method: "POST", body: { region: el.value } }); toast("Country saved"); });
   bind("#autoup", "click", async (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; await api("/api/settings", { method: "POST", body: { auto_update: on } }); b.setAttribute("aria-checked", on); toast(on ? "Automatic updates on" : "Automatic updates off"); });
   bind("#ai", "click", async (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; await api("/api/settings", { method: "POST", body: { ai: on } }); b.setAttribute("aria-checked", on); toast(on ? "AI guesses on" : "AI guesses off"); });
   bind("#online", "click", async (e, b) => { const on = b.getAttribute("aria-checked") !== "true"; await api("/api/settings", { method: "POST", body: { online: on } }); b.setAttribute("aria-checked", on); toast(on ? "Online lookups on" : "Online lookups off"); });
+  // the status fills in its own part of the screen when it arrives; an answer that is older than a newer screen or
+  // a started check is dropped, so it cannot overwrite it
+  const seq = ++checkSeq;
+  api("/api/selfcheck").then((st) => { if (seq === checkSeq) showCheck(st); }, (err) => { if (location.hash === "#/settings") toast(err.message); });
 }
+
+let checkSeq = 0;
 
 function showCheck(st) {
   const out = document.getElementById("chkout");

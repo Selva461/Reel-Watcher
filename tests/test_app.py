@@ -523,6 +523,43 @@ def test_ui_import_and_settings(page):
     assert Path(pg.running["lib"].dir / "settings.json").exists()
 
 
+def test_ui_settings_work_before_the_selfcheck_answers(page):
+    """A setting changed while the self-check status is still on its way is saved (it used to be dropped), and a late
+    answer neither undoes the change nor draws into another screen."""
+    pg = page
+    held = []
+    pg.route("**/api/selfcheck", lambda route: held.append(route))  # held back until the test releases it
+    with pg.expect_request("**/api/selfcheck"):
+        pg.goto(pg.running["base"] + "/#/settings")
+    pg.locator("#region").wait_for()
+    pg.evaluate("0")  # a round trip: the held request has reached the route handler
+    assert len(held) == 1
+    pg.select_option("#region", "US")
+    pg.get_by_role("switch", name="Online lookups").click()
+    pg.get_by_text("Online lookups on").wait_for(timeout=10000)  # saved although the self-check answer is still held back
+    assert pg.running["app"].settings()["region"] == "US"
+    assert pg.running["app"].settings()["online"] is True
+    held.pop().continue_()
+    pg.get_by_role("button", name="Run self-check").wait_for()  # the late answer filled in its own part
+    assert pg.input_value("#region") == "US"
+    assert pg.get_by_role("switch", name="Online lookups").get_attribute("aria-checked") == "true"
+    # leaving before the answer arrives: the late answer must not throw or draw into the next screen
+    pg.goto(pg.running["base"] + "/#/")
+    with pg.expect_request("**/api/selfcheck"):
+        pg.goto(pg.running["base"] + "/#/settings")
+    pg.locator("#region").wait_for()
+    pg.evaluate("0")
+    assert len(held) == 1
+    pg.goto(pg.running["base"] + "/#/identify")
+    pg.get_by_role("heading", name="Identify").wait_for()
+    for route in held:  # both answers arrive now, while the Identify screen is showing
+        with pg.expect_response(lambda r: r.url.endswith("/api/selfcheck")):
+            route.continue_()
+    pg.evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))")  # the page has handled them
+    assert pg.get_by_role("button", name="Run self-check").count() == 0
+    assert pg.get_by_role("heading", name="Identify").is_visible()
+
+
 def test_api_version_and_self_update(tmp_path, monkeypatch):
     import subprocess
     for k, v in {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}.items():
