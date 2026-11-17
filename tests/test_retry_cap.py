@@ -22,6 +22,7 @@ def waiting(code, added=1000, **more):
 
 
 def start(pg, reels, **extra):
+    pg.set_default_timeout(8000)  # a wait that never succeeds fails in seconds
     pg.context.add_init_script(CLOCK)
     pg.open_with({"db": json.dumps({"reels": reels, "inbox": []}), "model": READY, **extra})
 
