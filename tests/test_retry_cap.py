@@ -86,7 +86,7 @@ def test_a_reel_given_by_hand_is_tried_even_when_it_is_waiting_or_parked(phone):
 
 def test_the_last_failure_text_is_at_most_300_characters(phone):
     start(phone, [waiting("R1")])
-    phone.evaluate("() => { RN.generate = (id) => setTimeout(() => rnDone(id, false, 'x'.repeat(900)), 5); }")
+    phone.evaluate("() => { RN.generate = (id) => window.__rn.calls.push(['generate']) && setTimeout(() => rnDone(id, false, 'x'.repeat(900)), 5); }")
     run_start(phone)
     assert len(reels_by_code(phone)["R1"]["last_fail"]) == 300
 
@@ -95,7 +95,7 @@ def test_the_last_failure_text_is_at_most_300_characters(phone):
 
 def test_stop_does_not_count(phone):
     start(phone, [waiting("R1")])
-    phone.evaluate("() => { RN.generate = (id) => { stopRun(); setTimeout(() => rnDone(id, false, 'stopped'), 5); }; }")
+    phone.evaluate("() => { RN.generate = (id) => { window.__rn.calls.push(['generate']); stopRun(); setTimeout(() => rnDone(id, false, 'stopped'), 5); }; }")
     run_start(phone)
     r = reels_by_code(phone)["R1"]
     assert generate_calls(phone) == 1 and "tries" not in r and "last_fail" not in r and r["status"] == "new"
@@ -103,7 +103,7 @@ def test_stop_does_not_count(phone):
 
 def test_the_battery_stop_does_not_count_even_when_the_model_reports_another_reason(phone):
     start(phone, [waiting("R1")])
-    phone.evaluate("() => { RN.generate = (id) => { stopAllWork(); setTimeout(() => rnDone(id, false, 'The AI model failed: interrupted'), 5); }; }")
+    phone.evaluate("() => { RN.generate = (id) => { window.__rn.calls.push(['generate']); stopAllWork(); setTimeout(() => rnDone(id, false, 'The AI model failed: interrupted'), 5); }; }")
     run_start(phone)
     r = reels_by_code(phone)["R1"]
     assert generate_calls(phone) == 1 and "tries" not in r and "next_try_at" not in r
@@ -111,7 +111,7 @@ def test_the_battery_stop_does_not_count_even_when_the_model_reports_another_rea
 
 def test_leaving_the_app_does_not_count(phone):
     start(phone, [waiting("R1")])
-    phone.evaluate("() => { RN.generate = (id) => { onAppPause(); setTimeout(() => rnDone(id, false, 'The AI model failed: gone'), 5); }; }")
+    phone.evaluate("() => { RN.generate = (id) => { window.__rn.calls.push(['generate']); onAppPause(); setTimeout(() => rnDone(id, false, 'The AI model failed: gone'), 5); }; }")
     run_start(phone)
     assert "tries" not in reels_by_code(phone)["R1"]
 
@@ -168,7 +168,7 @@ def test_three_failures_in_a_row_with_the_same_reason_stop_the_run(phone):
 def test_a_success_in_between_resets_the_breaker(phone):
     start(phone, [waiting("R%02d" % i, added=2000 - i) for i in range(8)])
     phone.evaluate("""a => { let n = 0; const g = RN.generate;
-      RN.generate = (id, p, o) => (++n === 3 ? setTimeout(() => rnDone(id, true, JSON.stringify({ text: a, backend: "gpu", ms: 1 })), 5) : g(id, p, o)); }""", ANSWER)
+      RN.generate = (id, p, o) => (++n === 3 ? window.__rn.calls.push(['generate']) && setTimeout(() => rnDone(id, true, JSON.stringify({ text: a, backend: "gpu", ms: 1 })), 5) : g(id, p, o)); }""", ANSWER)
     run_start(phone)
     assert generate_calls(phone) == 6  # fail, fail, success, then fail, fail, fail: only now are there 3 in a row
     assert phone.evaluate("() => run.note") == "The on-phone AI failed 3 times in a row: The AI model failed: out of memory"
@@ -214,7 +214,7 @@ def test_a_reel_without_the_fields_loads_and_a_released_library_keeps_every_key_
     before = {r["code"]: r for r in json.loads(texts("1.3.11")[0])["reels"]}
     assert not any("tries" in r or "next_try_at" in r for r in before.values())
     failed = next(c for c, r in before.items() if r["status"] == "failed")
-    phone.evaluate("() => { RN.generate = (id) => setTimeout(() => rnDone(id, false, 'The AI model failed: out of memory'), 5); }")
+    phone.evaluate("() => { RN.generate = (id) => window.__rn.calls.push(['generate']) && setTimeout(() => rnDone(id, false, 'The AI model failed: out of memory'), 5); }")
     run_start(phone, [failed])
     phone.open_with({"db": phone.rn()["db"]})  # the next session
     assert phone.evaluate("c => reel(c).tries", failed) == 1  # the page read the fields back
