@@ -344,10 +344,19 @@ function addVideoFolder() {
   }).catch((e) => { if (e.message !== "cancelled") toast(e.message); });
 }
 
+/** What the picker's copy says in the toast: the bridge answers "3", or {"kept":3,"failed":2,"why":"not enough storage space on the phone"}. */
+function picturesAddedText(answer) {
+  let r;
+  try { r = JSON.parse(answer); } catch (e) { r = Number(answer) || 0; }
+  const kept = r && typeof r === "object" ? Number(r.kept) || 0 : Number(r) || 0;
+  const failed = r && typeof r === "object" ? Number(r.failed) || 0 : 0;
+  return `${plural(kept, "picture")} added` + (failed ? `, ${failed} could not be saved${r.why ? ` (${r.why})` : ""}` : "");
+}
+
 /** Comment screenshots: choose them, they are read on the phone and filed under the reel they belong to. */
 function commentsFromPictures() {
   phone("addShotPictures").then((n) => {
-    toast(`${plural(Number(n) || 0, "picture")} added`);
+    toast(picturesAddedText(n));
     location.hash = "#/shots";
     Shots.process();
   }).catch((e) => { if (e.message !== "cancelled") toast(e.message); });
