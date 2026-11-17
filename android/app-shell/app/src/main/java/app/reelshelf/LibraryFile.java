@@ -103,6 +103,12 @@ final class LibraryFile {
     private long revision;
     /** {@link #read()} has run at least once in this process, so {@link #state} says something about the file on disk. */
     private boolean loaded;
+    /** How {@link #replaceWith} moves the staged file into place: a seam so a test can make that second rename fail. */
+    interface Mover {
+        void move(File from, File to) throws IOException;
+    }
+
+    Mover mover = LibraryFile::move;
 
     private LibraryFile(File dir, String name, Shape shape, String schemaKey, int supported) {
         this.main = new File(dir, name);
@@ -437,7 +443,7 @@ final class LibraryFile {
             move(main, aside);  // fails: nothing has changed
         }
         try {
-            move(staged, main);
+            mover.move(staged, main);
         } catch (IOException e) {
             if (aside != null) {
                 try {
