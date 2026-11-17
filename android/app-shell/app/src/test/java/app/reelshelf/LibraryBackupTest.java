@@ -385,6 +385,66 @@ public class LibraryBackupTest {
     }
 
     @Test
+    public void aDeflatedEntryWithNoSizeRecordIsStoppedByTheByteCountItself() throws Exception {
+        // The local header declares 10 bytes and there is no data descriptor, but the data inflates to 1 MB: only our own counting stops it.
+        byte[] body = new byte[1 << 20];
+        Arrays.fill(body, (byte) ' ');
+        System.arraycopy(b("{\"reels\":[]}"), 0, body, 0, 12);
+        java.util.zip.Deflater d = new java.util.zip.Deflater(java.util.zip.Deflater.DEFAULT_COMPRESSION, true);
+        d.setInput(body);
+        d.finish();
+        byte[] comp = new byte[4096];
+        int cl = d.deflate(comp);
+        assertTrue(d.finished());
+        d.end();
+        CRC32 crc = new CRC32();
+        crc.update(body, 0, body.length);
+        ByteArrayOutputStream o = new ByteArrayOutputStream();
+        byte[] name = b("reels.json");
+        le(o, 0x04034b50L, 4); le(o, 20, 2); le(o, 0, 2); le(o, 8, 2); le(o, 0, 4);
+        le(o, crc.getValue(), 4); le(o, cl, 4); le(o, 10, 4); le(o, name.length, 2); le(o, 0, 2);
+        o.write(name);
+        o.write(comp, 0, cl);
+        File st = tmp.newFolder();
+        LibraryBackup.Checked c = check(o.toByteArray(), st, 100 * 1024);
+        assertEquals(c.message, LibraryBackup.Code.ENTRY_TOO_BIG, c.code);
+        assertEquals(0, list(st).length);
+    }
+
+    @Test
+    public void aFormatVersionBelowOneOrNotAWholeNumberIsRefusedAsBad() throws Exception {
+        byte[] reels = b(REELS);
+        for (Object v : new Object[]{0, -1, 0.5}) {
+            refused(LibraryBackup.Code.BAD_MANIFEST, zip("reels.json", reels, "manifest.json", mf(manifest(reels, null).put("format_version", v))));
+        }
+    }
+
+    @Test
+    public void theSentencesNeverShowInternalDetailAndTheManifestHasItsOwn() throws Exception {
+        byte[] reels = b(REELS);
+        byte[] bigManifest = b(manifest(reels, null).put("contains", new String(new char[2 << 20]).replace('\0', 'x')).toString());
+        LibraryBackup.Checked c = check(zip("reels.json", reels, "manifest.json", bigManifest));
+        assertEquals(LibraryBackup.Code.ENTRY_TOO_BIG, c.code);
+        assertTrue(c.message, c.message.contains("manifest is too big"));
+        java.io.InputStream broken = new java.io.InputStream() {
+            @Override
+            public int read() throws IOException {
+                throw new IOException("/data/user/0/app.reelshelf/secret-path failed");
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) throws IOException {
+                return read();
+            }
+        };
+        c = LibraryBackup.check(broken, tmp.newFolder(), MAX);
+        assertEquals(LibraryBackup.Code.IO_ERROR, c.code);
+        assertFalse(c.message, c.message.contains("secret-path"));
+        assertTrue(check(backup(REELS, SHOTS)).hasShots());
+        assertFalse(check(backup(REELS, null)).hasShots());
+    }
+
+    @Test
     public void aFailedCheckLeavesNothingInStagingWhateverTheReason() throws Exception {
         byte[] reels = b(REELS);
         File st = tmp.newFolder();

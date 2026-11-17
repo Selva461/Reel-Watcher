@@ -159,6 +159,10 @@ final class LibraryBackup {
         boolean ok() {
             return code == Code.OK;
         }
+
+        boolean hasShots() {
+            return shots != null;
+        }
     }
 
     private static final class Refused extends Exception {
@@ -179,6 +183,11 @@ final class LibraryBackup {
      * truncated ZIP, a missing or unreadable manifest, another format, a newer format_version or schema, a file the manifest
      * does not list, a listed file that is missing or has other bytes or SHA-256, no reels.json, and content that
      * {@link LibraryFile#inspect} does not accept. A refusal leaves staging empty, and so does an Error that escapes (it is rethrown). in is not closed.
+     * Rules for callers: staging must be on the same volume as the library (filesDir/restore-staging, never cacheDir or
+     * external storage); only one check or restore at a time; after an OK result the staged files are installed with
+     * {@link LibraryFile#replaceWith} (reels, then shots) and the caller then {@link #clear}s staging (manifest.json is
+     * still there), also when the user cancels. Whole files are read into memory to be validated: the caller picks
+     * maxBytes with that in mind and catches OutOfMemoryError.
      */
     static Checked check(InputStream in, File staging, long maxBytes) {
         Checked result = null;
@@ -203,7 +212,7 @@ final class LibraryBackup {
             return new Checked(Code.CORRUPT, "This file is damaged or incomplete (for example a download that stopped early). Nothing was changed.", null, null, "", "", 0, new JSONObject());
         } catch (IOException | RuntimeException e) {
             clear(staging);
-            return new Checked(Code.IO_ERROR, "The file could not be read" + (e.getMessage() == null ? "" : " (" + e.getMessage() + ")") + ". Nothing was changed.", null, null, "", "", 0, new JSONObject());
+            return new Checked(Code.IO_ERROR, "The file could not be read. Nothing was changed.", null, null, "", "", 0, new JSONObject());
         }
     }
 
@@ -245,7 +254,9 @@ final class LibraryBackup {
             try (FileOutputStream os = new FileOutputStream(part)) {
                 for (int r; (r = zin.read(buf)) > 0; ) {  // counted as it is inflated: the size the ZIP declares is never trusted
                     len += r;
-                    if (len > limit) throw new Refused(Code.ENTRY_TOO_BIG, "\"" + name + "\" in this backup is bigger than there is room for. Nothing was changed.");
+                    if (len > limit) throw new Refused(Code.ENTRY_TOO_BIG, name.equals(MANIFEST)
+                            ? "This backup is not valid: its manifest is too big. Nothing was changed."
+                            : "\"" + name + "\" in this backup is bigger than there is room for. Nothing was changed.");
                     if (total + len > maxBytes) throw new Refused(Code.TOTAL_TOO_BIG, "This backup is bigger than there is room for on this phone. Nothing was changed.");
                     md.update(buf, 0, r);
                     os.write(buf, 0, r);

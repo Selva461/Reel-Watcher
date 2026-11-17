@@ -391,6 +391,10 @@ final class LibraryFile {
      * file never changes whatever is saved or restored afterwards. When linking is not possible the file is copied, still
      * under the lock. Returns false when there is no file (nothing is made), throws when the library is locked
      * (unreadable or NEWER: a backup is never made of a file this build cannot vouch for) or dest already exists.
+     * Rules for callers: dest is (usually) a HARD LINK to the live library file, so it may only be read or deleted, never
+     * opened for writing or truncated. Take both snapshots (reels first, then shots) and read them back; the folder for
+     * them (backup-work) must be emptied by the caller before it takes snapshots (an old leftover makes this throw), and
+     * must be on the same volume as the library (filesDir, never cacheDir or external storage) for the link to work.
      */
     synchronized boolean snapshotTo(File dest) throws IOException {
         return snapshot(dest, true);
@@ -422,7 +426,7 @@ final class LibraryFile {
      * - NEWER (main, or a newer backup beside a damaged main): REFUSED with an IOException and nothing at all is touched.
      *   A newer library is never replaced, renamed or set aside by an older build.
      * - UNREADABLE: allowed. Restoring is a recovery path: the unreadable file is set aside like any other.
-     * - The file in place is renamed to NAME.before-restore-STAMP (a name that never exists yet): never deleted, never
+     * - The file in place is kept as NAME.before-restore-STAMP (a name that never exists yet; made as a hard link or a synced copy, so main is never missing): never deleted, never
      *   overwritten, so a second restore keeps a second one. The backup (NAME.bak) is left exactly as it is.
      * - It works while locked, and unlocks. The revision advances, so a page that loaded earlier has its next save refused as stale.
      * - main is never missing: the set-aside file is a hard link (or a synced copy) of it, and the staged file is renamed over
@@ -430,6 +434,11 @@ final class LibraryFile {
      * - A damaged backup beside an unreadable main is set aside as NAME.bak.bad-TIME (like startNew), not left to be overwritten by the next save.
      * staged is checked again here (whole object, shape, not newer): installing a bad file would lock the library.
      * Returns the set-aside file, or null when there was no file.
+     * Rules for callers: pass only a staged file of an OK {@link LibraryBackup.Checked}, from a staging folder on the same
+     * volume as the library (filesDir/restore-staging, never cacheDir or external storage: the install is a rename). Order:
+     * check, then replaceWith for reels, then for shots; when reels succeeded and shots failed, report exactly that (reels
+     * are already replaced). Only one check or restore at a time. The staged file is moved away: afterwards (and on cancel)
+     * the caller must call {@link LibraryBackup#clear} on the staging folder (manifest.json stays there).
      */
     synchronized File replaceWith(File staged) throws IOException {
         ensureRead();
