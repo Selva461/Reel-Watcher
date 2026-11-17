@@ -394,6 +394,77 @@ public class LibraryBackupTest {
         assertEquals(0, list(st).length);
     }
 
+    /** A stream of a real backup that throws an Error (not an Exception) after `after` bytes, as an out-of-memory or a too deep JSON would. */
+    private static java.io.InputStream failingAfter(byte[] zip, int after, Error error) {
+        return new java.io.InputStream() {
+            int pos;
+
+            @Override
+            public int read() {
+                byte[] one = new byte[1];
+                return read(one, 0, 1) < 0 ? -1 : one[0] & 0xff;
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) {
+                if (pos >= after) throw error;
+                int n = Math.min(len, Math.min(zip.length - pos, after - pos));
+                if (n <= 0) return -1;
+                System.arraycopy(zip, pos, b, off, n);
+                pos += n;
+                return n;
+            }
+        };
+    }
+
+    @Test
+    public void anErrorThatEscapesTheCheckStillLeavesStagingEmpty() throws Exception {
+        byte[] zip = backup(REELS, SHOTS);
+        int n = zip.length;
+        int cd = (zip[n - 6] & 0xff) | (zip[n - 5] & 0xff) << 8 | (zip[n - 4] & 0xff) << 16 | (zip[n - 3] & 0xff) << 24;
+        for (int after : new int[]{cd - 5, cd / 2, n}) {  // inside the manifest, inside the files, after everything (the content check)
+            File staging = tmp.newFolder();
+            try {
+                LibraryBackup.check(failingAfter(zip, after, new StackOverflowError("deep")), staging, MAX);
+                if (after < n) fail("the Error is rethrown, not swallowed (cut at " + after + ")");
+            } catch (StackOverflowError expected) {
+                // rethrown
+            }
+            if (after < n) assertEquals("cut at " + after + ": nothing unverified stays", 0, list(staging).length);
+        }
+        // an Error while the files are being judged: reels.json is staged and whole at that moment
+        File staging = tmp.newFolder();
+        byte[] reels = b(REELS);
+        byte[] z = zip("reels.json", reels, "manifest.json", mf(manifest(reels, null)));
+        try {
+            LibraryBackup.check(failingAfter(z, z.length - 10, new OutOfMemoryError("big")), staging, MAX);
+            fail();
+        } catch (OutOfMemoryError expected) {
+            // rethrown
+        }
+        assertEquals(0, list(staging).length);
+    }
+
+    @Test
+    public void aBackupNeedsAReelsSnapshotAndTheCallersStreamStaysOpen() throws Exception {
+        try {
+            LibraryBackup.write(new ByteArrayOutputStream(), null, 1, null, 1, null, "v", 1, 0L);
+            fail();
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage(), expected.getMessage().contains("reelsSnapshot"));
+        }
+        final boolean[] closed = {false};
+        ByteArrayOutputStream out = new ByteArrayOutputStream() {
+            @Override
+            public void close() {
+                closed[0] = true;
+            }
+        };
+        LibraryBackup.write(out, file(REELS), 1, null, 1, null, "v", 1, 0L);
+        assertFalse("write finishes the ZIP but leaves out open", closed[0]);
+        assertTrue(check(out.toByteArray()).ok());
+    }
+
     // ------------------------------------------------------------------ every released library
 
     @Test

@@ -425,7 +425,9 @@ final class LibraryFile {
      * - The file in place is renamed to NAME.before-restore-STAMP (a name that never exists yet): never deleted, never
      *   overwritten, so a second restore keeps a second one. The backup (NAME.bak) is left exactly as it is.
      * - It works while locked, and unlocks. The revision advances, so a page that loaded earlier has its next save refused as stale.
-     * - If staged cannot be moved into place, the set-aside file is moved back and an IOException is thrown (state unchanged).
+     * - main is never missing: the set-aside file is a hard link (or a synced copy) of it, and the staged file is renamed over
+     *   main in one atomic step. If that fails for any reason (an Error too) the set-aside link is removed and main is as it was.
+     * - A damaged backup beside an unreadable main is set aside as NAME.bak.bad-TIME (like startNew), not left to be overwritten by the next save.
      * staged is checked again here (whole object, shape, not newer): installing a bad file would lock the library.
      * Returns the set-aside file, or null when there was no file.
      */
@@ -435,31 +437,56 @@ final class LibraryFile {
         if (!staged.isFile()) throw new IOException("Nothing to restore from: " + staged);
         Good g = inspect(staged, shape, schemaKey);
         if (g == null || !g.shapeOk || newer(g.schema)) throw new IOException("The file to restore is not a usable " + main.getName());
+        // A damaged backup beside an unreadable main must survive the next save (which moves main over .bak), as startNew keeps it.
+        boolean keepBadBak = (state == State.UNREADABLE || !trusted) && bak.exists() && !isValid(bak, shape);
         File aside = null;
         if (main.exists()) {
             String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date());
             aside = new File(main.getParentFile(), main.getName() + ".before-restore-" + stamp);
             for (int i = 2; aside.exists(); i++) aside = new File(main.getParentFile(), main.getName() + ".before-restore-" + stamp + "-" + i);
-            move(main, aside);  // fails: nothing has changed
+            link(main, aside);  // a second name for main: main itself is never missing, whatever happens next
         }
         try {
-            mover.move(staged, main);
-        } catch (IOException e) {
-            if (aside != null) {
-                try {
-                    move(aside, main);
-                } catch (IOException back) {
-                    e.addSuppressed(back);  // main is missing but the set-aside file and .bak are there; the next read() restores from .bak
-                }
-            }
-            throw e;
+            mover.move(staged, main);  // one atomic rename over main
+        } catch (Throwable t) {  // an Error too: the state must stay consistent
+            if (aside != null) aside.delete();  // only our own link or copy; main was never touched
+            throw t;
         }
         trusted = true;
         locked = false;
         state = State.OK;
         notice = "restored";
         revision++;
+        if (keepBadBak) {
+            try {
+                quarantine(bak);
+            } catch (IOException e) {
+                trusted = false;  // the next save then sets main aside instead of moving it over the damaged backup
+            }
+        }
         return aside;
+    }
+
+    /** to becomes a second name for from (a hard link), or a synced copy when linking is not possible. Never overwrites. */
+    private static void link(File from, File to) throws IOException {
+        try {
+            Files.createLink(to.toPath(), from.toPath());
+            return;
+        } catch (java.nio.file.FileAlreadyExistsException e) {
+            throw e;
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
+            // fall through to a copy
+        }
+        File part = new File(to.getParentFile(), to.getName() + ".part");
+        try {
+            Files.copy(from.toPath(), part.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            try (java.nio.channels.FileChannel c = java.nio.channels.FileChannel.open(part.toPath(), java.nio.file.StandardOpenOption.WRITE)) {
+                c.force(true);
+            }
+            move(part, to);
+        } finally {
+            part.delete();
+        }
     }
 
     // ------------------------------------------------------------------ recovery you choose

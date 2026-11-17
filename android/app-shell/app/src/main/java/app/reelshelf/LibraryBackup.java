@@ -52,11 +52,24 @@ final class LibraryBackup {
      * Writes the backup ZIP to out: reels, then shots (when shotsSnapshot is not null), then the manifest. The snapshots are
      * files from {@link LibraryFile#snapshotTo}, streamed through a 64 KB buffer and hashed as they go: never parsed, never
      * held whole. schema numbers, counts and the app version are the caller's (counts only to show on screen). out is
-     * finished but not closed.
+     * finished but not closed. When this throws, what was written to out is incomplete: the caller must discard it
+     * (delete the half-written file). The ZipOutputStream is closed here either way (its Deflater is released), without closing out.
+     * reelsSnapshot must not be null (IllegalArgumentException).
      */
     static void write(OutputStream out, File reelsSnapshot, int reelsSchema, File shotsSnapshot, int shotsSchema,
                       JSONObject counts, String versionName, int versionCode, long nowMillis) throws IOException {
-        ZipOutputStream zip = new ZipOutputStream(out);
+        if (reelsSnapshot == null) throw new IllegalArgumentException("A backup needs the reels file: reelsSnapshot is null");
+        ZipOutputStream zip = new ZipOutputStream(new java.io.FilterOutputStream(out) {
+            @Override
+            public void write(byte[] b, int off, int len) throws IOException {
+                out.write(b, off, len);
+            }
+
+            @Override
+            public void close() throws IOException {
+                flush();  // out stays the caller's
+            }
+        });
         zip.setLevel(java.util.zip.Deflater.DEFAULT_COMPRESSION);
         JSONObject files = new JSONObject();
         try {
@@ -82,6 +95,12 @@ final class LibraryBackup {
             zip.flush();
         } catch (org.json.JSONException e) {
             throw new IOException(e);
+        } finally {
+            try {
+                zip.close();  // releases the Deflater; after a failure the caller discards the output anyway
+            } catch (IOException ignored) {
+                // the original failure, if any, is the one that matters
+            }
         }
     }
 
@@ -159,9 +178,19 @@ final class LibraryBackup {
      * twice, an entry bigger than maxBytes, more than maxBytes in all (a zip bomb stops at the limit), a damaged or
      * truncated ZIP, a missing or unreadable manifest, another format, a newer format_version or schema, a file the manifest
      * does not list, a listed file that is missing or has other bytes or SHA-256, no reels.json, and content that
-     * {@link LibraryFile#inspect} does not accept. A refusal leaves staging empty. in is not closed.
+     * {@link LibraryFile#inspect} does not accept. A refusal leaves staging empty, and so does an Error that escapes (it is rethrown). in is not closed.
      */
     static Checked check(InputStream in, File staging, long maxBytes) {
+        Checked result = null;
+        try {
+            result = checkOrRefuse(in, staging, maxBytes);
+            return result;
+        } finally {
+            if (result == null || !result.ok()) clear(staging);  // also when an Error (out of memory, deep nesting) escapes: nothing unverified stays
+        }
+    }
+
+    private static Checked checkOrRefuse(InputStream in, File staging, long maxBytes) {
         try {
             prepare(staging);
             Checked c = checkInto(in, staging, maxBytes);
