@@ -988,6 +988,13 @@ public class LibraryFileTest {
             // refused
         }
         assertEquals("mine", get(there));
+        try {
+            ok.snapshot(there, false);  // the copy path too
+            fail();
+        } catch (IOException expected) {
+            // refused
+        }
+        assertEquals("mine", get(there));
     }
 
     @Test
