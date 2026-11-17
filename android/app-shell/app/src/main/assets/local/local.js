@@ -846,6 +846,22 @@ function notesHtml(n) {
     ${sec("Tags", (n.tags || []).length ? `<span class="tagrow">${n.tags.map((t) => `<span class="tag">#${esc(t)}</span>`).join("")}</span>` : "")}</div>`;
 }
 
+/** What went wrong with a reel that failed: how often, why, and when it is tried again (or that it was given up on). */
+function retryLine(r) {
+  const why = esc(r.last_fail || "no reason was given");
+  if (r.tries >= Notes.RETRY_CAP) return `Stopped trying after ${plural(r.tries, "try", "tries")}: ${why}.`;
+  return `Tried ${plural(r.tries, "time")}, last on ${day(r.last_fail_at)}: ${why}. Next try after ${day(r.next_try_at)}.`;
+}
+
+/** Reels Start gave up on or put off: the ones that could not be finished, with one button to try them all again. */
+function failedScreen() {
+  const failed = db.reels.filter((r) => r.status === "failed");
+  $app.innerHTML = `${header("Could not finish", "#/inbox")}
+    ${failed.length ? `<button class="btn primary block" id="retryAll">Try all again</button>` : `<div class="empty">Nothing here.</div>`}
+    <div class="stack">${failed.map((r) => `${reelRow(r)}${r.tries ? `<span class="small muted">${retryLine(r)}</span>` : ""}`).join("")}</div>`;
+  bind("#retryAll", "click", () => { failed.forEach((r) => { r.tries = 0; r.next_try_at = 0; }); saveDb(); startRun(failed.map((r) => r.code)); });
+}
+
 function reelScreen(code) {
   const r = reel(code);
   if (!r) { $app.innerHTML = `${header("Not found", "#/")}<div class="empty">This reel is no longer in your shelf.</div>`; return; }
@@ -857,6 +873,7 @@ function reelScreen(code) {
       <span class="small muted">${esc([r.author ? "@" + r.author : "", "saved " + day(r.added_at), ...(r.collections || [])].filter(Boolean).join(" · "))}</span></div>
     ${backFrom === r.code ? `<div class="card stack"><strong>Back from Instagram</strong><span class="small muted">${r.comments ? "Comments are here. " : "Took screenshots of the comments? Tap Add comments. "}Then tap Read this reel properly: one note from the video, what is said, the text on screen and the comments.</span></div>` : ""}
     ${r.error && !n ? `<div class="card small">${esc(r.error)}</div>` : ""}
+    ${r.tries && !n ? `<div class="card small">${retryLine(r)}</div>` : ""}
     ${n ? notesHtml(n) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">${r.video_tried ? "Instagram gave too little to work from. Type what the reel says below." : "Tap Start: Reel Shelf reads what the reel shows and says, then writes the notes."}</span></div>`}
     ${r.content ? `<span class="small muted">Read from: ${esc({ caption: "the caption only (Instagram gave no video)", video: "caption and the text on screen", "video+speech": "caption, the text on screen and what is said" }[r.content] || r.content)}</span>` : ""}
     <div class="grid2">
@@ -864,6 +881,7 @@ function reelScreen(code) {
       ${r.url ? `<button class="btn" id="open">Open in ${Notes.isYoutube(r) ? "YouTube" : "Instagram"}</button>` : ""}
       ${n ? `<button class="btn" id="copy">Copy notes</button>` : ""}
       ${Notes.isYoutube(r) && r.caption_read && !r.transcript ? `<button class="btn" id="ytagain">Read from YouTube again</button>` : ""}
+      ${r.tries && !n ? `<button class="btn primary" id="retryReel">Try again now</button>` : ""}
       ${r.url && !Notes.isYoutube(r) ? `<button class="btn primary" id="deep">Read this reel properly</button>` : ""}
       ${r.url ? `<button class="btn" id="addcom">Add comments</button>` : ""}
       ${ready && r.url ? `<button class="btn" id="phoneai">${n ? "Redo with phone AI" : "Write with phone AI"}</button>` : ""}
@@ -904,6 +922,7 @@ function reelScreen(code) {
     startRun([r.code]);
   });
   bind("#addrt", "click", () => titleDialog(null, r.code));
+  bind("#retryReel", "click", () => { r.tries = 0; r.next_try_at = 0; saveDb(); startRun([r.code]); });
   bind("#ytagain", "click", () => { r.caption_read = 0; if (r.notes_by === "auto") { r.notes = null; r.status = "new"; } saveDb(); startRun([r.code]); });
   bind("#del", "click", () => { if (confirm("Remove this reel and its notes from Reel Shelf?")) { db.reels = db.reels.filter((x) => x !== r); saveDb(); location.hash = "#/"; } });
 }
@@ -1155,6 +1174,9 @@ function runScreen() {
       ${(() => { const old = db.reels.filter((r) => r.caption_read && !r.video_tried && !Notes.isYoutube(r)); if (!old.length) return "";
         const fun = old.filter((r) => Notes.reelKind(r) === "fun").length;
         return `<p class="hint">${plural(old.length - fun, "useful reel")} will be read properly first (video, text on screen, speech), newest first, then ${plural(fun, "meme or fun reel")} (the note explains the joke).</p>`; })()}
+      ${(() => { const parked = db.reels.filter((r) => r.status === "failed" && (r.tries || 0) >= Notes.RETRY_CAP).length;
+        const wait = db.reels.filter((r) => r.status === "failed" && (r.tries || 0) < Notes.RETRY_CAP && (r.next_try_at || 0) > Date.now()).length;
+        return wait || parked ? `<p class="hint">${plural(wait, "reel")} ${wait === 1 ? "waits" : "wait"} for a retry; ${parked} stopped after ${Notes.RETRY_CAP} tries. <a href="#/failed">See them</a></p>` : ""; })()}
       ${todo.length > 5 ? `<button class="btn primary block" id="try5">Try on 5 reels first</button>` : ""}
       ${todo.length ? `<button class="btn ${todo.length > 5 ? "" : "primary"} block" id="start">Start: ${plural(todo.length, "reel")}</button>` : `<div class="empty">Nothing waiting. Share a reel to Reel Shelf first.</div>`}
       <p class="hint">Start reads each reel: its caption, the text shown on screen and${speechInfo().ready ? "" : " (after you download the speech model in Settings)"} what is said. Instagram is asked gently, one reel every few seconds, with no account.</p>
@@ -1314,7 +1336,7 @@ function settingsScreen() {
 
 const ROUTES = [
   [/^#?\/?$/, libraryScreen, "lib", true], [/^#\/inbox$/, inboxScreen, "inbox", true],
-  [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "lib"], [/^#\/file$/, fileScreen, "inbox"],
+  [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "lib"], [/^#\/file$/, fileScreen, "inbox"], [/^#\/failed$/, failedScreen, "inbox"],
   [/^#\/ask(\?.*)?$/, askScreen, "lib"], [/^#\/topic\/(.+)$/, (m) => topicScreen(decodeURIComponent(m[1])), "lib"],
   [/^#\/watch$/, () => { lib.kind = "movies"; location.replace("#/"); }, "lib"], [/^#\/m\/(.+)$/, (m) => titleScreen(decodeURIComponent(m[1])), "lib"],
   [/^#\/add$/, addScreen, "inbox"], [/^#\/run$/, runScreen, "inbox"],
