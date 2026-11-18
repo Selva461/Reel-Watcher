@@ -31,7 +31,9 @@ import java.util.function.IntSupplier;
  * - an exception while deleting stops the sweep of that folder.
  * What it records: how many files and bytes went, how many entries it found that are not on the list (counts, never a file
  * name: not in the log, not in the preferences). Runs once per process, 20 seconds after the app starts, on its own
- * thread, and never while a job or the nightly run is working.
+ * thread, and only when no job or nightly run is running at that moment (checked once, at the start). What can start
+ * later is covered file by file: the copying lock, the count of videos being read (asked again before every delete) and
+ * the library's own state.
  */
 final class TempSweeper {
     private TempSweeper() {
@@ -122,9 +124,9 @@ final class TempSweeper {
             TempSweep.Busy busy = new TempSweep.Busy(true, videoReads.getAsInt(), isOk(reels), isOk(shots));
             if (folder == TempSweep.Folder.STAGING) {
                 // under the copying lock, and only when it is free right now: a share that is copying is never disturbed
-                MediaBatch.trySweepStaging(() -> sweepFolder(folder, dir, now, busy.holdingStagingLock(), reels, shots, io, out));
+                MediaBatch.trySweepStaging(() -> sweepFolder(folder, dir, now, busy.holdingStagingLock(), videoReads, reels, shots, io, out));
             } else {
-                sweepFolder(folder, dir, now, busy, reels, shots, io, out);
+                sweepFolder(folder, dir, now, busy, videoReads, reels, shots, io, out);
             }
         }
         return out;
@@ -147,7 +149,7 @@ final class TempSweeper {
         return f.state() == LibraryFile.State.OK && !f.locked();
     }
 
-    private static void sweepFolder(TempSweep.Folder folder, File dir, long now, TempSweep.Busy busy, LibraryFile reels, LibraryFile shots, Io io, Result out) {
+    private static void sweepFolder(TempSweep.Folder folder, File dir, long now, TempSweep.Busy busy, IntSupplier videoReads, LibraryFile reels, LibraryFile shots, Io io, Result out) {
         List<TempSweep.Entry> listed = list(folder, dir, io);
         if (listed == null) return;  // missing, a link, or not readable: the whole folder is kept
         List<TempSweep.Verdict> verdicts = TempSweep.plan(listed, now, busy);
@@ -157,6 +159,8 @@ final class TempSweeper {
         for (TempSweep.Verdict v : verdicts) {
             if (!v.delete()) continue;
             TempSweep.Entry e = v.entry;
+            // decided again with a fresh count of the videos being read: a read that started since the listing is respected
+            if (!TempSweep.decide(e, now, busy.withVideoReads(videoReads.getAsInt())).delete()) continue;
             try {
                 boolean gone;
                 switch (v.rule.guard) {
