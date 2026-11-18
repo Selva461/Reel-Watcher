@@ -101,7 +101,8 @@ final class ModelCatalog {
     /**
      * How the speech ZIP may be unpacked. The pinned size and fingerprints are what prove the ZIP; these limits only stop a
      * runaway unpack, so they sit a little (10%) above what the published file holds: well below the old 400 MB cap, but not
-     * so tight that an extra folder entry or a README change in a re-packed copy of the same model would block the download.
+     * so tight that moving the row to a re-packed copy of the same model (an extra folder entry, a longer README) fails
+     * until these numbers are edited in the same step.
      */
     static final ModelZip.Plan SPEECH_ZIP = new ModelZip.Plan(SPEECH_FOLDER, SPEECH_ENTRIES + SPEECH_ENTRIES / 10,
             SPEECH_UNPACKED + SPEECH_UNPACKED / 10, "am", "conf");
