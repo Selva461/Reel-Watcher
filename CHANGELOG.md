@@ -5,6 +5,19 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.18
+- Reel Shelf now cleans up its own leftover temporary files after a crash or a force-stop. About 20 seconds after you
+  open the app, and never while a job or the nightly run is working, it looks in a few fixed places for the unfinished
+  files that a cut-off share, a cut-off video read or a cut-off save can leave behind, and removes the ones that are
+  clearly stale: a half-copied shared picture or video, the temporary copy of a video that was being read (after 6
+  hours), the key pictures and sound made for the on-phone AI (after 6 hours), and a library save that never finished
+  (after 1 hour, and only when your library opened normally this time).
+- It never touches your library or its backups, your notes, your pictures or videos (including the ones shared to Reel
+  Shelf that have not been read yet), the AI and speech models or their downloads, or anything it does not recognise.
+  Only a file with one of these exact names in one of these exact places can be removed, and when anything is in doubt
+  the file is left alone. It shows no message; it only keeps a count for a Storage screen that may come later.
+- Checked with automatic tests on a computer, including a long list of things it must never delete. Not tried on a phone.
+
 ## 1.3.17
 - Groundwork for backing up and restoring your library. Nothing changes for you yet: there is no button, no screen
   and nothing in the app uses it, so Reel Shelf looks and works exactly as before. The next versions add "Back up now"

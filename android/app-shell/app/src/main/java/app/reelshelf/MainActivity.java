@@ -99,6 +99,7 @@ public class MainActivity extends Activity implements Host {
         WorkService.STOP_HOOKS.add(stopHook);
         NightRun.schedule(this);  // the nightly run (on unless switched off in Settings)
         if (NightRun.prefs(this).getBoolean("nightly_check", false)) NightlyCheck.schedule(this, true);  // drops the old Wi-Fi + charger rule
+        TempSweeper.startOnce(this);  // once per process, 20 s from now, on its own thread: removes the app's own leftover temp files
     }
 
     /** The built-in page (not a web site) is showing: only it may use window.RN. */

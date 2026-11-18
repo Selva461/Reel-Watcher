@@ -561,6 +561,55 @@ public class TempSweepTest {
     }
 
     @Test
+    public void aLinkThatLooksJustLikeTheListedFileIsStillKeptByTheSecondLook() throws Exception {
+        // same size and same time as the file that was listed, so only "is it still a regular file?" can tell
+        libraryOk();
+        File gallery = tmp.newFolder("gallery");
+        File victim = put(gallery, "holiday.mp4", 500, TEN_YEARS);
+        int targetLength = victim.getPath().getBytes(StandardCharsets.UTF_8).length;  // a link's size is the length of its target path
+        File swapped = put(staging, "copy-1.part", targetLength, TEN_YEARS);
+        TempSweeper.Result r = sweep(new TempSweeper.Io() {
+            @Override
+            public void afterListing(Folder folder) {
+                if (folder != Folder.STAGING) return;
+                try {
+                    Files.delete(swapped.toPath());
+                    Files.createSymbolicLink(swapped.toPath(), victim.toPath());
+                    ageLink(swapped.toPath(), NOW - TEN_YEARS);
+                    long size = Files.readAttributes(swapped.toPath(), BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).size();
+                    Assume.assumeTrue("this system gives a link another size", size == targetLength);
+                } catch (UnsupportedOperationException | IOException e) {
+                    Assume.assumeNoException("no symbolic links on this system", e);
+                }
+            }
+        });
+        assertTrue(Files.isSymbolicLink(swapped.toPath()));
+        assertTrue(victim.isFile() && victim.length() == 500);
+        assertEquals(0, r.files);
+    }
+
+    @Test
+    public void aLibraryThatGoesBadAfterTheCheckKeepsItsTmpBecauseTheDeleteGoesThroughDropTmp() throws Exception {
+        libraryOk();
+        File tmpFile = put(files, "reels.json.tmp", 10, TEN_YEARS);
+        TempSweeper.Result r = sweep(new TempSweeper.Io() {
+            @Override
+            public void afterListing(Folder folder) {
+                if (folder != Folder.FILES) return;
+                try {
+                    Files.write(new File(files, "reels.json").toPath(), "{\"reels\":[".getBytes(StandardCharsets.UTF_8));  // the file is damaged now ...
+                } catch (IOException e) {
+                    throw new AssertionError(e);
+                }
+                LibraryFile.reels(files).read();  // ... and the library finds out: locked
+                assertTrue(LibraryFile.reels(files).locked());
+            }
+        });
+        assertTrue("the library's lock decides, not the earlier look", tmpFile.isFile());
+        assertEquals(0, r.files);
+    }
+
+    @Test
     public void aFileThatVanishedBetweenListingAndDeleteIsNotAnError() throws Exception {
         libraryOk();
         File gone = put(staging, "copy-1.part", 10, TEN_YEARS);
