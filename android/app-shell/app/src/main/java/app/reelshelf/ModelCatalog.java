@@ -45,7 +45,7 @@ final class ModelCatalog {
     }
 
     /** Shown when a name is not in the table. */
-    static final String UNKNOWN = "Only the models listed in Settings can be downloaded. Use 'Pick a model file' for others.";
+    static final String UNKNOWN = "Only the models listed in Settings can be downloaded. Use 'Use my own model file (.litertlm)' for others.";
 
     private static final String HF = "https://huggingface.co/litert-community/";
 

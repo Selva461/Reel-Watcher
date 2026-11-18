@@ -294,6 +294,7 @@ public class ModelVerifierTest {
 
     @Test
     public void aGoodFileReplacesAnOlderOneInOneStep() throws Exception {
+        // The limit of this test: it sees the result, so it cannot tell an atomic replace from delete-then-rename.
         write(dest, "older model".getBytes(StandardCharsets.UTF_8));
         Server s = serve(x -> whole(x, good));
         download(s);
@@ -425,6 +426,29 @@ public class ModelVerifierTest {
     }
 
     @Test
+    public void aRedirectWithUserInfoIsRefused() throws Exception {
+        // "user@" in front of an allowed host: another URL parser may read the other side of the "@" as the host
+        for (String to : new String[]{"https://user:secret@huggingface.co/x", "https://huggingface.co@huggingface.co/x"}) {
+            Server s = serve(x -> reply(x, 302, new byte[0], "Location", to));
+            assertEquals(to, ModelVerifier.ODD_ADDRESS, assertThrows(IOException.class, () -> download(s)).getMessage());
+            assertEquals(to + ": only the first address was asked", 1, s.requests.get());
+            assertFalse(part.exists());
+            assertNothingInstalled();
+        }
+    }
+
+    @Test
+    public void aRedirectWithABackslashIsRefused() throws Exception {
+        for (String to : new String[]{"https://huggingface.co/x\\y", "https://evil.example.com\\@huggingface.co/x", "https://huggingface.co\\@evil.example.com/x"}) {
+            Server s = serve(x -> reply(x, 302, new byte[0], "Location", to));
+            assertEquals(to, ModelVerifier.ODD_ADDRESS, assertThrows(IOException.class, () -> download(s)).getMessage());
+            assertEquals(to + ": only the first address was asked", 1, s.requests.get());
+            assertFalse(part.exists());
+            assertNothingInstalled();
+        }
+    }
+
+    @Test
     public void aRedirectToHttpIsRefused() throws Exception {
         Server s = serve(x -> reply(x, 302, new byte[0], "Location", "http://huggingface.co/x"));
         assertEquals("Refused an insecure download address", assertThrows(IOException.class, () -> download(s)).getMessage());
@@ -541,6 +565,31 @@ public class ModelVerifierTest {
         Server none = serve(x -> reply(x, 206, rest));  // no Content-Range at all
         assertThrows(IOException.class, () -> download(none));
         assertArrayEquals(kept, read(part));
+    }
+
+    @Test
+    public void aContentRangeWithHugeNumbersIsRefusedAsAnOddAnswer_notACrash() throws Exception {
+        int k = 90000;
+        byte[] kept = prefix(good, k);
+        byte[] rest = Arrays.copyOfRange(good, k, good.length);
+        String twenty = "99999999999999999999", nineteen = "9999999999999999999";  // too big for a long
+        for (String range : new String[]{"bytes " + k + "-" + twenty + "/" + twenty, "bytes " + k + "-" + nineteen + "/" + nineteen, "bytes " + twenty + "-" + twenty + "/" + twenty}) {
+            write(part, kept);
+            Server s = serve(x -> reply(x, 206, rest, "Content-Range", range));
+            assertEquals(range, ModelVerifier.ODD_ANSWER, assertThrows(range, IOException.class, () -> download(s)).getMessage());
+            assertArrayEquals("the part is kept", kept, read(part));
+            assertNothingInstalled();
+        }
+    }
+
+    @Test
+    public void aChunked200ToARangeIsRefusedAndThePartIsNotCutDown() throws Exception {
+        byte[] kept = prefix(good, 80000);
+        write(part, kept);
+        Server s = serve(x -> chunked(x, good, good.length));  // ignores the Range and does not say how long it is
+        assertEquals(ModelVerifier.ODD_ANSWER, assertThrows(IOException.class, () -> download(s)).getMessage());
+        assertArrayEquals("the part was not truncated for an answer of unknown size", kept, read(part));
+        assertNothingInstalled();
     }
 
     @Test

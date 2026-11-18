@@ -81,7 +81,7 @@ public class ModelCatalogTest {
         assertNull(ModelCatalog.lookup(ModelCatalog.GEMMA4.file + ".part"));
         assertNull("an id is not a file name", ModelCatalog.lookup("gemma4"));
         assertNull(ModelCatalog.lookup("https://example.com/other.litertlm"));
-        assertEquals("Only the models listed in Settings can be downloaded. Use 'Pick a model file' for others.", ModelCatalog.UNKNOWN);
+        assertEquals("Only the models listed in Settings can be downloaded. Use 'Use my own model file (.litertlm)' for others.", ModelCatalog.UNKNOWN);
     }
 
     @Test
@@ -142,6 +142,15 @@ public class ModelCatalogTest {
             assertTrue(e.id + ": the page shows " + shown + " bytes, the catalog says " + e.bytes, Math.abs(shown - e.bytes) <= e.bytes * 0.01);
         }
         assertEquals("the page's first model is the default", ModelCatalog.DEFAULT.file, files.get(0));
+    }
+
+    @Test
+    public void theMessagesNameButtonsThePageReallyHas() throws Exception {
+        String js = localJs();
+        assertTrue("the page has the button the unknown-name message points to", js.contains("Use my own model file (.litertlm)"));
+        assertTrue(ModelCatalog.UNKNOWN, ModelCatalog.UNKNOWN.contains("Use my own model file (.litertlm)"));
+        assertTrue("a part is continued with this button", js.contains("\"Continue download\""));
+        assertTrue(ModelVerifier.STOPPED_EARLY, ModelVerifier.STOPPED_EARLY.contains("Continue download"));
     }
 
     @Test

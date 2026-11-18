@@ -45,14 +45,15 @@ final class ModelVerifier {
     static final long RESERVE = 200L * 1024 * 1024;
 
     static final String DAMAGED = "The download was damaged or changed on the way (check failed). Nothing was installed. Tap Download to try again.";
-    static final String STOPPED_EARLY = "The download stopped early. Tap Download to continue.";
+    static final String STOPPED_EARLY = "The download stopped early. Tap Continue download to finish it.";
     static final String WRONG_SIZE = "The server did not send the published model (wrong size). Nothing was written. "
             + "If this network asks you to sign in, do that and tap Download to try again.";
-    private static final String ODD_ANSWER = "The download server answered in an unexpected way. Nothing was written. Try again later.";
+    static final String ODD_ADDRESS = "Refused an unusual download address. Nothing was written.";
+    static final String ODD_ANSWER = "The download server answered in an unexpected way. Nothing was written. Try again later.";
 
     private static final int BUFFER = 64 * 1024;
     private static final int MAX_HOPS = 6;
-    private static final Pattern CONTENT_RANGE = Pattern.compile("^bytes (\\d+)-(\\d+)/(\\d+)$");
+    private static final Pattern CONTENT_RANGE = Pattern.compile("^bytes (\\d{1,18})-(\\d{1,18})/(\\d{1,18})$");
 
     private final Control control;
     /** Tests only: connect to this base (for example "http://127.0.0.1:8080") instead of the address's own host. The address is still checked as given. */
@@ -113,6 +114,7 @@ final class ModelVerifier {
                 if (code == 200) {  // the whole file: from the start
                     long len = c.getContentLengthLong();
                     if (len >= 0 && len != e.bytes) throw new IOException(WRONG_SIZE);
+                    if (len < 0 && have > 0) throw new IOException(ODD_ANSWER);  // the size is not known yet: the part must not be cut down for it
                     append = false;
                     have = 0;
                     sha.reset();
@@ -208,6 +210,7 @@ final class ModelVerifier {
         for (int hop = 0; hop < MAX_HOPS; hop++) {
             if (!"https".equals(u.getProtocol())) throw new IOException("Refused an insecure download address");
             if (!allowedHost(u.getHost())) throw new IOException("Refused a download from another site (" + u.getHost() + "). Nothing was written.");
+            if (u.getUserInfo() != null) throw new IOException(ODD_ADDRESS);  // "user@" can hide the real host from another URL parser
             HttpURLConnection c = (HttpURLConnection) (testBase == null ? u : new URL(testBase + u.getFile())).openConnection();
             c.setInstanceFollowRedirects(false);
             c.setConnectTimeout(20000);
@@ -218,6 +221,7 @@ final class ModelVerifier {
             String to = c.getHeaderField("Location");
             if (code >= 300 && code < 400 && to != null) {
                 c.disconnect();
+                if (to.indexOf('\\') >= 0) throw new IOException(ODD_ADDRESS);  // parsers disagree about "\"; no real address has one
                 u = new URL(u, to);
                 continue;
             }
