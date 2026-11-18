@@ -8,13 +8,19 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 ## 1.3.20
 - A **Back up now** button in Settings (under "Backup and restore") saves one file with your whole library to
   Downloads/ReelShelf, named `ReelShelf-backup-<date>-<time>.zip`. It holds your reels, notes, watchlist, quotes and
-  products (and the list of screenshots already read). It checks that there is enough free space first, and after
-  saving it reads the file back and checks it, so a backup that could not be restored is deleted and reported as
-  failed instead of being kept. The message tells you where it saved, how many reels and titles it holds and how big
-  it is. Your library is not changed by a backup, and a backup is refused while the library cannot be opened (then the
-  "Save the unreadable file" button is what you have, as before).
+  products, and the list of screenshots already read. It checks that there is enough free space first, and after
+  saving it reads the file back and checks it, so a backup that could not be read back is deleted and reported as
+  failed instead of being kept. While it is being made and checked, the file is hidden (Android 10 or newer) or has
+  the ending `.part` (Android 8 and 9), and only gets its real name once the check has passed, so a half-finished file
+  is never mistaken for a backup. If Reel Shelf is stopped in the middle, a half-finished file may remain (Android 10
+  or newer removes the hidden one by itself after about a week; on Android 8 and 9 delete the `.part` file): it is not
+  a backup. The message tells you where it saved (with the name Android really gave the file), how many
+  reels and titles it holds and how big it is. Your library is not changed by a backup, and a backup is refused while
+  the library cannot be opened (then the "Save the unreadable file to Downloads" or "Save a copy to Downloads" button
+  is what you have, as before).
 - Privacy: the backup file has all your notes in it and can be read by any app with access to your files, so keep it
-  somewhere safe or delete it. It does not contain your settings, API keys, AI models, pictures or videos. Reel Shelf
+  somewhere safe or delete it. It does not contain your settings, API keys, AI models, pictures or videos. It also
+  holds a short part of the text read from each of your screenshots, and their file names. Reel Shelf
   never deletes old backups for you. On Android 8 and 9 the file is saved in the app's own folder, which Android
   deletes when you uninstall Reel Shelf, and the screen says so: copy it somewhere else.
 - There is no restore button yet: this version only makes backups. A later version adds restoring.
