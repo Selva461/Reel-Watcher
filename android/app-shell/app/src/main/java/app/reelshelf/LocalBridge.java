@@ -290,12 +290,14 @@ final class LocalBridge {
         //noinspection ResultOfMethodCallIgnored
         d.mkdirs();
         File f = new File(d, name);
+        boolean opened = false;  // only a file this call opened for writing is deleted when it fails
         try (OutputStream out = new FileOutputStream(f)) {
+            opened = true;
             if (w.to(out) < 0) throw new IOException(emptyMessage);
-        } catch (IOException | RuntimeException e) {
+        } catch (Throwable t) {  // an Error too, as on Android 10 and newer: no half-written file stays in Downloads
             //noinspection ResultOfMethodCallIgnored
-            f.delete();
-            throw e;
+            if (opened) f.delete();
+            throw t;
         }
         return f.getPath();
     }
@@ -392,7 +394,7 @@ final class LocalBridge {
             final String vName = versionName;
             final int vCode = versionCode;
             final boolean withShots = haveShots;
-            final JSONObject counts = BackupNow.counts(countsJson, haveShots);
+            final JSONObject counts = BackupNow.counts(countsJson, haveShots);  // display only; 0 screenshots here means "not counted", whether or not shots.json is in the ZIP
             long now = System.currentTimeMillis();
             long named = BackupNow.nameTime(now, lastBackupNameTime);
             lastBackupNameTime = named;

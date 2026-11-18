@@ -78,7 +78,12 @@ final class BackupNow {
                 + " MB are free. Free up some space and try again. Your library was not changed.";
     }
 
-    /** What the manifest says was in the library, for the screen only: just these three numbers, taken from what the page sent, never anything else of it. */
+    /**
+     * What the manifest says was in the library, for the screen only: just these three numbers, taken from what the page sent,
+     * never anything else of it. They are never checked against the files and nothing relies on them. A 0 for "screenshots"
+     * means "not counted" (the page only counts a screenshot list it has already loaded, and 0 is also sent when the list was
+     * left out of the backup), not "there are none": shots.json can be in the ZIP with 0 here.
+     */
     static JSONObject counts(String pageJson, boolean withShots) {
         JSONObject page;
         try {
