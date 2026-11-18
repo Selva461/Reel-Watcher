@@ -226,25 +226,19 @@ def test_security_rebinding_csrf_and_headers(running):
 # ---------------------------------------------------------------- UI in a real browser at phone size
 
 @pytest.fixture
-def page(running):
-    if not CHROME:
-        pytest.skip("Chromium not available")
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
-        ctx = browser.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True,
-                                  permissions=["clipboard-read", "clipboard-write"])
-        pg = ctx.new_page()
-        errors = []
-        pg.on("pageerror", lambda e: errors.append(str(e)))
-        # the app must work under its own Content Security Policy: any violation fails the test
-        pg.on("console", lambda m: errors.append(m.text) if "Content Security Policy" in m.text else None)
-        pg.goto(running["base"] + "/")
-        pg.running = running
-        pg.errors = errors
-        yield pg
-        assert not errors, errors
-        browser.close()
+def page(running, new_context):
+    ctx = new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True,
+                      permissions=["clipboard-read", "clipboard-write"])
+    pg = ctx.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    # the app must work under its own Content Security Policy: any violation fails the test
+    pg.on("console", lambda m: errors.append(m.text) if "Content Security Policy" in m.text else None)
+    pg.goto(running["base"] + "/")
+    pg.running = running
+    pg.errors = errors
+    yield pg
+    assert not errors, errors
 
 
 def no_side_scroll(pg):

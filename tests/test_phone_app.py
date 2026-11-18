@@ -132,32 +132,26 @@ def site():
 
 
 @pytest.fixture
-def phone(site):
-    if not CHROME:
-        pytest.skip("Chromium not available")
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
-        ctx = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
-        ctx.add_init_script(FAKE_RN)
-        pg = ctx.new_page()
-        errors = []
-        pg.on("pageerror", lambda e: errors.append(str(e)))
-        pg.on("console", lambda m: errors.append(m.text) if "Content Security Policy" in m.text or m.type == "error" else None)
-        pg.on("dialog", lambda d: d.accept())
+def phone(site, new_context):
+    ctx = new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
+    ctx.add_init_script(FAKE_RN)
+    pg = ctx.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.on("console", lambda m: errors.append(m.text) if "Content Security Policy" in m.text or m.type == "error" else None)
+    pg.on("dialog", lambda d: d.accept())
 
-        def open_with(state=None, hash_="#/"):
-            pg.goto(site + "#/blank")
-            if state:
-                pg.evaluate("s => sessionStorage.setItem('rn', JSON.stringify(s))", state)
-            pg.goto(site + hash_)
-            pg.reload()
-            pg.wait_for_selector("#app > *")
-        pg.open_with = open_with
-        pg.rn = lambda: pg.evaluate("window.__rn")
-        yield pg
-        assert not errors, errors
-        browser.close()
+    def open_with(state=None, hash_="#/"):
+        pg.goto(site + "#/blank")
+        if state:
+            pg.evaluate("s => sessionStorage.setItem('rn', JSON.stringify(s))", state)
+        pg.goto(site + hash_)
+        pg.reload()
+        pg.wait_for_selector("#app > *")
+    pg.open_with = open_with
+    pg.rn = lambda: pg.evaluate("window.__rn")
+    yield pg
+    assert not errors, errors
 
 
 def db_of(pg):
