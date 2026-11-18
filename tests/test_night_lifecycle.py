@@ -6,6 +6,10 @@ finish; the page waits, then reads everything fresh), and that stopping the nigh
 overwrites newer data. A fake bridge stands in for the phone. No network, no device."""
 import json
 
+import pytest
+
+from test_backup_now import BACKUP_RN
+from test_library_newer import FLAVOURS, assert_untouched, newer_reels, newer_screen, newer_shots, open_newer, settle
 from test_library_safety import PIC, SHOT_STATE
 from test_phone_app import EMBED, db_of, phone, site  # noqa: F401  (pytest fixtures)
 from test_shots import SHOTS_RN
@@ -108,6 +112,37 @@ def test_with_no_run_going_the_app_opens_as_before(phone):
     phone.open_with({"db": GOOD, "shared": [LINK]})
     phone.wait_for_function("() => window.__rn.shared.length === 0")
     assert waiting_screen(phone).count() == 0 and "SHARE0001" in codes(phone)
+
+
+# ---------------------------------------------------------------- the handover meets the library rules of the later versions
+
+@pytest.mark.parametrize("flavour", FLAVOURS)
+def test_a_library_from_a_newer_reel_shelf_is_still_not_opened_or_touched_after_the_handover(phone, flavour):
+    phone.context.add_init_script(FAST)
+    reels, shots = newer_reels(), newer_shots()
+    open_newer(phone, flavour, reels, shots, nightActive=True)
+    waiting_screen(phone).wait_for()
+    settle(phone)
+    assert_untouched(phone, reels, shots)  # while the run finishes the app reads and saves nothing, a newer library included
+    set_state(phone, nightActive=False)
+    waiting_screen(phone).wait_for(state="hidden")
+    newer_screen(phone)  # read fresh: it is the newer-library screen, not the waiting screen and not an open library
+    settle(phone)
+    assert phone.locator("#app button").all_inner_texts() == ["Save a copy to Downloads"]
+    assert_untouched(phone, reels, shots)
+
+
+def test_back_up_now_is_not_offered_while_the_run_finishes_and_is_there_after(phone):
+    phone.context.add_init_script(FAST)
+    phone.context.add_init_script(BACKUP_RN)
+    phone.open_with({"db": GOOD, "nightActive": True}, "#/settings")
+    waiting_screen(phone).wait_for()
+    phone.wait_for_timeout(200)
+    assert phone.locator("#backupnow").count() == 0
+    set_state(phone, nightActive=False)
+    waiting_screen(phone).wait_for(state="hidden")
+    phone.locator("#backupnow").wait_for()
+    assert not phone.rn().get("backupCalls"), "showing the button starts nothing"
 
 
 # ---------------------------------------------------------------- stopping a run keeps its work and newer data
