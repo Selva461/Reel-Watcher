@@ -69,8 +69,7 @@ RESTORE_RN = r"""
       window.__restoreId = id;
       keep();
       const a = st.install || {};
-      if (a.hold) return;
-      setTimeout(() => {
+      const finish = () => {
         const staged = st.staged;
         if (!staged || staged.token !== token) return rnDone(id, false, window.__notReady);
         st.staged = null;  // the token is used up by a call that reaches this point, whatever the answer
@@ -82,7 +81,9 @@ RESTORE_RN = r"""
         if (st.lib && st.lib.reels) st.lib.reels.state = "ok";
         keep();
         rnDone(id, true, JSON.stringify(Object.assign({ set_aside: "%ASIDE%", shots: staged.shots != null ? "restored" : "kept", shots_set_aside: staged.shots != null ? "%SHOTS_ASIDE%" : "" }, a.reply)));
-      }, 20);
+      };
+      if (a.hold) { window.__finishInstall = finish; return; }  // the test answers: by hand (rnDone), or with __finishInstall() which does what the phone does
+      setTimeout(finish, 20);
     },
     cancelRestore: function () { st.order.push("cancelRestore"); st.cancelCalls = (st.cancelCalls || 0) + 1; st.staged = null; keep(); },
   });
@@ -696,6 +697,93 @@ def test_the_phones_own_refusal_for_a_newer_library_is_shown_and_nothing_changes
     phone.locator("#app [role=alert]").wait_for()
     assert alert(phone) == sentence and "newer Reel Shelf" in sentence
     assert phone.rn()["db"] == phone.start_db and not phone.rn().get("setAside")
+
+
+# ---------------------------------------------------------------- a reel shared while the restore runs (review follow-up)
+# ShareActivity queues a shared reel in the phone's list; the page files it when it is resumed or opened. While a restore installs, that
+# must wait: filed into the library that is about to be set aside, it would be acknowledged and then exist only in reels.json.before-restore-*.
+
+def share_meanwhile(pg):
+    """The user shares a reel from Instagram while the restore runs (it is queued) and comes back to the app (the page is resumed)."""
+    pg.evaluate("l => { window.__rn.shared.push(l); }", LINK)
+    pg.evaluate("() => onAppResume()")
+    pg.wait_for_timeout(150)
+
+
+def assert_filed_into_the_restored_library_once(pg):
+    pg.wait_for_function("() => window.__rn.shared.length === 0")
+    codes = stored_codes(pg)
+    assert codes.count("SHARE0001") == 1 and set(BACKED_CODES) <= set(codes), codes
+    assert pg.rn()["acks"] == [["id-" + LINK]], "acknowledged once, after it was filed"
+    aside = [r["code"] for r in json.loads(pg.rn()["setAside"])["reels"]]
+    assert "SHARE0001" not in aside, "not only in the library that was set aside"
+
+
+@pytest.mark.parametrize("phase", ["pre-backup", "install"])
+def test_a_reel_shared_while_the_restore_runs_is_filed_into_the_restored_library_not_the_one_set_aside(phone, phase):
+    held = {"backup": {"hold": True}} if phase == "pre-backup" else {"install": {"hold": True}}
+    open_restore(phone, **held)
+    to_confirm(phone)
+    if phase == "install":
+        phone.get_by_label("Save a backup of the current library first").uncheck()
+    restore_button(phone).click()
+    phone.wait_for_function("() => window.__backupId" if phase == "pre-backup" else "() => window.__rn.restoreCalls")
+    share_meanwhile(phone)
+    rn = phone.rn()
+    assert rn["shared"] == [LINK] and not rn.get("acks"), "nothing was taken from the share queue and nothing acknowledged"
+    assert rn["db"] == phone.start_db, "the library that is about to be set aside was not written to"
+    if phase == "pre-backup":
+        phone.evaluate("([id, a]) => rnDone(id, true, JSON.stringify(a))", [phone.evaluate("window.__backupId"), answer()])
+    else:
+        phone.evaluate("() => window.__finishInstall()")
+    restored_screen(phone)
+    assert_filed_into_the_restored_library_once(phone)
+
+
+def test_a_hand_over_that_ends_during_the_restore_does_not_file_into_the_library_about_to_be_replaced(phone):
+    phone.context.add_init_script(FAST)
+    open_restore(phone, install={"hold": True})
+    to_confirm(phone)
+    phone.get_by_label("Save a backup of the current library first").uncheck()
+    restore_button(phone).click()
+    phone.wait_for_function("() => window.__rn.restoreCalls")
+    phone.evaluate("l => { window.__rn.shared.push(l); window.__rn.nightActive = true; }", LINK)
+    phone.evaluate("() => onAppResume()")
+    phone.get_by_text("The nightly run is finishing").wait_for()
+    phone.evaluate("() => { window.__rn.nightActive = false; }")
+    phone.get_by_text("The nightly run is finishing").wait_for(state="hidden")
+    rn = phone.rn()
+    assert rn["shared"] == [LINK] and not rn.get("acks") and rn["db"] == phone.start_db
+    assert "Restoring. Please keep the app open." in card(phone), "the restore screen, not the library"
+    phone.evaluate("() => window.__finishInstall()")
+    restored_screen(phone)
+    assert_filed_into_the_restored_library_once(phone)
+
+
+def test_a_restore_that_fails_files_the_reel_shared_meanwhile_into_the_library_that_stays(phone):
+    sentence = java_constants()["WORK"]
+    open_restore(phone, install={"hold": True, "fail": sentence})
+    to_confirm(phone)
+    phone.get_by_label("Save a backup of the current library first").uncheck()
+    restore_button(phone).click()
+    phone.wait_for_function("() => window.__rn.restoreCalls")
+    share_meanwhile(phone)
+    assert phone.rn()["shared"] == [LINK] and not phone.rn().get("acks")
+    phone.evaluate("() => window.__finishInstall()")  # the phone refuses
+    phone.locator("#app [role=alert]").wait_for()
+    assert alert(phone) == sentence
+    phone.wait_for_function("() => window.__rn.shared.length === 0")
+    codes = stored_codes(phone)
+    assert codes.count("SHARE0001") == 1 and {"BK00000", "BK00001", "BK00002"} <= set(codes), "filed into the library that was kept"
+    assert phone.rn()["acks"] == [["id-" + LINK]] and not phone.rn().get("setAside")
+
+
+def test_while_the_file_is_only_being_checked_a_resume_still_files_a_shared_reel(phone):
+    open_restore(phone, choose={"hold": True})
+    pick(phone)  # busy "check": the picker has just closed and the page was resumed; nothing is being replaced
+    share_meanwhile(phone)
+    phone.wait_for_function("() => window.__rn.shared.length === 0")
+    assert stored_codes(phone).count("SHARE0001") == 1 and phone.rn()["acks"] == [["id-" + LINK]]
 
 
 # ---------------------------------------------------------------- the bridge itself (LocalBridge.java cannot run here: what it must do is pinned in its source)

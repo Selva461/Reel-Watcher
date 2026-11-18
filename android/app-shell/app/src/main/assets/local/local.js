@@ -741,6 +741,7 @@ window.onAppResume = () => {
   if (handingOver) return;  // waiting for the nightly run: handOver opens the library when it has stopped
   if (sync("nightActive")) { handOver(); return; }  // the night started while this screen was away, and is now asked to stop
   if (dbLocked) return;  // the library is not open: Try again on the screen
+  if (restore.busy === "restore") return;  // the backup of this library is being made and then it is replaced: a reel shared meanwhile must be filed into the restored library (reloadAfterRestore does that), not into the one that is about to be set aside
   if (sync("libraryStale", "reels") || sync("libraryStale", "shots")) staleReload();  // saved elsewhere while this screen was away
   else loadSettings();  // settings have no revision: read again
   const seen = db.reels.filter((x) => x.opened_at && Date.now() - x.opened_at < 20 * 60000).sort((a, b) => b.opened_at - a.opened_at)[0];
@@ -1385,6 +1386,7 @@ function restoreGo() {
     restore.status = "";
     restore.message = e.message;
     if (!e.keepConfirm) { sync("cancelRestore"); restore.preview = null; restore.step = "pick"; }  // the phone has used the token up (or lost the file): choose again
+    if (!dbLocked) openLibrary();  // nothing was replaced: what onAppResume held back while it ran (a reel shared meanwhile, results of the online check) is filed into this library now
     restoreShow();
   });
 }
@@ -1541,7 +1543,7 @@ function handOver() {
     loadSettings();
     loadDb();  // fresh: what the night saved is in it, and saves from here on are for this version
     if (typeof Shots !== "undefined") Shots.reload();  // the screenshot list too: the night may have saved a newer one
-    if (!dbLocked) openLibrary();
+    if (!dbLocked && restore.busy !== "restore") openLibrary();  // not while a restore installs: it opens the restored library itself (or, if it fails, restoreGo does)
     render();
   };
   tick();

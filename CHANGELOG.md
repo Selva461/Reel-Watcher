@@ -27,7 +27,7 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
   works on a library that cannot be read, which makes it a way back, and on a new install with no library. The
   "The nightly run is finishing" screen still comes first on every screen. After a restore the app reads your
   library, settings and screenshot list again; a reel you shared while the library was shut is filed into the restored
-  library once.
+  library once, and the same goes for a reel shared while a restore is running: it waits and is filed into the restored library.
 - Pictures and videos, the AI models, your settings and your API keys are not in a backup, so they are not restored:
   "Pictures and videos are not in backups; reels whose video is no longer on this phone keep their notes."
 - A backup's read-back (Back up now) now unpacks into its own folder (`backup-check`) instead of `restore-staging`, so
