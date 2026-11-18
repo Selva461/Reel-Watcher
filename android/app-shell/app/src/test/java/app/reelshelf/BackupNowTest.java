@@ -408,7 +408,7 @@ public class BackupNowTest {
         Files.write(new File(dir, "reels.json").toPath(), REELS.getBytes(StandardCharsets.UTF_8));
         Files.write(new File(dir, "shots.json").toPath(), SHOTS.getBytes(StandardCharsets.UTF_8));
         LibraryFile reels = LibraryFile.reels(dir), shots = LibraryFile.shots(dir);
-        File snaps = new File(dir, "backup-work"), staging = new File(dir, "restore-staging");
+        File snaps = new File(dir, "backup-work"), staging = new File(dir, "backup-check");
         File rs = new File(snaps, "reels.json"), ss = new File(snaps, "shots.json");
         LibraryBackup.clear(snaps);
         boolean haveReels, haveShots;
