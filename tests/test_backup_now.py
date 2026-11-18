@@ -4,7 +4,7 @@ The Java side (LocalBridge.backupLibrary: snapshots, free space, the ZIP, the re
 checked by the JUnit tests of LibraryBackup, LibraryFile and BackupNow and, for the bridge itself, on a device (TESTING.md,
 E40 to E43). Here: the page, in Chromium at phone size, with a fake window.RN whose backupLibrary records what it was
 given and answers as the test says (success, a failure sentence, the Android 8 and 9 flag, or not at all until told).
-There is no restore button yet (S4-3). No network, no device."""
+Restoring is in tests/test_backup_restore.py (S4-3). No network, no device."""
 import json
 import re
 from pathlib import Path
@@ -246,7 +246,8 @@ def test_the_privacy_sentence_is_shown_exactly(phone):
     assert PRIVACY_SHOTS in section(phone), "and it says the screenshots' text and file names are in the file too"
     assert "Backup and restore" in phone.locator("#backup h2").inner_text()
     assert "never deletes old backups" in section(phone)
-    assert "Restoring a backup is not in this version yet" in section(phone)
+    assert "Restoring a backup is not in this version yet" not in section(phone), "restoring is built (S4-3)"
+    assert "Restoring replaces your library with a backup after you confirm; the library you have now is kept on the phone, not deleted." in section(phone)
 
 
 def test_android_8_and_9_are_told_the_file_goes_when_the_app_is_uninstalled(phone):
@@ -326,21 +327,21 @@ def test_a_failure_sentence_with_markup_is_shown_as_text(phone):
     assert phone.evaluate("window.__pwned") is None
 
 
-# ---------------------------------------------------------------- no restore yet, and no backup when the library is locked
+# ---------------------------------------------------------------- the restore button is next to Back up now, and no backup when the library is locked
 
 def restore_things(pg):
     names = pg.get_by_role("button").all_inner_texts() + pg.get_by_role("link").all_inner_texts()
     return [n.strip() for n in names if re.search("restore", n, re.I)]
 
 
-def test_there_is_no_restore_button_yet(phone):
+def test_settings_has_one_restore_button_next_to_back_up_now_and_no_file_input(phone):
     open_settings(phone)
-    assert restore_things(phone) == ["Export notes (JSON, cannot be restored)"], "only the export's label says the word, and only to say it cannot be restored"
+    assert restore_things(phone) == ["Restore from a backup", "Export notes (JSON, cannot be restored)"]
+    assert phone.locator("#backup #restorebtn").count() == 1 and phone.locator("#backup #backupnow").count() == 1
     tap(phone)
     wait_saved(phone)
-    assert restore_things(phone) == ["Export notes (JSON, cannot be restored)"]
-    assert phone.locator("input[type=file]").count() == 0
-    assert "chooseBackup" not in phone.evaluate("Object.keys(window.RN)") and "restoreBackup" not in phone.evaluate("Object.keys(window.RN)")
+    assert restore_things(phone) == ["Restore from a backup", "Export notes (JSON, cannot be restored)"]
+    assert phone.locator("input[type=file]").count() == 0, "the phone's own picker is used, never a page file input"
 
 
 def test_an_unreadable_library_offers_saving_the_file_and_no_backup(phone):
@@ -351,7 +352,7 @@ def test_an_unreadable_library_offers_saving_the_file_and_no_backup(phone):
     locked_screen(phone)
     assert phone.get_by_role("button", name="Save the unreadable file to Downloads").count() == 1
     assert phone.get_by_role("button", name=re.compile("back up", re.I)).count() == 0 and phone.locator("#backupnow").count() == 0
-    assert restore_things(phone) == []
+    assert restore_things(phone) == ["Restore from a backup"], "restoring is the way back from an unreadable library"
     go(phone, "#/settings")  # every screen is the recovery screen: Settings, and its button, are not reachable
     locked_screen(phone)
     assert phone.locator("#backupnow").count() == 0 and "Back up now" not in phone.inner_text("#app")
