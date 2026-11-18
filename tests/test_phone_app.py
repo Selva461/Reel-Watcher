@@ -437,6 +437,9 @@ def test_java_keeps_the_model_check_out_of_the_way():
 
     assert "checks.cancel()" in body(model, "void stopAll()", "void allow()")
     assert "ModelCheck.recordDownloaded(" in body(model, "void download(", "ModelVerifier verifier()")
+    assert 'o.put("ready", f.isFile());' in body(bridge, "public String modelInfo", "@JavascriptInterface")  # "ready" still only means the file exists
+    import re
+    assert set(re.findall(r"ModelCheck\.(\w+)", model)) == {"Runner", "recordDownloaded"}  # answers and downloads never ask whether a model was checked
     check = body(bridge, "public String checkModel", "public void stopCheck")
     assert "ModelCheck.refuse(onScreen, act.isNight(), downloading, jobs.get() > 0," in check
     assert bridge.count("checks.start(") == 1 and bridge.index("checks.start(") > bridge.index("public String checkModel")
