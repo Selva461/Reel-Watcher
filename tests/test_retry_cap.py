@@ -160,7 +160,7 @@ def test_three_failures_in_a_row_with_the_same_reason_stop_the_run(phone):
     start(phone, [waiting("R%02d" % i, added=1000 + i) for i in range(10)])
     run_start(phone)
     assert generate_calls(phone) == 3
-    assert phone.evaluate("() => run.note") == "The on-phone AI failed 3 times in a row: The AI model failed: out of memory"
+    assert phone.evaluate("() => run.note") == "Stopped after 3 failures in a row: The AI model failed: out of memory"
     tried = [c for c, r in reels_by_code(phone).items() if r.get("tries")]
     assert len(tried) == 3  # only the reels actually tried: a broken model cannot park the library
     assert len([c for c, r in reels_by_code(phone).items() if r["status"] == "new" and "tries" not in r]) == 7
@@ -172,7 +172,7 @@ def test_a_success_in_between_resets_the_breaker(phone):
       RN.generate = (id, p, o) => (++n === 3 ? window.__rn.calls.push(['generate']) && setTimeout(() => rnDone(id, true, JSON.stringify({ text: a, backend: "gpu", ms: 1 })), 5) : g(id, p, o)); }""", ANSWER)
     run_start(phone)
     assert generate_calls(phone) == 6  # fail, fail, success, then fail, fail, fail: only now are there 3 in a row
-    assert phone.evaluate("() => run.note") == "The on-phone AI failed 3 times in a row: The AI model failed: out of memory"
+    assert phone.evaluate("() => run.note") == "Stopped after 3 failures in a row: The AI model failed: out of memory"
 
 
 def test_failures_with_different_reasons_do_not_trip_the_breaker(phone):
@@ -301,3 +301,62 @@ def test_a_failure_reason_is_shown_as_text_not_as_html(phone):
         assert phone.locator("#app img").count() == 0
         assert evil in phone.locator("#app").inner_text()
     assert phone.evaluate("() => window.__pwned") is None
+
+
+# ---------------------------------------------------------------- review follow-ups
+
+def test_a_video_that_takes_over_its_caption_only_reel_is_one_failure_not_two(phone):
+    old = waiting("OLD1", author="chef.ana", added=5)
+    video = {"code": "V1", "url": "", "file": "K1", "author": "", "status": "new", "added_at": 6, "collections": []}
+    start(phone, [video, old])
+    phone.evaluate("""() => { RN.readLocalVideo = (id) => setTimeout(() => rnDone(id, true, JSON.stringify({ screen: "@chef.ana\\nCrispy rice in 10 minutes\\nUse day-old rice", seconds: 48 })), 5); }""")
+    run_start(phone, ["V1", "OLD1"])
+    assert generate_calls(phone) == 1
+    reels = reels_by_code(phone)
+    assert "OLD1" not in reels and reels["V1"]["ig_code"] == "OLD1"  # the two became one
+    assert reels["V1"]["tries"] == 1 and reels["V1"]["next_try_at"] == FIXTURES_NOW + 12 * HOUR
+
+
+def test_a_night_stopped_by_the_breaker_says_so_in_the_morning(phone):
+    start(phone, [waiting("R%d" % i, added=1000 + i) for i in range(6)], night=True, settings=json.dumps({"nightMax": 10, "rereadOk": True}))
+    phone.wait_for_function("window.__rn.nightDone >= 1")
+    log = db_of(phone)["lastNight"]["log"]
+    assert "Stopped after 3 failures in a row: The AI model failed: out of memory" in log
+
+
+def test_the_tries_number_is_escaped_in_the_failure_line(phone):
+    evil = '<img src=x onerror="window.__pwned=1">'
+    start(phone, [waiting("R1", status="failed", tries=evil, last_fail="a", last_fail_at=FIXTURES_NOW)])
+    phone.goto(phone.url.split("#")[0] + "#/r/R1")
+    phone.get_by_text("Tried 0 times").wait_for()
+    assert phone.locator("#app img").count() == 0 and phone.evaluate("() => window.__pwned") is None
+
+
+def test_a_retry_date_far_in_the_future_is_a_wrong_clock_and_counts_as_due(phone):
+    start(phone, [waiting("R1", tries=1, next_try_at=FIXTURES_NOW + 100 * 24 * HOUR), waiting("R2", tries=1, next_try_at=FIXTURES_NOW + 71 * HOUR)])
+    run_start(phone)
+    assert generate_calls(phone) == 1 and reels_by_code(phone)["R1"]["tries"] == 2  # R1 was tried, R2 (a real wait) was not
+    assert reels_by_code(phone)["R2"]["tries"] == 1
+
+
+def test_a_reel_with_quick_notes_and_a_parked_ai_rewrite_shows_the_line_and_the_button(phone):
+    start(phone, [waiting("R1", status="failed", notes={"topic": "Quick", "points": ["p"], "tags": []}, notes_by="auto", tries=3, last_fail="why", last_fail_at=FIXTURES_NOW)])
+    phone.goto(phone.url.split("#")[0] + "#/r/R1")
+    phone.get_by_text("Stopped trying after 3 tries: why.").wait_for()
+    phone.get_by_role("button", name="Try again now").wait_for()
+
+
+def test_the_nightly_run_leaves_reels_read_before_videos_alone_unless_you_tried_it_yourself(phone):
+    start(phone, [waiting("R1")], night=True, answers=[ANSWER], settings=json.dumps({}))
+    phone.wait_for_function("window.__rn.nightDone >= 1")
+    assert generate_calls(phone) == 0 and reels_by_code(phone)["R1"]["status"] == "new"
+
+
+def test_the_three_new_reels_of_the_night_never_include_a_reel_that_failed_before(phone):
+    phone.open_with()
+    got = phone.evaluate("""() => {
+      const mk = (code, added, more) => Object.assign({ code, url: "u", added_at: added, caption: "A caption long enough to write notes from " + code, caption_read: 1, video_tried: 1 }, more);
+      const now = Date.now();
+      const reels = [10, 20, 30, 40, 50].map((a) => mk("new" + a, a)).concat([mk("tried", 9999, { tries: 1, next_try_at: now - 1 })]);
+      return nightQueue(reels, true, now, 4).map((r) => r.code); }""")
+    assert got == ["new50", "new40", "new30", "new10"]  # 3 new, then the oldest; the retry (newest) waits for the old end

@@ -283,7 +283,9 @@ function bindIgWaiting() {
 let run = null;  // {codes, i, step, stop, done, failed, current}
 
 function needsWork(r, ready, now = Date.now()) {
-  if ((r.tries || 0) >= Notes.RETRY_CAP || (r.next_try_at || 0) > now) return false;  // failed again and again, or waiting for its next try
+  const wait = (r.next_try_at || 0) - now;
+  // failed again and again, or waiting for its next try (a date further away than the longest wait is a wrong clock: due)
+  if ((r.tries || 0) >= Notes.RETRY_CAP || (wait > 0 && wait <= Notes.retryAfter(Notes.RETRY_CAP - 1))) return false;
   if (r.notes && !(r.notes_by === "auto" && (ready || (!Notes.isYoutube(r) && !r.video_tried)))) return false;
   if (r.file) return !r.video_tried || (ready && Notes.material(r) >= 30 && r.status !== "ready_no_text");  // a video on the phone
   if (!r.url) return false;
@@ -551,14 +553,16 @@ async function startRun(codes) {
   const ready = !!modelInfo().ready;
   const list = (codes || db.reels.filter((r) => needsWork(r, ready)).sort(byUsefulThenNewest).map((r) => r.code)).filter((c) => reel(c));
   run = { codes: list, i: 0, step: "", stop: false, done: 0, failed: 0, current: "", finished: false, log: [], ready };
-  let streak = { key: "", n: 0 }, tripped = false;  // failures in a row with the same reason: a broken model stops the run
+  let streak = { key: "", n: 0 }, tripped = false;
+  const handled = new Set();  // a video that took over its caption-only reel during this run is the same reel: once  // failures in a row with the same reason: a broken model stops the run
   sync("allowWork");
   workTick();  // the notification appears now, while the app is on screen
   location.hash = "#/run";
   render();
   for (; run.i < run.codes.length && !run.stop; run.i++) {
     const r = reel(run.codes[run.i]);
-    if (!r) continue;
+    if (!r || handled.has(r)) continue;
+    handled.add(r);
     run.current = r.code;
     r.status = "working";
     r.error = "";
@@ -601,7 +605,7 @@ async function startRun(codes) {
       const wait = Notes.retryAfter(r.tries);
       r.next_try_at = wait === null ? 0 : now + wait;  // parked at the cap: needsWork stops on tries, not on the time
       streak = { key, n: streak.key === key ? streak.n + 1 : 1 };
-      if (streak.n >= 3) { run.note = `The on-phone AI failed 3 times in a row: ${r.last_fail}`; tripped = true; }
+      if (streak.n >= 3) { run.note = `Stopped after 3 failures in a row: ${r.last_fail}`; tripped = true; }
     }
     run.log.unshift({ code: r.code, ok: r.status === "done", text: r.status === "done" ? (r.notes.topic || "Notes written") : r.error || (r.caption ? "Caption read, too short for notes" : "No caption from Instagram") });
     saveDb();
@@ -662,6 +666,7 @@ async function overnightRun(auto) {
       await startRun(nightQueue(db.reels.filter((x) => settings.rereadOk || !x.caption_read || Notes.isYoutube(x)), ready, Date.now(), settings.nightMax || 200)
         .map((x) => x.code));  // 3 new (useful first) to 1 oldest, capped per night
       say(`Reel notes: ${run ? run.done : 0} written, ${run ? run.failed : 0} failed`);
+      if (run && run.note) say(run.note);
     }
     if (!night.stop && typeof Shots !== "undefined") {
       night.step = "screenshots"; night.detail = "Reading pictures";
@@ -848,9 +853,9 @@ function notesHtml(n) {
 
 /** What went wrong with a reel that failed: how often, why, and when it is tried again (or that it was given up on). */
 function retryLine(r) {
-  const why = esc(r.last_fail || "no reason was given");
-  if (r.tries >= Notes.RETRY_CAP) return `Stopped trying after ${plural(r.tries, "try", "tries")}: ${why}.`;
-  return `Tried ${plural(r.tries, "time")}, last on ${day(r.last_fail_at)}: ${why}. Next try after ${day(r.next_try_at)}.`;
+  const why = esc(r.last_fail || "no reason was given"), t = Number(r.tries) || 0;
+  if (t >= Notes.RETRY_CAP) return `Stopped trying after ${plural(t, "try", "tries")}: ${why}.`;
+  return `Tried ${plural(t, "time")}, last on ${day(r.last_fail_at)}: ${why}. Next try after ${day(r.next_try_at)}.`;
 }
 
 /** Reels Start gave up on or put off: the ones that could not be finished, with one button to try them all again. */
@@ -873,7 +878,7 @@ function reelScreen(code) {
       <span class="small muted">${esc([r.author ? "@" + r.author : "", "saved " + day(r.added_at), ...(r.collections || [])].filter(Boolean).join(" · "))}</span></div>
     ${backFrom === r.code ? `<div class="card stack"><strong>Back from Instagram</strong><span class="small muted">${r.comments ? "Comments are here. " : "Took screenshots of the comments? Tap Add comments. "}Then tap Read this reel properly: one note from the video, what is said, the text on screen and the comments.</span></div>` : ""}
     ${r.error && !n ? `<div class="card small">${esc(r.error)}</div>` : ""}
-    ${r.tries && !n ? `<div class="card small">${retryLine(r)}</div>` : ""}
+    ${r.tries && (!n || r.notes_by === "auto") ? `<div class="card small">${retryLine(r)}</div>` : ""}
     ${n ? notesHtml(n) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">${r.video_tried ? "Instagram gave too little to work from. Type what the reel says below." : "Tap Start: Reel Shelf reads what the reel shows and says, then writes the notes."}</span></div>`}
     ${r.content ? `<span class="small muted">Read from: ${esc({ caption: "the caption only (Instagram gave no video)", video: "caption and the text on screen", "video+speech": "caption, the text on screen and what is said" }[r.content] || r.content)}</span>` : ""}
     <div class="grid2">
@@ -881,7 +886,7 @@ function reelScreen(code) {
       ${r.url ? `<button class="btn" id="open">Open in ${Notes.isYoutube(r) ? "YouTube" : "Instagram"}</button>` : ""}
       ${n ? `<button class="btn" id="copy">Copy notes</button>` : ""}
       ${Notes.isYoutube(r) && r.caption_read && !r.transcript ? `<button class="btn" id="ytagain">Read from YouTube again</button>` : ""}
-      ${r.tries && !n ? `<button class="btn primary" id="retryReel">Try again now</button>` : ""}
+      ${r.tries && (!n || r.notes_by === "auto") ? `<button class="btn primary" id="retryReel">Try again now</button>` : ""}
       ${r.url && !Notes.isYoutube(r) ? `<button class="btn primary" id="deep">Read this reel properly</button>` : ""}
       ${r.url ? `<button class="btn" id="addcom">Add comments</button>` : ""}
       ${ready && r.url ? `<button class="btn" id="phoneai">${n ? "Redo with phone AI" : "Write with phone AI"}</button>` : ""}
