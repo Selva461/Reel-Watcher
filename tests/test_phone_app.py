@@ -401,6 +401,20 @@ def test_a_check_can_be_stopped_and_is_not_started_again_until_you_ask(phone):
     assert phone.locator("#mstate").inner_text() == "Ready" and not calls_named(phone, "deleteModel")
 
 
+def test_notes_are_still_written_with_a_model_that_is_not_the_published_file(phone):
+    """The check only labels a model: it keeps working (the owner's decision D1), and nothing starts a check or a download by itself."""
+    phone.open_with({"shared": ["https://www.instagram.com/reel/AAA111/"], "pages": {"AAA111/embed": EMBED},
+                     "model": {**ON_PHONE, "verified": "no"}, "answers": [ANSWER]})
+    phone.get_by_text("1 new reel saved").wait_for()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    r = db_of(phone)["reels"][0]
+    assert r["status"] == "done" and r["notes_by"] == "phone" and r["notes"]["topic"] == "Hardcoded secrets in mobile apps"
+    assert [c for c in phone.rn()["calls"] if c[0] == "generate"]
+    assert not calls_named(phone, "deleteModel", "download", "checkModel")
+
+
 def test_the_nightly_run_never_checks_a_model(phone):
     phone.open_with({"night": True, "model": {**ON_PHONE, "verified": "unknown"}})
     phone.wait_for_function("window.__rn.nightDone >= 1")
