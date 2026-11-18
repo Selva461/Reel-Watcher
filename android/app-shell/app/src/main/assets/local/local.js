@@ -68,19 +68,27 @@ function sync(method, ...args) {
 
 let db = { reels: [], inbox: [], media: [], mediaTypes: [] };
 let dbLocked = false;  // the library file could not be read: nothing is saved over it until you choose (lockedScreen)
+let dbNewer = false;   // ... because a newer Reel Shelf saved it (newerScreen): not damaged, and never to be set aside
+/** The newest library layout this version reads: reels.json says which one it was saved with in "schema_version". LibraryFile.REELS_SCHEMA in the app must be the same number (LibraryFileTest checks). */
+const SCHEMA = 1;
+/** A file is newer when it says it was saved with a bigger NUMBER than we read. A missing, null or non-number value is not (the same rule as LibraryFile.java: nothing ever wrote one). */
+function isNewer(v, supported) { return typeof v === "number" && v > supported; }
 function libraryInfo(which) { try { return JSON.parse(sync("libraryInfo", which || "reels") || "{}"); } catch (e) { return {}; } }
-function emptyDb() { return { reels: [], inbox: [], media: [], mediaTypes: [] }; }
+function emptyDb() { return { reels: [], inbox: [], media: [], mediaTypes: [], schema_version: SCHEMA }; }
 /** Reads the library from the phone. Nothing of the copy already in memory survives: a stored library that is new or empty (for example one another page just started) gives an empty library, never the old records. */
 function loadDb() {
   db = emptyDb();
+  dbNewer = false;
   const t = sync("load");
   const info = libraryInfo();
   if (info.state === "unreadable") { dbLocked = true; return; }  // the phone found it damaged and kept it as it is
+  if (info.state === "newer") { dbLocked = dbNewer = true; return; }  // saved by a newer Reel Shelf: the phone gives nothing and keeps it as it is
   if (t) {
     try {
       const d = JSON.parse(t);
+      if (d && typeof d === "object" && !Array.isArray(d) && isNewer(d.schema_version, SCHEMA)) { dbLocked = dbNewer = true; return; }  // whatever its shape: it is not ours to judge
       if (!d || typeof d !== "object" || Array.isArray(d) || (d.reels != null && !Array.isArray(d.reels))) throw new Error("not a library");
-      db = { ...d, reels: d.reels || [], inbox: d.inbox || [], media: d.media || [], mediaTypes: d.mediaTypes || [] };
+      db = { ...d, reels: d.reels || [], inbox: d.inbox || [], media: d.media || [], mediaTypes: d.mediaTypes || [], schema_version: d.schema_version == null ? SCHEMA : d.schema_version };  // stamped when missing; written with the next save
       for (const r of db.reels) if (r.status === "working") r.status = r.notes ? "done" : "new";  // the app was closed mid-way
       for (const r of db.reels) if (r.author && !Notes.isYoutube(r) && !Notes.username(r.author)) r.author = "";  // "Media": a label from the export, not a creator (before 1.3.5)
     } catch (e) { dbLocked = true; return; } }  // damaged: never save over it
@@ -584,7 +592,8 @@ function stopRun() {
 
 // ------------------------------------------------------------------ overnight run: everything in one go (stops below 40% battery)
 // 1. the on-phone AI model (downloaded if missing), 2. Start on every reel waiting, 3. screenshots, 4. titles checked
-// online, 5. a JSON backup in Downloads/ReelShelf. One notification with Stop the whole time. Never starts by itself.
+// online, 5. the notes saved as JSON in Downloads/ReelShelf (an export that cannot be restored, not a backup: that is Back up now in Settings).
+// One notification with Stop the whole time. Never starts by itself.
 let night = null;
 function nightText() {
   if (!night) return "";
@@ -635,9 +644,9 @@ async function overnightRun(auto) {
       say("Titles checked online");
     }
     if (!night.stop && !auto) {
-      night.step = "backup"; night.detail = "Saving a JSON copy";
+      night.step = "export"; night.detail = "Saving your notes as JSON";
       const where = await phone("saveFile", `reel-notes-${new Date().toISOString().slice(0, 10)}.json`, "application/json", Notes.exportJson(db.reels)).catch(() => "");
-      if (where) say("Backup saved to " + where);
+      if (where) say("Notes exported to " + where + ". This is not a backup you can restore: use Back up now in Settings.");
     }
   } finally {
     if (night.stop) say("Stopped");
@@ -872,7 +881,8 @@ function reelScreen(code) {
 
 function relatedHtml(r) {
   const rel = Notes.related(db.reels, r, 4);
-  const t = Lib.topics(db.reels).find((x) => x.reels.includes(r));
+  const known = Lib.topicsReady(db.reels);  // only when the Ask screen already worked the topics out: opening a reel never starts that
+  const t = known && known.find((x) => x.reels.includes(r));
   const topicLink = t ? `<a class="chip" href="#/topic/${enc(t.key)}">Topic: ${esc(t.label)} (${t.reels.length})</a>` : "";
   return rel.length || t ? `<div class="stack"><h2>Related reels</h2>${topicLink ? `<div class="chips">${topicLink}</div>` : ""}${rel.map((x) => reelRow(x.reel)).join("")}</div>` : "";
 }
@@ -881,26 +891,34 @@ function relatedHtml(r) {
 
 function titleOf(r) { const n = r.notes || {}; return n.topic || r.title || (r.caption || "").split("\n")[0].slice(0, 90) || r.code; }
 
-function libraryOverview() {
-  const groups = Lib.topics(db.reels).slice(0, 12);
-  const tl = Lib.tools(db.reels).filter((t) => t.count > 1).slice(0, 16);
-  return `${groups.length ? `<div class="stack"><h2>Topics you learned</h2>${groups.map((g) => `<a class="list-item" href="#/topic/${enc(g.key)}"><span class="grow stack" style="gap:4px">
+function topicsHtml(all) {
+  const groups = all.slice(0, 12);
+  return groups.length ? `<div class="stack"><h2>Topics you learned</h2>${groups.map((g) => `<a class="list-item" href="#/topic/${enc(g.key)}"><span class="grow stack" style="gap:4px">
       <span class="title">${esc(g.label)}</span><span class="small muted clamp">${esc(g.reels.slice(0, 3).map(titleOf).join(" · "))}</span></span>
-      <span class="tag">${g.reels.length}</span></a>`).join("")}</div>` : ""}
+      <span class="tag">${g.reels.length}</span></a>`).join("")}</div>` : "";
+}
+
+function libraryOverview() {
+  const tl = Lib.tools(db.reels).filter((t) => t.count > 1).slice(0, 16);
+  return `<div id="topicsBox" style="display:contents"><p class="hint">Working out topics...</p></div>
     ${tl.length ? `<div class="stack"><h2>Tools you saw most</h2><div class="chips wrap">${tl.map((t) => `<a class="chip" href="#/ask?q=${enc('"' + t.name + '"')}">${esc(t.name)} ${t.count}</a>`).join("")}</div></div>` : ""}`;
 }
 
 function topicScreen(key) {
-  const g = Lib.topic(db.reels, key);
-  if (!g) { $app.innerHTML = `${header("Topic", "#/ask")}<div class="empty">This topic changed as your library grew. <a href="#/ask">See all topics</a>.</div>`; return; }
-  const takeaways = g.reels.filter((r) => (r.notes || {}).takeaway);
-  const tl = Lib.tools(g.reels).slice(0, 12);
-  $app.innerHTML = `${header(g.label, "#/ask")}
-    <p class="hint">${plural(g.reels.length, "reel")} about the same thing, grouped by the words they share. No AI.</p>
-    <div class="chips wrap">${g.words.map((w) => `<a class="chip" href="#/ask?q=${enc(w)}">${esc(w)}</a>`).join("")}</div>
-    ${takeaways.length ? `<div class="card stack" style="gap:8px"><span class="label">What you learned</span><ul style="margin:0;padding-left:18px;line-height:1.5">${takeaways.map((r) => `<li><a href="#/r/${enc(r.code)}">${esc(r.notes.takeaway)}</a></li>`).join("")}</ul></div>` : ""}
-    ${tl.length ? `<div class="card stack" style="gap:8px"><span class="label">Tools</span><p style="margin:0">${esc(tl.map((t) => t.name + (t.count > 1 ? ` (${t.count})` : "")).join(", "))}</p></div>` : ""}
-    <div class="stack">${g.reels.map(reelRow).join("")}</div>`;
+  $app.innerHTML = `${header("Topic", "#/ask")}<p class="hint" id="topicWait">Working out topics...</p>`;
+  const wait = document.getElementById("topicWait");
+  Lib.topicsSoon(db.reels, (groups) => {
+    const g = groups.find((t) => t.key === key);
+    if (!g) { $app.innerHTML = `${header("Topic", "#/ask")}<div class="empty">This topic changed as your library grew. <a href="#/ask">See all topics</a>.</div>`; return; }
+    const takeaways = g.reels.filter((r) => (r.notes || {}).takeaway);
+    const tl = Lib.countTools(g.reels).slice(0, 12);  // not Lib.tools: that would replace the library's index, and with it the topics kept for it
+    $app.innerHTML = `${header(g.label, "#/ask")}
+      <p class="hint">${plural(g.reels.length, "reel")} about the same thing, grouped by the words they share. No AI.</p>
+      <div class="chips wrap">${g.words.map((w) => `<a class="chip" href="#/ask?q=${enc(w)}">${esc(w)}</a>`).join("")}</div>
+      ${takeaways.length ? `<div class="card stack" style="gap:8px"><span class="label">What you learned</span><ul style="margin:0;padding-left:18px;line-height:1.5">${takeaways.map((r) => `<li><a href="#/r/${enc(r.code)}">${esc(r.notes.takeaway)}</a></li>`).join("")}</ul></div>` : ""}
+      ${tl.length ? `<div class="card stack" style="gap:8px"><span class="label">Tools</span><p style="margin:0">${esc(tl.map((t) => t.name + (t.count > 1 ? ` (${t.count})` : "")).join(", "))}</p></div>` : ""}
+      <div class="stack">${g.reels.map(reelRow).join("")}</div>`;
+  }, () => wait.isConnected);  // another screen replaced this one: stop
 }
 
 // ------------------------------------------------------------------ Ask: your library answers
@@ -935,6 +953,8 @@ function askScreen() {
         ${x.lines.length ? `<ul class="small" style="margin:0;padding-left:18px">${x.lines.map((l) => `<li>${mark(l)}</li>`).join("")}</ul>` : ""}
         <span class="small muted">${esc([r.author ? "@" + r.author : "", (n.tags || []).slice(0, 3).map((t) => "#" + t).join(" ")].filter(Boolean).join(" · "))}</span></a>`;
     }).join("")}</div>`;
+  const box = document.getElementById("topicsBox");
+  if (box) Lib.topicsSoon(db.reels, (groups) => { box.innerHTML = topicsHtml(groups); }, () => box.isConnected);
   const input = document.getElementById("aq");
   document.getElementById("askf").addEventListener("submit", (e) => { e.preventDefault(); const nq = input.value.trim(); lastAsk = { q: nq, answer: null, results: [] }; if (location.hash === `#/ask?q=${enc(nq)}`) askScreen(); else location.hash = `#/ask?q=${enc(nq)}`; });
   bind("[data-url]", "click", (e, a) => { e.preventDefault(); sync("openUrl", a.dataset.url); });
@@ -1111,7 +1131,7 @@ function runScreen() {
       <p class="hint">Start reads each reel: its caption, the text shown on screen and${speechInfo().ready ? "" : " (after you download the speech model in Settings)"} what is said. Instagram is asked gently, one reel every few seconds, with no account.</p>
       <a class="btn block" href="#/shots" id="shotsbtn">${ICON.search} Read my screenshots</a>
       <div class="card stack"><strong>Overnight run</strong>
-        <span class="hint">Plug in the charger, tap this and leave the phone. In one go: downloads the on-phone AI if needed, writes notes for every reel waiting, reads your screenshots, checks titles online and saves a backup to Downloads/ReelShelf. A notification shows it, with Stop.</span>
+        <span class="hint">Plug in the charger, tap this and leave the phone. In one go: downloads the on-phone AI if needed, writes notes for every reel waiting, reads your screenshots, checks titles online and saves your notes as a JSON file to Downloads/ReelShelf (an export, not a backup you can restore: use Back up now in Settings for that). A notification shows it, with Stop.</span>
         ${night && !night.finished ? `<strong>${esc("Now: " + night.step)}</strong><span class="small muted">${esc(nightText())}</span>`
           : `<button class="btn block" id="night">Run everything overnight</button>`}
         ${night && night.log.length ? `<span class="small muted">${night.log.map(esc).join("<br>")}</span>` : ""}
@@ -1171,6 +1191,45 @@ function bindSpeech() {
   bind("#delsp", "click", () => { if (confirm("Delete the speech model? Reels will then be read without their spoken words.")) { sync("deleteSpeech"); settingsScreen(); } });
 }
 
+// ------------------------------------------------------------------ Back up now (Settings): one ZIP with the whole library
+// The phone makes it, checks it can be read back, and saves it to Downloads/ReelShelf (RN.backupLibrary). The page only passes the counts to show.
+// Restoring a backup is not here yet. Library locked or newer: the locked screens show instead of Settings, so there is no button.
+let backup = { running: false, result: null };  // result: {ok: true, name, where, bytes, counts, uninstall_warning, shots_skipped} or {ok: false, text}
+function backupSize(n) { return n < 1048576 ? Math.max(1, Math.round(n / 1024)) + " KB" : mb(n); }
+function backupInner() {
+  const r = backup.result;
+  const status = backup.running ? `<span class="small" role="status">Making the backup. A big library can take a minute. Please keep the app open.</span>`
+    : !r ? ""
+    : r.ok ? `<span class="small" role="status"><strong>Saved to ${esc(r.where)}</strong> (${esc(plural(Number(r.counts.reels) || 0, "reel"))}, ${esc(plural(Number(r.counts.titles) || 0, "title"))}, ${esc(backupSize(Number(r.bytes) || 0))})</span>
+      ${r.uninstall_warning ? `<span class="small"><strong>This file is in the app's own folder on this version of Android, so it is deleted if you uninstall Reel Shelf.</strong> Copy it somewhere else (for example with a file manager) to keep it.</span>` : ""}
+      ${r.shots_skipped ? `<span class="small">The list of read screenshots could not be read, so it is not in this backup. It can be made again from your pictures.</span>` : ""}`
+    : `<span class="small" role="alert"><strong>${esc(r.text)}</strong></span>`;
+  return `<h2>Backup and restore</h2>
+    <div class="card stack">
+      <button class="btn primary block" id="backupnow" ${backup.running ? "disabled" : ""}>${backup.running ? "Backing up..." : "Back up now"}</button>
+      ${status}
+      <p class="hint">The backup contains all your reels, notes, watchlist, quotes and products. Anyone who gets the file can read them. It does not contain your settings, API keys, AI models, pictures or videos. It also holds a short part of the text read from each of your screenshots, and their file names.</p>
+      <p class="hint">It is saved in Downloads/ReelShelf. Keep it somewhere safe, or delete it when you no longer need it: Reel Shelf never deletes old backups for you. Restoring a backup is not in this version yet.</p>
+    </div>`;
+}
+function paintBackup() {
+  const el = document.getElementById("backup");
+  if (!el) return;  // left Settings meanwhile: the result is shown when you come back
+  el.innerHTML = backupInner();
+  bind("#backupnow", "click", backupNow);
+}
+function backupNow() {
+  if (backup.running) return;
+  backup = { running: true, result: null };
+  paintBackup();
+  const counts = { reels: db.reels.length, titles: (db.media || []).length, screenshots: typeof Shots !== "undefined" ? Shots.total() : 0 };
+  phone("backupLibrary", JSON.stringify(counts)).then((t) => {
+    let r = null;
+    try { r = JSON.parse(t); } catch (e) { /* the sentence below */ }
+    backup = { running: false, result: r && typeof r === "object" && r.counts && typeof r.counts === "object" ? { ...r, ok: true } : { ok: false, text: "The backup could not be saved. Your library was not changed." } };
+  }, (e) => { backup = { running: false, result: { ok: false, text: e.message } }; }).then(paintBackup);
+}
+
 function settingsScreen() {
   const info = modelInfo();
   const m = MODELS.find((x) => x.file === settings.modelFile);
@@ -1212,11 +1271,13 @@ function settingsScreen() {
     </div>
     ${nightSettingsHtml()}
     ${Verify.settingsHtml()}
+    <div class="stack" id="backup">${backupInner()}</div>
     <div class="stack"><h2>Export (${plural(db.reels.length, "reel")})</h2>
-      <div class="grid2"><button class="btn" id="exjson">Save JSON</button><button class="btn" id="exmd">Save Markdown</button></div>
+      <button class="btn block" id="exjson">Export notes (JSON, cannot be restored)</button>
+      <button class="btn block" id="exmd">Save Markdown</button>
       <div class="grid2"><button class="btn" id="exshare">Share notes</button><button class="btn" id="excopy">Copy all</button></div>
       <button class="btn block" id="excsv">Save watchlist (${plural((db.media || []).length, "title")}, CSV)</button>
-      <p class="hint">Files go to Downloads/ReelShelf. Send the JSON to Claude to analyze all your reels together.</p>
+      <p class="hint">Files go to Downloads/ReelShelf. Send the JSON to Claude to analyze all your reels together. An export keeps only your notes and cannot be restored: to keep everything, use Back up now.</p>
     </div>
     <p class="hint">Sharing a reel only saves it. Work starts only when you tap Start (or Process); it can keep going after you leave the app, always with a notification and a Stop button, and ends when done.</p>
     <button class="btn block danger" id="wipe">Delete all reels and notes</button>`;
@@ -1253,6 +1314,7 @@ function settingsScreen() {
   bind("#savep", "click", () => { settings.prompt = document.getElementById("prompt").value.slice(0, 8000) || Notes.META_PROMPT; saveSettings(); toast("Prompt saved"); });
   bind("#resetp", "click", () => { settings.prompt = Notes.META_PROMPT; saveSettings(); settingsScreen(); toast("Prompt reset"); });
   const stamp = () => new Date().toISOString().slice(0, 10);
+  bind("#backupnow", "click", backupNow);
   bind("#exjson", "click", () => phone("saveFile", `reel-notes-${stamp()}.json`, "application/json", Notes.exportJson(db.reels)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#exmd", "click", () => phone("saveFile", `reel-notes-${stamp()}.md`, "text/markdown", Notes.exportMarkdown(db.reels)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#excsv", "click", () => phone("saveFile", `watchlist-${stamp()}.csv`, "text/csv", Catalog.exportCsv(db)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
@@ -1324,6 +1386,16 @@ function handOver() {
   tick();
 }
 
+/** The library was saved by a newer Reel Shelf. Nothing is saved over it and it is never set aside: the only choice is a copy of the file. */
+function newerScreen() {
+  const v = sync("appVersion");
+  $app.innerHTML = `${header("Library not opened", "")}
+    <div class="card stack"><span>This library was saved by a newer Reel Shelf. This version${v ? ` (${esc(v)})` : ""} cannot open it safely and has not changed it. Install the newest Reel Shelf.</span></div>
+    <button class="btn block" id="saveBad">Save a copy to Downloads</button>
+    <p class="hint">Reels you share meanwhile wait safely.</p>`;
+  bind("#saveBad", "click", () => phone("saveUnreadable", "reels").then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
+}
+
 /** What happens when the library is open: things shared while the app was closed come in, titles checked overnight are applied. */
 function openLibrary() {
   takeShared();
@@ -1333,7 +1405,7 @@ function openLibrary() {
 
 function render() {
   if (handingOver) { paintTabs(""); topBar(false); handOverScreen(); return; }
-  if (dbLocked) { paintTabs(""); topBar(false); lockedScreen(); return; }
+  if (dbLocked) { paintTabs(""); topBar(false); if (dbNewer) newerScreen(); else lockedScreen(); return; }
   const h = location.hash || "#/";
   for (const [rx, fn, tab, top] of ROUTES) {
     const m = h.match(rx);

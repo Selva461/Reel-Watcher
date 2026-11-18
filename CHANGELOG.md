@@ -5,7 +5,8 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
-## 1.3.9
+## 1.3.21
+<!-- Written and reviewed as 1.3.9 (Task 2b), before 1.3.10 to 1.3.20 existed; it keeps that text and is numbered after 1.3.20. -->
 - The nightly run and the app no longer get in each other's way. If Reel Shelf is on screen when the nightly run is
   due, that night is skipped (the schedule, the hour and the battery level are unchanged: it runs again the next
   night). If you open the app while the nightly run is going, the run is asked to stop its current work and keep
@@ -13,6 +14,124 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
   nightly run is finishing" for a few seconds, then opens with everything the run saved. Nothing it saved is lost,
   and your own changes are never overwritten.
 - Two nightly runs can no longer overlap, even if two alarms arrive at the same moment.
+
+## 1.3.20
+- A **Back up now** button in Settings (under "Backup and restore") saves one file with your whole library to
+  Downloads/ReelShelf, named `ReelShelf-backup-<date>-<time>.zip`. It holds your reels, notes, watchlist, quotes and
+  products, and the list of screenshots already read. It checks that there is enough free space first, and after
+  saving it reads the file back and checks it, so a backup that could not be read back is deleted and reported as
+  failed instead of being kept. While it is being made and checked, the file is hidden (Android 10 or newer) or has
+  the ending `.part` (Android 8 and 9), and only gets its real name once the check has passed, so a half-finished file
+  is never mistaken for a backup. If Reel Shelf is stopped in the middle, a half-finished file may remain (Android 10
+  or newer removes the hidden one by itself after about a week; on Android 8 and 9 delete the `.part` file): it is not
+  a backup. The message tells you where it saved (with the name Android really gave the file), how many
+  reels and titles it holds and how big it is. Your library is not changed by a backup, and a backup is refused while
+  the library cannot be opened (then the "Save the unreadable file to Downloads" or "Save a copy to Downloads" button
+  is what you have, as before).
+- Privacy: the backup file has all your notes in it and can be read by any app with access to your files, so keep it
+  somewhere safe or delete it. It does not contain your settings, API keys, AI models, pictures or videos. It also
+  holds a short part of the text read from each of your screenshots, and their file names. Reel Shelf
+  never deletes old backups for you. On Android 8 and 9 the file is saved in the app's own folder, which Android
+  deletes when you uninstall Reel Shelf, and the screen says so: copy it somewhere else.
+- There is no restore button yet: this version only makes backups. A later version adds restoring.
+- The old **Save JSON** button is now called **Export notes (JSON, cannot be restored)**, because it keeps only some
+  of your notes and cannot be read back. The last step of the manual overnight run, which saves that JSON file, no
+  longer calls it a backup and points to Back up now.
+- Checked with automatic tests on a computer (the page, and the parts of the backup that need no phone). The part that
+  talks to Android (saving into Downloads, the free-space check, the read-back) is not tried on a phone yet.
+
+## 1.3.18
+- Reel Shelf now cleans up its own leftover temporary files after a crash or a force-stop. It does this once each time
+  the app starts, about 20 seconds after you open it, and only if no job and no nightly run is running at that moment.
+  It looks in a few fixed places for the unfinished files that a cut-off share, a cut-off video read or a cut-off save
+  can leave behind, and removes the ones that are clearly stale: a half-copied shared picture or video, the temporary
+  copy of a video that was being read (after 6 hours), the key pictures and sound made for the on-phone AI (after 6
+  hours), and a library save that never finished (after 1 hour, and only when your library opened normally this time).
+  Each kind of file also has its own check at the moment it would be removed: a share that is being copied, a video that
+  is being read, or a library that is being saved is left alone.
+- It never touches your library or its backups, your notes, your pictures or videos (including the ones shared to Reel
+  Shelf that have not been read yet), the AI and speech models or their downloads, or anything it does not recognise.
+  Only a file with one of these exact names in one of these exact places can be removed, and when anything is in doubt
+  the file is left alone. It shows no message; it only keeps a count for a Storage screen that may come later.
+- Checked with automatic tests on a computer, including a long list of things it must never delete. Not tried on a phone.
+
+## 1.3.17
+- Groundwork for backing up and restoring your library. Nothing changes for you yet: there is no button, no screen
+  and nothing in the app uses it, so Reel Shelf looks and works exactly as before. The next versions add "Back up now"
+  and "Restore from a backup" on top of it.
+- What is in place: the code that packs your library into one backup file and that checks a backup file very carefully
+  before it could ever be used (it refuses a damaged, cut, unrecognised or newer-than-this-version file and changes
+  nothing), and the library file's way of being replaced by a backup without deleting anything: the library it
+  replaces is kept next to it under a new name, and a library saved by a newer Reel Shelf is never replaced.
+- Checked with automatic tests on a computer. Not tried on a phone.
+
+## 1.3.15
+- Your library now carries a small version number (`"schema_version": 1` in the library file), and Reel Shelf checks it
+  every time it opens the library. If a future Reel Shelf ever saves your library in a layout this version cannot read,
+  this version says so instead of guessing: **"This library was saved by a newer Reel Shelf. This version cannot open
+  it safely and has not changed it. Install the newest Reel Shelf."** It then leaves the file exactly as it is: it does
+  not put an older copy back over it, does not rename or move it, and saves nothing. The one button is **Save a copy
+  to Downloads**; there is no "Start a new library". Reels you share meanwhile wait safely, and the nightly run does
+  nothing to it. The screenshot list has the same rule (its own version number, which it always had): it is left as it
+  is and the Screenshots screen says why.
+- Nothing changes for your library today: it opens the same, with the same reels, and the number is added the next
+  time something is saved (a library you start from nothing has it from its first save). Older Reel Shelf installs
+  keep working with it, and keep the number when they save. Only this version and later look at the number, so this
+  protects you from the release after this one, not from the ones before it.
+- Checked with automatic tests on a computer (every earlier release's library file opens and is saved back the same,
+  apart from this number). Not yet tried on a phone: see tests E22 to E24 in TESTING.md.
+
+## 1.3.14
+- Adding a title to your watchlist, and the online check of a title, no longer slow down as the list grows. Each one used
+  to read the whole list again to see whether the title was already there: in a test with a list of 5,000 titles,
+  adding them all took about 13 seconds and checking them all about 14 seconds. Now each takes a fraction of a second.
+  Which titles count as the same one (name, year, kind, language, other names, database ids, the checked one first, the
+  newest first) is exactly as before, and nothing saved changes.
+- The first title you add or check after the app starts prepares the lookup for your whole list once (a fraction of a
+  second even with 5,000 titles); the next ones are quick.
+
+## 1.3.13
+- Searching and opening a reel are much faster in a big library. With 5,000 reels, a search in the Library box or in **Ask**
+  is several times faster, and a reel's screen opens about ten times faster (the "Related reels" part was almost all of
+  its time). These speeds were measured on a computer, not on a phone. Reels, order, scores and the lines shown for each
+  are exactly the same as before.
+- The words of your library are checked more cheaply each time you type or open a reel, and only a reel you changed is
+  read again. Changing a reel makes the next search or reel screen do a little more work once.
+- Not changed: the first search after the app starts still reads the whole library (a second or two with 5,000 reels).
+
+## 1.3.12
+- Sharing pictures or videos to Reel Shelf no longer holds the phone up. They are copied in the background while a small
+  screen shows how far it is (with Stop). The screen stays until every file is saved, or says which ones could not be
+  saved and why (with Try again). Leaving the screen stops the copy; what was already saved stays.
+- A file only shows up once it is complete. It is first copied to a separate temporary place, checked, and only then moved
+  in, so a copy that is cut short (the phone ends the app, the storage fills up, the other app stops answering) can no
+  longer leave a half-written file that is taken for a picture or a video.
+- Sharing the same picture or video again does not keep a second copy (and a video does not become a second reel): it
+  says it was already saved. So trying again after a failure is safe.
+- A copy is refused or stopped (and keeps nothing) when it would leave less than 100 MB free on the phone ("not enough
+  storage space on the phone"), so your library can always still be saved. The size limits are as before: 30 MB a
+  picture, 500 MB a video. A file that is already saved is still answered as saved when the phone is short of space.
+- If the other app stops answering while a file's data is being read, Stop (or leaving the screen) now ends it, and a
+  share that waits behind another one can be stopped too, or says it could not start, instead of waiting for ever. A file
+  that the other app cut short (it stopped sending half way) is not saved: it says so, and Try again can fetch it.
+- Choosing pictures inside Reel Shelf is safe in the same way, and now says when some could not be saved, and why.
+  Pictures and videos saved by earlier versions stay as they are.
+
+## 1.3.11
+- A reel's "Topic: ..." link now always opens the group it counted. In a library of more than 500 reels, one subject
+  could be cut into a big group and a small piece with the same words, and the link of a reel in the small piece
+  opened the big group (which did not hold that reel). Each group now has its own address. Smaller libraries and the
+  groups themselves are unchanged.
+
+## 1.3.10
+- Reels open at once in a big library. Opening a reel used to work out the topics of your whole library first (about 2
+  seconds with 1,000 reels, minutes with thousands). Now it does not. A reel's "Topic: ..." link shows once the topics
+  are known, which is when you have opened **Ask** (and until a reel changes).
+- The topics on **Ask** and on a topic page are worked out a few milliseconds at a time, so the app stays usable while
+  they appear ("Working out topics..."). Leaving the screen stops the work; a changed reel starts it again.
+- In a library of more than 500 reels, each reel is grouped by its 40 most telling words, which makes the grouping
+  several times faster (the groups stay just as pure, and most reels stay with the same others). A library of up to 500
+  reels is grouped exactly as before.
 
 ## 1.3.8
 - Two screens can no longer overwrite each other. If the app and the nightly run both work on your library, a save made

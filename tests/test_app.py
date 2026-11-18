@@ -301,6 +301,9 @@ def test_ui_search_language_and_filters(page):
     pg.get_by_role("button", name="Tamil").click()
     expect(pg.locator("#results .list-item")).to_have_count(2)
     pg.get_by_role("button", name="All").first.click()
+    # the click re-renders the whole screen, search box included: wait for that (All is pressed only in the new screen)
+    # or the typing below can land in the old box just as it is replaced, and is lost
+    expect(pg.get_by_role("button", name="All").first).to_have_attribute("aria-pressed", "true")
     pg.fill("#q", "idiots")
     expect(pg.locator("#results .list-item")).to_have_count(1)
     expect(pg.locator("#results .title")).to_have_text("3 Idiots")
@@ -379,7 +382,10 @@ def test_ui_check_identify_and_read(page):
     pg.select_option("#rt", "series")
     pg.get_by_role("button", name="Save").click()
     pg.get_by_text("Nothing to check. Nice.").wait_for()
-    pg.goto(pg.running["base"] + "/#/settings")
+    # the settings screen shows its controls before it listens to them: it attaches the handlers only after its last
+    # request (the self-check status) is answered, and a change made earlier is lost, so wait for that answer
+    with pg.expect_request_finished(lambda r: r.url.endswith("/api/selfcheck")):
+        pg.goto(pg.running["base"] + "/#/settings")
     pg.select_option("#region", "US")
     pg.get_by_text("Country saved").wait_for()
     assert pg.running["app"].settings()["region"] == "US"

@@ -2,7 +2,8 @@
    - find: search with operators: "exact words", -leave-out, #tag
    - didYouMean: spelling fixes from the words in your own library (edit distance)
    - highlight: the words that matched, marked (the text is escaped first)
-   - topics: reels grouped by what they are about (TF-IDF vectors, cosine similarity, one-pass leader clustering)
+   - topics: reels grouped by what they are about (TF-IDF vectors, cosine similarity, one-pass leader clustering), worked
+     out a few milliseconds at a time and only for a screen that shows them (opening a reel never starts it)
    - tools: every tool and app your reels name, counted
    Everything is worked out only when a screen asks for it and kept until the library changes. Nothing runs in the background. */
 "use strict";
@@ -23,11 +24,12 @@ const Lib = (() => {
   }
   const textCache = new WeakMap();
   function fullText(r) {
-    const sig = N.fieldsOf(r).map((x) => x[0] || "").join("\u0001");
+    const f = N.fieldsOf(r);
     const hit = textCache.get(r);
-    if (hit && hit.sig === sig) return hit.t;
-    const t = fold(sig.replace(/\u0001/g, " "));
-    textCache.set(r, { sig, t });
+    if (hit && hit.texts.every((x, i) => x === (f[i][0] || ""))) return hit.t;  // compared field by field: no 4 KB string is joined for each reel
+    const texts = f.map((x) => x[0] || "");
+    const t = fold(texts.join("\u0001").replace(/\u0001/g, " "));
+    textCache.set(r, { texts, t });
     return t;
   }
   function tagsOf(r) { return [...((r.notes || {}).tags || []), ...(r.keywords || [])].map((t) => fold(t).replace(/^#+/, "").replace(/\s+/g, "")); }
@@ -64,9 +66,10 @@ const Lib = (() => {
       return true;
     };
     let hits;
-    if (p.text) hits = N.search(reels, p.text, reels.length).filter((h) => ok(h.reel));
+    if (p.text) hits = N.search(reels, p.text, limit, ok);  // the operators are checked in ranked order, and only until `limit` reels are found
     else if (p.tags.length || p.exclude.length) hits = reels.filter(ok).map((r) => ({ reel: r, score: 0, lines: [] }));
     else return [];
+    hits = hits.slice(0, limit);
     if (p.phrases.length) {  // the lines that hold the exact words come first
       for (const h of hits) {
         const n = h.reel.notes || {};
@@ -75,7 +78,7 @@ const Lib = (() => {
         h.lines = [...new Set([...exact, ...h.lines])].slice(0, 3);
       }
     }
-    return hits.slice(0, limit);
+    return hits;
   }
 
   // ---------------------------------------------------------------- spelling
@@ -103,19 +106,28 @@ const Lib = (() => {
     return prev[b.length];
   }
 
-  /** The word people see for each stem ("password" for "password", not "passwords"). */
-  function surfaces(ix) {
-    return memo(ix, "surface", () => {
-      const count = new Map();
-      for (const d of ix.docs) for (const [text] of N.fieldsOf(d.r)) for (const w of N.tokens(text)) {
+  /** The word people see for each stem ("password" for "password", not "passwords"). A generator that yields after each reel, so topicSteps can do it in slices. */
+  function* surfaceSteps(ix) {
+    const count = new Map();
+    for (const d of ix.docs) {
+      for (const [text] of N.fieldsOf(d.r)) for (const w of N.tokens(text)) {
         const k = N.stem(w);
         let m = count.get(k);
         if (!m) { m = new Map(); count.set(k, m); }
         m.set(w, (m.get(w) || 0) + 1);
       }
-      const out = new Map();
-      for (const [k, m] of count) out.set(k, [...m].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0][0]);
-      return out;
+      yield;
+    }
+    const out = new Map();
+    for (const [k, m] of count) out.set(k, [...m].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0][0]);
+    return out;
+  }
+  function surfaces(ix) {
+    return memo(ix, "surface", () => {
+      const steps = surfaceSteps(ix);
+      let s = steps.next();
+      while (!s.done) s = steps.next();
+      return s.value;
     });
   }
   function shown(ix, stem) { return surfaces(ix).get(stem) || stem; }
@@ -178,103 +190,179 @@ const Lib = (() => {
 
   // ---------------------------------------------------------------- topics: reels that belong together
 
-  /** Groups of reels about the same thing. [{key, label, words, reels}] biggest first, 2 reels or more. */
-  function topics(reels, threshold = 0.3) {
-    const ix = N.index(reels);
-    return memo(ix, "topics" + threshold, () => {
-      // vectors: words found in at least 2 reels but not in most of them, plus synonym groups, weighted by TF-IDF
-      const common = Math.max(3, ix.N * 0.5);
-      const vecs = ix.docs.map((d) => {
-        const v = new Map();
-        for (const [t, f] of d.tf) {
-          const df = ix.df.get(t);
-          if (df < 2 || df > common) continue;
-          v.set(t, (1 + Math.log(f)) * N.idfOf(ix, t));
-          for (const g of N.synonyms(t)) if (ix.df.has(g) && !d.tf.has(g)) v.set(g, Math.max(v.get(g) || 0, 0.5 * (1 + Math.log(f)) * N.idfOf(ix, g)));
-        }
-        let norm = 0;
-        for (const x of v.values()) norm += x * x;
-        norm = Math.sqrt(norm);
-        if (norm) for (const [t, x] of v) v.set(t, x / norm);
-        return v;
-      });
-      // one pass of leader clustering against group centres (the sum of their reels' vectors): each reel joins the
-      // group it is most like (cosine similarity), or starts a new one. Dot products go through shared words only,
-      // so this stays fast with thousands of reels. Then reels left alone get a second chance at the final groups.
-      const cents = [];
-      const byTerm = new Map();
-      const closest = (v, skip) => {
-        const dots = new Map();
-        for (const [t, x] of v) for (const c of byTerm.get(t) || []) if (c !== skip) dots.set(c, (dots.get(c) || 0) + x * cents[c].v.get(t));
-        let best = -1;
-        let bs = 0;
-        for (const [c, d] of dots) { const s = d / Math.sqrt(cents[c].norm2); if (s > bs || (s === bs && c < best)) { bs = s; best = c; } }
-        return [best, bs];
-      };
-      const join = (c, i) => {
-        const g = cents[c];
-        g.members.push(i);
-        for (const [t, x] of vecs[i]) {
-          const old = g.v.get(t) || 0;
-          g.v.set(t, old + x);
-          g.norm2 += (old + x) * (old + x) - old * old;
-          if (!byTerm.has(t)) byTerm.set(t, new Set());
-          byTerm.get(t).add(c);
-        }
-      };
-      vecs.forEach((v, i) => {
-        if (!v.size) return;
-        const [c, s] = closest(v, -1);
-        if (c >= 0 && s >= threshold) join(c, i);
-        else { cents.push({ v: new Map(), norm2: 0, members: [] }); join(cents.length - 1, i); }
-      });
-      for (let c = 0; c < cents.length; c++) {
-        if (cents[c].members.length !== 1) continue;
-        const i = cents[c].members[0];
-        const [to, s] = closest(vecs[i], c);
-        if (to >= 0 && cents[to].members.length > 1 && s >= threshold) { cents[c].members = []; join(to, i); }
+  // In a library of more than TOPIC_CAP_FROM reels each reel is described by its TOPIC_TERMS most telling words: the grouping
+  // costs more with every word a reel has, and thousands of long reels took minutes. Measured on generated reels, the groups
+  // stay just as pure, and 91-98% of the pairs of reels the old grouping put together are still together. Smaller libraries
+  // use every word, exactly as before (cheap there, and a cap would split more of their groups).
+  const TOPIC_TERMS = 40;
+  const TOPIC_CAP_FROM = 500;
+  const SLICE_MS = 12;  // how long topicsSoon works before the screen gets a turn
+
+  /**
+   * The work of grouping the reels, as a generator that yields after each reel: whoever runs it can stop after a few
+   * milliseconds and go on later (see topicJob). Returns [{key, label, words, reels}] biggest first, 2 reels or more.
+   */
+  function* topicSteps(ix, threshold, maxTerms) {
+    // vectors: words found in at least 2 reels but not in most of them, plus synonym groups, weighted by TF-IDF
+    const common = Math.max(3, ix.N * 0.5);
+    const keep = maxTerms === undefined ? (ix.N > TOPIC_CAP_FROM ? TOPIC_TERMS : Infinity) : maxTerms;
+    const vecs = [];
+    for (const d of ix.docs) {
+      let v = new Map();
+      for (const [t, f] of d.tf) {
+        const df = ix.df.get(t);
+        if (df < 2 || df > common) continue;
+        v.set(t, (1 + Math.log(f)) * N.idfOf(ix, t));
+        for (const g of N.synonyms(t)) if (ix.df.has(g) && !d.tf.has(g)) v.set(g, Math.max(v.get(g) || 0, 0.5 * (1 + Math.log(f)) * N.idfOf(ix, g)));
       }
-      const groups = cents.map((g) => g.members).filter((m) => m.length >= 2);
-      return groups.map((members) => {
-        // the label: the words that most of the group shares
-        const score = new Map();
-        for (const m of members) for (const [t, x] of vecs[m]) if (!/^~/.test(t)) score.set(t, (score.get(t) || 0) + x);
-        const share = (t) => members.filter((m) => ix.docs[m].tf.has(t)).length;
-        const top = [...score].filter(([t]) => share(t) >= Math.min(2, members.length)).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
-        const picked = [];
-        for (const [t] of top) {
-          if (picked.length >= 3) break;
-          if (picked.some((x) => x.startsWith(t) || t.startsWith(x) || N.near(x, t))) continue;
-          picked.push(t);
+      // the most telling words only (the heaviest)
+      if (v.size > keep) v = new Map([...v].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, keep));
+      let norm = 0;
+      for (const x of v.values()) norm += x * x;
+      norm = Math.sqrt(norm);
+      if (norm) for (const [t, x] of v) v.set(t, x / norm);
+      vecs.push(v);
+      yield;
+    }
+    // one pass of leader clustering against group centres (the sum of their reels' vectors): each reel joins the
+    // group it is most like (cosine similarity), or starts a new one. Dot products go through shared words only,
+    // so this stays fast with thousands of reels. Then reels left alone get a second chance at the final groups.
+    const cents = [];
+    const byTerm = new Map();
+    const closest = (v, skip) => {
+      const dots = new Map();
+      for (const [t, x] of v) for (const c of byTerm.get(t) || []) if (c !== skip) dots.set(c, (dots.get(c) || 0) + x * cents[c].v.get(t));
+      let best = -1;
+      let bs = 0;
+      for (const [c, d] of dots) { const s = d / Math.sqrt(cents[c].norm2); if (s > bs || (s === bs && c < best)) { bs = s; best = c; } }
+      return [best, bs];
+    };
+    const join = (c, i) => {
+      const g = cents[c];
+      g.members.push(i);
+      for (const [t, x] of vecs[i]) {
+        const old = g.v.get(t) || 0;
+        g.v.set(t, old + x);
+        g.norm2 += (old + x) * (old + x) - old * old;
+        if (!byTerm.has(t)) byTerm.set(t, new Set());
+        byTerm.get(t).add(c);
+      }
+    };
+    for (let i = 0; i < vecs.length; i++) {
+      if (!vecs[i].size) continue;
+      const [c, s] = closest(vecs[i], -1);
+      if (c >= 0 && s >= threshold) join(c, i);
+      else { cents.push({ v: new Map(), norm2: 0, members: [] }); join(cents.length - 1, i); }
+      yield;
+    }
+    for (let c = 0; c < cents.length; c++) {
+      if (cents[c].members.length !== 1) continue;
+      const i = cents[c].members[0];
+      const [to, s] = closest(vecs[i], c);
+      if (to >= 0 && cents[to].members.length > 1 && s >= threshold) { cents[c].members = []; join(to, i); }
+      yield;
+    }
+    if (!("surface" in (perIx.get(ix) || {}))) { const words = yield* surfaceSteps(ix); memo(ix, "surface", () => words); }
+    const groups = [];
+    for (const members of cents.map((g) => g.members).filter((m) => m.length >= 2)) {
+      // the label: the words that most of the group shares
+      const score = new Map();
+      for (const m of members) for (const [t, x] of vecs[m]) if (!/^~/.test(t)) score.set(t, (score.get(t) || 0) + x);
+      const share = (t) => members.filter((m) => ix.docs[m].tf.has(t)).length;
+      const top = [...score].filter(([t]) => share(t) >= Math.min(2, members.length)).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+      const picked = [];
+      for (const [t] of top) {
+        if (picked.length >= 3) break;
+        if (picked.some((x) => x.startsWith(t) || t.startsWith(x) || N.near(x, t))) continue;
+        picked.push(t);
+      }
+      const wordsShown = picked.map((t) => shown(ix, t));
+      groups.push({ key: picked.join("+") || "group" + members[0], label: wordsShown.join(", "), words: wordsShown, reels: members.map((m) => ix.docs[m].r) });
+      yield;
+    }
+    groups.sort((a, b) => b.reels.length - a.reels.length || (a.label < b.label ? -1 : 1));
+    // A topic page is found by its key, so each group needs its own. Two groups can have the same words (a subject cut in two
+    // by the cap): the bigger keeps the plain key, the next ones get ~2, ~3 (a word never has a ~).
+    const seen = new Map();
+    for (const g of groups) { const n = (seen.get(g.key) || 0) + 1; seen.set(g.key, n); if (n > 1) g.key += "~" + n; }
+    return groups;
+  }
+
+  /** The grouping for one version of the library, done in steps. Kept with the index, so a changed reel drops it. */
+  function topicJob(ix, threshold, maxTerms) {
+    const key = "topics" + threshold + "/" + maxTerms;
+    return memo(ix, key, () => {
+      const steps = topicSteps(ix, threshold, maxTerms);
+      const job = { groups: null };
+      /** Works for about ms milliseconds (Infinity: to the end); true once the groups are known. */
+      job.run = (ms) => {
+        const stop = performance.now() + ms;
+        while (!job.groups) {
+          let s;
+          try { s = steps.next(); } catch (e) { delete perIx.get(ix)[key]; throw e; }  // a failed try is not kept: the next call starts over (and fails the same way)
+          if (s.done) job.groups = s.value;
+          else if (performance.now() >= stop) return false;
         }
-        const wordsShown = picked.map((t) => shown(ix, t));
-        return { key: picked.join("+") || "group" + members[0], label: wordsShown.join(", "), words: wordsShown, reels: members.map((m) => ix.docs[m].r) };
-      }).sort((a, b) => b.reels.length - a.reels.length || (a.label < b.label ? -1 : 1));
+        return true;
+      };
+      return job;
     });
   }
 
-  function topic(reels, key) { return topics(reels).find((t) => t.key === key) || null; }
-
-  /** Every tool or app the notes name, with how many reels name it. [{name, count}] */
-  function tools(reels) {
-    const ix = N.index(reels);
-    return memo(ix, "tools", () => {
-      const by = new Map();
-      for (const d of ix.docs) {
-        const seen = new Set();
-        for (const t of (d.r.notes || {}).tools || []) {
-          const name = String(t).trim().replace(/\s+/g, " ");
-          const k = fold(name);
-          if (!k || k.length > 40 || seen.has(k)) continue;
-          seen.add(k);
-          const cur = by.get(k) || { name, count: 0 };
-          cur.count++;
-          by.set(k, cur);
-        }
-      }
-      return [...by.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-    });
+  /**
+   * Groups of reels about the same thing. [{key, label, words, reels}] biggest first, 2 reels or more.
+   * All at once: fine for a few hundred reels. Screens use topicsReady and topicsSoon, so thousands never freeze them.
+   * maxTerms (words kept per reel) is only for comparing: Infinity gives the grouping with every word.
+   */
+  function topics(reels, threshold = 0.3, maxTerms) {
+    const job = topicJob(N.index(reels), threshold, maxTerms);
+    job.run(Infinity);
+    return job.groups;
   }
 
-  return { parseQuery, find, distance, didYouMean, highlight, topics, topic, tools, fold };
+  /** The groups, only when they were already worked out for the library as it is now, else null. Never starts the work. */
+  function topicsReady(reels) {
+    return topicJob(N.index(reels), 0.3).groups;
+  }
+
+  /**
+   * The groups without blocking: done(groups) is called when they are known, at once when they already are. The work goes
+   * on SLICE_MS at a time, with the screen free to draw and listen in between. wanted() says whether anyone still waits;
+   * when it says no the work stops (what is done is kept and goes on at the next call). If a reel changes meanwhile, the
+   * work starts again for the library as it is now.
+   */
+  function topicsSoon(reels, done, wanted) {
+    const ix = N.index(reels);
+    const job = topicJob(ix, 0.3);
+    const slice = () => {
+      if (!wanted()) return;
+      if (!job.run(SLICE_MS)) { setTimeout(slice, 0); return; }
+      if (N.index(reels) !== ix) topicsSoon(reels, done, wanted);
+      else done(job.groups);
+    };
+    slice();
+  }
+
+  /** Every tool or app the notes of these reels name, with how many reels name it. [{name, count}] Does not touch the index. */
+  function countTools(reels) {
+    const by = new Map();
+    for (const r of reels) {
+      const seen = new Set();
+      for (const t of (r.notes || {}).tools || []) {
+        const name = String(t).trim().replace(/\s+/g, " ");
+        const k = fold(name);
+        if (!k || k.length > 40 || seen.has(k)) continue;
+        seen.add(k);
+        const cur = by.get(k) || { name, count: 0 };
+        cur.count++;
+        by.set(k, cur);
+      }
+    }
+    return [...by.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }
+
+  /** countTools for the whole library, kept until it changes. */
+  function tools(reels) { return memo(N.index(reels), "tools", () => countTools(reels)); }
+
+  return { parseQuery, find, distance, didYouMean, highlight, topics, topicsReady, topicsSoon, tools, countTools, fold };
 })();

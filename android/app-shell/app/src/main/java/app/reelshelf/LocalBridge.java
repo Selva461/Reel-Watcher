@@ -40,6 +40,10 @@ final class LocalBridge {
     private static final Object SHARED_LOCK = new Object();
 
     private static final Object SETTINGS_LOCK = new Object();
+    /** One library backup (or, later, restore) at a time in the whole app: the staging folders are shared. */
+    private static final java.util.concurrent.atomic.AtomicBoolean LIBRARY_JOB = new java.util.concurrent.atomic.AtomicBoolean();
+    /** The moment the last backup's name was made from (see BackupNow.nameTime). Only read and written while LIBRARY_JOB is held. */
+    private static long lastBackupNameTime;
 
     private final Host act;
     private final SharedPreferences prefs;
@@ -144,7 +148,11 @@ final class LocalBridge {
         return fileOf(which).revision() != revOf(which);
     }
 
-    /** {"state": ok|missing|recovered|unreadable|started_new, "bad": name of the damaged file set aside, "notice": ...}. which: "reels" or "shots". */
+    /**
+     * {"state": ok|missing|recovered|unreadable|started_new|newer, "bad": name of the damaged file set aside, "notice": ...}.
+     * "newer" (saved by a newer Reel Shelf, locked and untouched) adds "found" (its schema number) and "supported" (the
+     * newest this build reads). which: "reels" or "shots".
+     */
     @JavascriptInterface
     public String libraryInfo(String which) {
         if (!ok()) return "{}";
@@ -154,10 +162,27 @@ final class LocalBridge {
             o.put("state", f.state().name().toLowerCase(java.util.Locale.ROOT));
             o.put("bad", f.badName());
             o.put("notice", act.isNight() ? "" : f.takeNotice());  // the nightly run has no screen to say it on
+            if (f.state() == LibraryFile.State.NEWER) {
+                o.put("found", f.found());
+                o.put("supported", f.supported());
+            }
         } catch (JSONException ignored) {
             // not reachable
         }
         return o.toString();
+    }
+
+    /** This app's version name (versionName in build.gradle), for the screen that says a newer library cannot be opened. "" when unknown. */
+    @JavascriptInterface
+    @SuppressWarnings("deprecation")
+    public String appVersion() {
+        if (!ok()) return "";
+        try {
+            String v = act.ctx().getPackageManager().getPackageInfo(act.ctx().getPackageName(), 0).versionName;
+            return v == null ? "" : v;
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     /** Sets the damaged file aside (renamed, kept) and unlocks for a new one. False when that did not work: nothing is then changed. */
@@ -210,37 +235,195 @@ final class LocalBridge {
         long to(OutputStream out) throws IOException;
     }
 
+    /** Looks at a saved file once it is complete (a backup is read back). Throws when it is not good: the file is then deleted. */
+    private interface ReadBack {
+        void check(InputStream in) throws IOException;
+    }
+
     /** Android's own way to save into Downloads (MediaStore, no permission needed); before Android 10 the app's Downloads folder. */
     private String saveToDownloads(String name, String mime, Writer w) throws IOException {
+        return saveToDownloads(name, mime, w, "There is no unreadable file to save", null);
+    }
+
+    /**
+     * emptyMessage is what a writer that returns -1 (nothing to write) says. readBack, when not null (a backup), is given the
+     * saved file to look at once it is complete; the file is only a real file in Downloads once it passed: until then it is
+     * hidden (Android 10 and newer: IS_PENDING) or named NAME.part (Android 8 and 9), so no other app, cloud upload or person
+     * sees a half-finished or unproven file as a backup. When it fails, or anything else goes wrong (an Error too), the file
+     * is deleted. A backup also never replaces a file of the same name on Android 8 and 9, and the place returned names the
+     * file as Android really saved it (it may have added " (1)" to the name).
+     */
+    private String saveToDownloads(String name, String mime, Writer w, String emptyMessage, ReadBack readBack) throws IOException {
         if (Build.VERSION.SDK_INT >= 29) {
             android.content.ContentResolver cr = act.ctx().getContentResolver();
             ContentValues v = new ContentValues();
             v.put(MediaStore.Downloads.DISPLAY_NAME, name);
             v.put(MediaStore.Downloads.MIME_TYPE, mime);
             v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ReelShelf");
+            if (readBack != null) v.put(MediaStore.Downloads.IS_PENDING, 1);
             Uri uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
             if (uri == null) throw new IOException("Android did not give a place to save");
-            try (OutputStream out = cr.openOutputStream(uri)) {
-                if (out == null) throw new IOException("Could not write the file");
-                if (w.to(out) < 0) throw new IOException("There is no unreadable file to save");
-            } catch (IOException | RuntimeException e) {
-                cr.delete(uri, null, null);  // no half-written file left in Downloads
-                throw e;
+            String saved = name;
+            try {
+                try (OutputStream out = cr.openOutputStream(uri)) {
+                    if (out == null) throw new IOException("Could not write the file");
+                    if (w.to(out) < 0) throw new IOException(emptyMessage);
+                }
+                if (readBack != null) {
+                    try (InputStream in = cr.openInputStream(uri)) {
+                        if (in == null) throw new IOException("Could not read the file back");
+                        readBack.check(in);
+                    }
+                    ContentValues visible = new ContentValues();
+                    visible.put(MediaStore.Downloads.IS_PENDING, 0);  // only now is it a file in Downloads
+                    if (cr.update(uri, visible, null, null) < 1) throw new IOException("Could not finish the file");
+                    saved = displayName(cr, uri, name);
+                }
+            } catch (Throwable t) {  // an Error too: nothing half-finished stays in Downloads
+                cr.delete(uri, null, null);
+                throw t;
             }
-            return "Downloads/ReelShelf/" + name;
+            return "Downloads/ReelShelf/" + saved;
         }
         File d = new File(act.ctx().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "ReelShelf");
+        if (readBack != null) return BackupNow.saveProven(d, name, w::to, emptyMessage, readBack::check).getPath();
         //noinspection ResultOfMethodCallIgnored
         d.mkdirs();
         File f = new File(d, name);
         try (OutputStream out = new FileOutputStream(f)) {
-            if (w.to(out) < 0) throw new IOException("There is no unreadable file to save");
+            if (w.to(out) < 0) throw new IOException(emptyMessage);
         } catch (IOException | RuntimeException e) {
             //noinspection ResultOfMethodCallIgnored
             f.delete();
             throw e;
         }
         return f.getPath();
+    }
+
+    /** The name Android gave a file it saved in Downloads (it renames a duplicate to "name (1).zip"); fallback when it cannot be asked. */
+    private static String displayName(android.content.ContentResolver cr, Uri uri, String fallback) {
+        try (android.database.Cursor c = cr.query(uri, new String[]{MediaStore.MediaColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String n = c.getString(0);
+                if (n != null && !n.isEmpty()) return n;
+            }
+        } catch (RuntimeException ignored) {
+            // the name asked for is the best guess
+        }
+        return fallback;
+    }
+
+    /**
+     * Back up now: ONE ZIP with the whole library (reels.json and shots.json byte for byte, and a manifest) in
+     * Downloads/ReelShelf, then read back to prove it can be restored (LibraryBackup.check); a backup that fails the
+     * read-back is deleted. countsJson is {reels, titles, screenshots} from the page, for the screen only. The library is
+     * never parsed to make a backup and never changed. Done with JSON {name, where, bytes, counts, uninstall_warning,
+     * shots_skipped} or, when it fails, with one plain sentence (no path, no exception text). Refused while the library is
+     * locked (unreadable or newer). The file is readable by other apps: the page says so. Settings and API keys are not in it.
+     */
+    @JavascriptInterface
+    public void backupLibrary(int id, String countsJson) {
+        if (!ok()) return;
+        work.execute(() -> {
+            BackupNow.Outcome o;
+            try {
+                o = makeBackup(countsJson);  // everything is cleaned up before the page hears about it, so a click right after is not "busy"
+            } catch (Throwable t) {  // an Error too (out of memory): the page must never stay on "Backing up..."
+                o = BackupNow.fail(BackupNow.sentenceFor(t));
+            }
+            done(id, o.ok, o.text);
+        });
+    }
+
+    private BackupNow.Outcome makeBackup(String countsJson) {
+        if (!LIBRARY_JOB.compareAndSet(false, true)) return BackupNow.fail(BackupNow.BUSY);
+        try {
+            return backupHoldingTheFlag(countsJson);
+        } finally {
+            LIBRARY_JOB.set(false);  // whatever happens inside, the flag cannot stay set
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private BackupNow.Outcome backupHoldingTheFlag(String countsJson) {
+        File dir = act.ctx().getFilesDir();
+        File snaps = new File(dir, "backup-work");  // hard links to the library files: only ever read or deleted, never opened for writing
+        File staging = new File(dir, "restore-staging");  // same volume as the library; the read-back unpacks here
+        try {
+            LibraryBackup.clear(snaps);  // what a cut-off backup left (our own links, not user data); snapshotTo refuses a name that exists
+            LibraryFile reels = reelsFile(), shots = shotsFile();
+            File reelsSnap = new File(snaps, LibraryBackup.REELS), shotsSnap = new File(snaps, LibraryBackup.SHOTS);
+            boolean haveReels, haveShots = false, shotsSkipped = false;
+            synchronized (reels) {  // both are taken together so they belong to each other: reels lock first, shots inside it (nothing takes them the other way round)
+                try {
+                    haveReels = reels.snapshotTo(reelsSnap);
+                } catch (IOException e) {
+                    if (reels.locked()) return BackupNow.fail(BackupNow.locked(reels.state() == LibraryFile.State.NEWER));  // unreadable or newer: never backed up
+                    throw e;
+                }
+                if (haveReels) {
+                    synchronized (shots) {
+                        try {
+                            haveShots = shots.snapshotTo(shotsSnap);
+                        } catch (IOException e) {
+                            if (!shots.locked()) throw e;
+                            shotsSkipped = true;  // the screenshot list cannot be read (or is newer): it is not in the backup (it can be read again from the pictures), and the page says so
+                        }
+                    }
+                }
+            }
+            if (!haveReels) return BackupNow.fail(BackupNow.NOTHING);
+            long reelsBytes = reelsSnap.length(), shotsBytes = haveShots ? shotsSnap.length() : 0;
+            long need = BackupNow.neededBytes(reelsBytes, shotsBytes, SharedItems.RESERVE_BYTES);
+            long free = dir.getUsableSpace();
+            File external = act.ctx().getExternalFilesDir(null);  // where Downloads is (the same disk on most phones)
+            if (external != null) free = Math.min(free, external.getUsableSpace());
+            if (free < need) return BackupNow.fail(BackupNow.notEnoughSpace(need, free));
+
+            String versionName = "";
+            int versionCode = 0;
+            try {
+                android.content.pm.PackageInfo pi = act.ctx().getPackageManager().getPackageInfo(act.ctx().getPackageName(), 0);
+                if (pi.versionName != null) versionName = pi.versionName;
+                versionCode = pi.versionCode;
+            } catch (Exception ignored) {
+                // the manifest then says "" and 0: a backup is still a backup
+            }
+            final String vName = versionName;
+            final int vCode = versionCode;
+            final boolean withShots = haveShots;
+            final JSONObject counts = BackupNow.counts(countsJson, haveShots);
+            long now = System.currentTimeMillis();
+            long named = BackupNow.nameTime(now, lastBackupNameTime);
+            lastBackupNameTime = named;
+            String name = BackupNow.fileName(named, java.util.TimeZone.getDefault());
+            long[] size = new long[1];
+            final long raw = reelsBytes + shotsBytes;
+            String place = saveToDownloads(name, "application/zip", out -> {
+                BackupNow.Counter counter = new BackupNow.Counter(out);
+                java.io.BufferedOutputStream buffered = new java.io.BufferedOutputStream(counter, 64 * 1024);
+                LibraryBackup.write(buffered, reelsSnap, reels.supported(), withShots ? shotsSnap : null, shots.supported(), counts, vName, vCode, now);
+                buffered.flush();
+                size[0] = counter.count();
+                return size[0];
+            }, BackupNow.EMPTY, in -> {  // the proof that it can be restored
+                LibraryBackup.Checked c;
+                try {
+                    c = LibraryBackup.check(new java.io.BufferedInputStream(in, 64 * 1024), staging, raw + LibraryBackup.MANIFEST_MAX_BYTES);
+                } catch (OutOfMemoryError e) {
+                    throw new BackupNow.Failure(BackupNow.OUT_OF_MEMORY);  // whole files are read to be checked
+                }
+                if (!c.ok()) throw new BackupNow.Failure(BackupNow.READ_BACK);
+            });
+            String saved = new File(place).getName();  // the name it really has: Android may have changed it ("name (1).zip") and a taken name is not reused
+            boolean appFolder = Build.VERSION.SDK_INT < 29;  // Android 8 and 9: the app's own folder, deleted with the app
+            return BackupNow.ok(saved, BackupNow.where(appFolder, act.ctx().getPackageName(), saved), size[0], counts, appFolder, shotsSkipped);
+        } catch (IOException | RuntimeException e) {
+            return BackupNow.fail(BackupNow.sentenceFor(e));
+        } finally {
+            LibraryBackup.clear(snaps);
+            LibraryBackup.clear(staging);
+        }
     }
 
     /**
@@ -661,21 +844,26 @@ final class LocalBridge {
                 long t0 = System.currentTimeMillis();
                 java.util.List<File> frames = new java.util.ArrayList<>();
                 File sound = null;
-                if (o.optBoolean("media", false)) {  // the current reel's key frames and sound, made by readReelVideo
-                    File dir = ReelVideo.mediaDir(act.ctx());
-                    for (int i = 0; i < 4; i++) {
-                        File f = new File(dir, "frame" + i + ".jpg");
-                        if (f.isFile()) frames.add(f);
-                    }
-                    File w = new File(dir, "sound.wav");
-                    if (w.isFile()) sound = w;
-                }
                 String out;
+                boolean media = o.optBoolean("media", false);
+                if (media) ReelVideo.BUSY.incrementAndGet();  // before the files are looked at: the temp sweep leaves the key frames and sound alone from here to the end of the call
                 try {
+                    if (media) {  // the current reel's key frames and sound, made by readReelVideo
+                        File dir = ReelVideo.mediaDir(act.ctx());
+                        for (int i = 0; i < 4; i++) {
+                            File f = new File(dir, "frame" + i + ".jpg");
+                            if (f.isFile()) frames.add(f);
+                        }
+                        File w = new File(dir, "sound.wav");
+                        if (w.isFile()) sound = w;
+                    }
                     out = model.generate(model.file(o.optString("file", "")), o.optBoolean("gpu", true), o.optString("system", ""),
                             prompt == null ? "" : prompt, o.optInt("maxTokens", 800), o.optDouble("temperature", 0.3), frames, sound);
                 } finally {
-                    if (o.optBoolean("media", false)) ReelVideo.clearMedia(act.ctx());
+                    if (media) {
+                        ReelVideo.clearMedia(act.ctx());
+                        ReelVideo.BUSY.decrementAndGet();
+                    }
                 }
                 JSONObject r = new JSONObject();
                 r.put("text", out);
@@ -977,7 +1165,11 @@ final class LocalBridge {
                 done(id, false, "cancelled");
                 return;
             }
-            ocr.execute(() -> done(id, true, String.valueOf(ScreenshotReader.addPictures(act.ctx(), uris))));
+            ocr.execute(() -> {
+                MediaBatch.Report r = ScreenshotReader.addPictures(act.ctx(), uris);
+                if (r.saved() == 0) done(id, false, "Could not keep those pictures" + (r.failed() > 0 ? ": " + r.firstWhy() : ""));
+                else done(id, true, r.pickerAnswer());  // a picture kept before counts: it is in the app
+            });
         }));
     }
 
