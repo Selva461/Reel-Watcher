@@ -151,6 +151,7 @@ public class LibraryBackupTest {
         assertEquals("1.3.17", m.getJSONObject("app").getString("version_name"));
         assertEquals(24, m.getJSONObject("app").getInt("version_code"));
         assertTrue(m.getString("contains").contains("no settings, no API keys"));
+        assertTrue("the manifest says the screenshot text and file names are in it", m.getString("contains").contains("the screenshot list (a short part of the text read from each screenshot, and file names)"));
         assertEquals(1, m.getJSONObject("counts").getInt("reels"));
         JSONObject r = m.getJSONObject("files").getJSONObject("reels.json");
         assertEquals(b(REELS).length, r.getInt("bytes"));
