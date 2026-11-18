@@ -30,6 +30,8 @@ final class LocalModel {
     private final Context ctx;
     private final File dir;
     private volatile boolean stop;
+    /** The check of a model file that is already on the phone (ModelCheck): at most one, and stopAll() stops it. */
+    final ModelCheck.Runner checks = new ModelCheck.Runner();
     private Engine engine;
     private String enginePath = "";
     private String engineBackend = "";
@@ -54,6 +56,7 @@ final class LocalModel {
     /** Stops a download or an answer in progress and frees the model's memory. */
     void stopAll() {
         stop = true;
+        checks.cancel();  // a model check in progress stops before its next read and records nothing
         Conversation c = current;
         if (c != null) {
             try {
@@ -80,7 +83,9 @@ final class LocalModel {
      */
     void download(ModelCatalog.Entry e, ModelVerifier.Progress p) throws IOException {
         stop = false;
-        new ModelVerifier(() -> stop).download(e, file(e.file), p);
+        File dest = file(e.file);
+        new ModelVerifier(() -> stop).download(e, dest, p);
+        ModelCheck.recordDownloaded(e, dest);  // it just passed the size and SHA-256 check: no need to read it again
     }
 
     /** A verifier that stops when stopAll() is called: the speech model's ZIP is fetched through it, then unpacked (see ModelZip.fetch). */
