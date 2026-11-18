@@ -124,6 +124,11 @@ final class TempSweep {
         Busy holdingStagingLock() {
             return new Busy(false, videoReads, reelsLibraryOk, shotsLibraryOk);
         }
+
+        /** The same, with a fresh count of the videos being read (a read may have started since this was taken). */
+        Busy withVideoReads(int reads) {
+            return new Busy(stagingBusy, reads, reelsLibraryOk, shotsLibraryOk);
+        }
     }
 
     /** DELETE (reason is null) or KEEP with the reason. rule is the table row that matched the name, or null. */

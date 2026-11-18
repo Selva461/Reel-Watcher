@@ -610,6 +610,51 @@ public class TempSweepTest {
     }
 
     @Test
+    public void aVideoReadThatStartsAfterTheListingKeepsTheCacheFiles() throws Exception {
+        libraryOk();
+        File v = put(cache, "reel-video.mp4", 10, TEN_YEARS);
+        File f0 = put(media, "frame0.jpg", 10, TEN_YEARS);
+        // a read starts after the media folder was listed (the cache folder was swept before it, with no read going on)
+        TempSweeper.Result r = sweep(new TempSweeper.Io() {
+            @Override
+            public void afterListing(Folder folder) {
+                if (folder == Folder.REEL_MEDIA) reads.set(1);
+            }
+        });
+        assertFalse("the cache folder was done before the read began", v.exists());
+        assertTrue("the read began after listing: its key frames stay", f0.isFile());
+        assertEquals(1, r.files);
+        // and the same for the cache folder: the read begins after it was listed
+        reads.set(0);
+        File v2 = put(cache, "reel-video-local.mp4", 10, TEN_YEARS);
+        r = sweep(new TempSweeper.Io() {
+            @Override
+            public void afterListing(Folder folder) {
+                if (folder == Folder.CACHE) reads.set(1);
+            }
+        });
+        assertTrue("the read began after listing: its video copy stays", v2.isFile());
+        assertTrue(f0.isFile());
+        assertEquals(0, r.files);
+        reads.set(0);
+        assertEquals("with no read going on both go", 2, sweep().files);
+    }
+
+    @Test
+    public void anEmptyFolderNamedLikeAnAllowlistedFileIsKeptByTheTwoRegularFileChecks() throws Exception {
+        libraryOk();
+        File[] dirs = {new File(staging, "copy-1.part"), new File(cache, "reel-video.mp4"), new File(cache, "reel-video-local.mp4"),
+                new File(media, "frame0.jpg"), new File(media, "sound.wav"), new File(files, "reels.json.tmp"), new File(files, "shots.json.tmp")};
+        for (File d : dirs) {
+            assertTrue(d.mkdirs());  // an empty folder could simply be deleted: only the regular-file checks keep it
+            assertTrue(d.setLastModified(NOW - TEN_YEARS));
+        }
+        TempSweeper.Result r = sweep();
+        for (File d : dirs) assertTrue(d.getPath() + " is kept", d.isDirectory());
+        assertEquals(0, r.files);
+    }
+
+    @Test
     public void aFileThatVanishedBetweenListingAndDeleteIsNotAnError() throws Exception {
         libraryOk();
         File gone = put(staging, "copy-1.part", 10, TEN_YEARS);
