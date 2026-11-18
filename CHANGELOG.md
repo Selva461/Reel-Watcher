@@ -5,6 +5,25 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.20
+- A **Back up now** button in Settings (under "Backup and restore") saves one file with your whole library to
+  Downloads/ReelShelf, named `ReelShelf-backup-<date>-<time>.zip`. It holds your reels, notes, watchlist, quotes and
+  products (and the list of screenshots already read). It checks that there is enough free space first, and after
+  saving it reads the file back and checks it, so a backup that could not be restored is deleted and reported as
+  failed instead of being kept. The message tells you where it saved, how many reels and titles it holds and how big
+  it is. Your library is not changed by a backup, and a backup is refused while the library cannot be opened (then the
+  "Save the unreadable file" button is what you have, as before).
+- Privacy: the backup file has all your notes in it and can be read by any app with access to your files, so keep it
+  somewhere safe or delete it. It does not contain your settings, API keys, AI models, pictures or videos. Reel Shelf
+  never deletes old backups for you. On Android 8 and 9 the file is saved in the app's own folder, which Android
+  deletes when you uninstall Reel Shelf, and the screen says so: copy it somewhere else.
+- There is no restore button yet: this version only makes backups. A later version adds restoring.
+- The old **Save JSON** button is now called **Export notes (JSON, cannot be restored)**, because it keeps only some
+  of your notes and cannot be read back. The last step of the manual overnight run, which saves that JSON file, no
+  longer calls it a backup and points to Back up now.
+- Checked with automatic tests on a computer (the page, and the parts of the backup that need no phone). The part that
+  talks to Android (saving into Downloads, the free-space check, the read-back) is not tried on a phone yet.
+
 ## 1.3.18
 - Reel Shelf now cleans up its own leftover temporary files after a crash or a force-stop. It does this once each time
   the app starts, about 20 seconds after you open it, and only if no job and no nightly run is running at that moment.
