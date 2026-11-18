@@ -692,11 +692,16 @@ final class LocalBridge {
                     if (w.isFile()) sound = w;
                 }
                 String out;
+                boolean media = o.optBoolean("media", false);
+                if (media) ReelVideo.BUSY.incrementAndGet();  // the temp sweep leaves the key frames and sound alone while the model reads them
                 try {
                     out = model.generate(model.file(o.optString("file", "")), o.optBoolean("gpu", true), o.optString("system", ""),
                             prompt == null ? "" : prompt, o.optInt("maxTokens", 800), o.optDouble("temperature", 0.3), frames, sound);
                 } finally {
-                    if (o.optBoolean("media", false)) ReelVideo.clearMedia(act.ctx());
+                    if (media) {
+                        ReelVideo.clearMedia(act.ctx());
+                        ReelVideo.BUSY.decrementAndGet();
+                    }
                 }
                 JSONObject r = new JSONObject();
                 r.put("text", out);

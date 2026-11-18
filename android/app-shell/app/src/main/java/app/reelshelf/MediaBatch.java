@@ -138,6 +138,23 @@ final class MediaBatch {
     }
 
     /**
+     * For the temp sweep: runs action while holding the copying lock, but only when the lock is free this very moment. It
+     * never waits: a share that is being copied is not disturbed, and the sweep does not queue behind it. Returns false, and
+     * does not run the action, when a copy is running. It also says no to a thread that already holds the lock (the lock
+     * is reentrant, so a plain tryLock would let the sweep in from inside a copy). Nothing can start copying while the action
+     * runs, so the action must be short.
+     */
+    static boolean trySweepStaging(Runnable action) {
+        if (ONE_AT_A_TIME.isHeldByCurrentThread() || !ONE_AT_A_TIME.tryLock()) return false;
+        try {
+            action.run();
+            return true;
+        } finally {
+            ONE_AT_A_TIME.unlock();
+        }
+    }
+
+    /**
      * Copies the items. staging is the folder the half-written files live in (never the inbox). Files left there by a
      * copy that was cut short (the phone killed the app) are removed first: nothing else can be using it, the lock is ours.
      */

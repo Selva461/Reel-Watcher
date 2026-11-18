@@ -535,6 +535,23 @@ final class LibraryFile {
         return Files.copy(f.toPath(), out);
     }
 
+    /** What the temp sweep does to a leftover temp file, once this class has said it is safe to. */
+    interface Remover {
+        boolean remove(File tmp) throws IOException;
+    }
+
+    /**
+     * For the temp sweep: lets remover delete a leftover NAME.tmp (a save that was cut off between writing the temp file and
+     * renaming it). It runs under this file's own lock, so no save can be half way, and only when this process has read the
+     * file and found it good (state OK, not locked). In any other state (not read yet, recovered, set aside, unreadable, a
+     * newer Reel Shelf) nothing is touched: a leftover may then be the only other copy. Returns what remover returned, or
+     * false when it was not allowed to run.
+     */
+    synchronized boolean dropTmp(Remover remover) throws IOException {
+        if (locked || state != State.OK) return false;
+        return remover.remove(tmp);
+    }
+
     /** Deletes the backup (after "Delete all reels and notes", so deleted reels do not come back from it). */
     synchronized boolean dropBackup() {
         if (state == State.NEWER) return false;  // the backup of a newer library is never deleted
