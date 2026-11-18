@@ -174,8 +174,9 @@ public class RestoreNowTest {
         assertEquals(3, p.getLong("screenshots"));
         assertTrue(p.getBoolean("has_shots"));
         assertEquals(1234, p.getLong("bytes"));
-        assertEquals(new java.util.TreeSet<>(Arrays.asList("token", "created_at", "app_version", "reels", "titles", "screenshots", "has_shots", "bytes")),
-                new java.util.TreeSet<>(p.keySet()));
+        java.util.TreeSet<String> keys = new java.util.TreeSet<>();
+        for (java.util.Iterator<String> it = p.keys(); it.hasNext(); ) keys.add(it.next());  // keys(), not keySet(): the Android stubs the tests compile against have no keySet()
+        assertEquals(new java.util.TreeSet<>(Arrays.asList("token", "created_at", "app_version", "reels", "titles", "screenshots", "has_shots", "bytes")), keys);
         LibraryBackup.Checked noShots = check(backupOf(BACKED_REELS, null), new File(tmp.newFolder(), "restore-staging"));
         assertFalse(json(RestoreNow.preview("t", noShots, 1)).getBoolean("has_shots"));
     }
