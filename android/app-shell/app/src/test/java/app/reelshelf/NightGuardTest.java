@@ -6,6 +6,7 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** When the nightly run may start: never over the app on screen, never twice at once. */
@@ -75,17 +76,31 @@ public class NightGuardTest {
 
     @Test
     public void manyAlarmsAtTheSameMomentStartExactlyOneRun() throws Exception {
-        NightGuard g = new NightGuard(4 * HOUR);
-        AtomicInteger started = new AtomicInteger();
-        Thread[] ts = new Thread[16];
-        for (int i = 0; i < ts.length; i++) {
-            ts[i] = new Thread(() -> {
-                if (g.tryStart(false, false, T0) == NightGuard.Verdict.START) started.incrementAndGet();
-            });
+        // Every thread waits at a start gate and is let go together, many times over, so the claim really is contested
+        // (without the gate a thread often finishes before the next one has started, and a claim that is not atomic passes).
+        for (int round = 0; round < 1000; round++) {
+            NightGuard g = new NightGuard(4 * HOUR);
+            AtomicInteger started = new AtomicInteger();
+            CountDownLatch ready = new CountDownLatch(16);
+            CountDownLatch gate = new CountDownLatch(1);
+            Thread[] ts = new Thread[16];
+            for (int i = 0; i < ts.length; i++) {
+                ts[i] = new Thread(() -> {
+                    ready.countDown();
+                    try {
+                        gate.await();
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    if (g.tryStart(false, false, T0) == NightGuard.Verdict.START) started.incrementAndGet();
+                });
+                ts[i].start();
+            }
+            ready.await();  // all 16 are waiting at the gate
+            gate.countDown();
+            for (Thread t : ts) t.join();
+            assertEquals("round " + round, 1, started.get());
         }
-        for (Thread t : ts) t.start();
-        for (Thread t : ts) t.join();
-        assertEquals(1, started.get());
     }
 
     // ------------------------------------------------------------------ touch: a run that is still going keeps its claim

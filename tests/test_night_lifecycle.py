@@ -10,12 +10,20 @@ import pytest
 
 from test_backup_now import BACKUP_RN
 from test_library_newer import FLAVOURS, assert_untouched, newer_reels, newer_screen, newer_shots, open_newer, settle
-from test_library_safety import PIC, SHOT_STATE
+from test_library_safety import DAMAGED, LIB_RN, PIC, SHOT_STATE, locked_screen, unreadable
 from test_phone_app import EMBED, db_of, phone, site  # noqa: F401  (pytest fixtures)
 from test_shots import SHOTS_RN
 from test_stale_writes import GOOD, LINK, OLD_SHOTS, RIVAL, SHOTS_REVISION_RN, another_page_saves, codes, page_codes, toast_has  # noqa: F401
 
 FAST = "window.__handover = { poll: 20, max: 5000 };"
+# counts how often the page asks the phone whether the run is still going (it asks once per hand-over poll)
+COUNT_POLLS = r"""
+(() => {
+  const asked = window.RN.nightActive;
+  window.__polls = 0;
+  window.RN.nightActive = (...a) => { window.__polls++; return asked(...a); };
+})();
+"""
 # fetches (Instagram pages) wait until the test lets them through, so a run can be stopped at a known moment
 HOLD_FETCH = r"""
 (() => {
@@ -33,6 +41,14 @@ def set_state(pg, **kw):
 
 def waiting_screen(pg):
     return pg.get_by_text("The nightly run is finishing")
+
+
+def go_and_let_render_run(pg, route):
+    """Changes the route and returns once the page's own hashchange handler (render) has run: the listener added here is added later, so it runs after it."""
+    pg.evaluate("""r => new Promise((done) => {
+      window.addEventListener('hashchange', () => setTimeout(done, 0), { once: true });
+      location.hash = r;
+    })""", route)
 
 
 # ---------------------------------------------------------------- the app is opened during a run
@@ -132,12 +148,43 @@ def test_a_library_from_a_newer_reel_shelf_is_still_not_opened_or_touched_after_
     assert_untouched(phone, reels, shots)
 
 
+@pytest.mark.parametrize("kind", ["newer, told by the phone", "newer, found by the page", "unreadable"])
+def test_coming_back_to_a_locked_library_while_the_run_is_going_waits_for_the_run_first(phone, kind):
+    phone.context.add_init_script(FAST)
+    if kind == "unreadable":
+        phone.context.add_init_script(LIB_RN)
+        phone.open_with(unreadable())
+        locked_screen(phone)
+        shown = "Your library file could not be read"
+    else:
+        reels, shots = newer_reels(), newer_shots()
+        open_newer(phone, "phone" if "phone" in kind else "page", reels, shots)
+        newer_screen(phone)
+        shown = "This library was saved by a newer Reel Shelf."
+    set_state(phone, nightActive=True)  # the alarm started the run while this screen was away
+    phone.evaluate("() => onAppResume()")
+    waiting_screen(phone).wait_for()
+    assert phone.get_by_text(shown).count() == 0
+    go_and_let_render_run(phone, "#/settings")  # render() runs while the app waits: it must keep showing the wait
+    waiting_screen(phone).wait_for()
+    assert phone.get_by_text(shown).count() == 0, "a locked library does not take the waiting screen's place"
+    set_state(phone, nightActive=False)
+    waiting_screen(phone).wait_for(state="hidden")
+    phone.get_by_text(shown).first.wait_for()  # the run has ended: the library is read fresh and is still locked
+    if kind == "unreadable":
+        assert phone.rn()["db"] == DAMAGED
+    else:
+        assert_untouched(phone, reels, shots)
+
+
 def test_back_up_now_is_not_offered_while_the_run_finishes_and_is_there_after(phone):
     phone.context.add_init_script(FAST)
+    phone.context.add_init_script(COUNT_POLLS)
     phone.context.add_init_script(BACKUP_RN)
     phone.open_with({"db": GOOD, "nightActive": True}, "#/settings")
     waiting_screen(phone).wait_for()
-    phone.wait_for_timeout(200)
+    polls = phone.evaluate("() => window.__polls")
+    phone.wait_for_function("n => window.__polls >= n + 3", arg=polls)  # it has asked the run three more times and is still waiting
     assert phone.locator("#backupnow").count() == 0
     set_state(phone, nightActive=False)
     waiting_screen(phone).wait_for(state="hidden")
@@ -173,10 +220,11 @@ def test_a_second_attempt_to_run_the_night_while_one_is_going_does_nothing(phone
     phone.open_with({"night": True, "hold": True, "db": GOOD, "shared": ["https://www.instagram.com/reel/NEW001/"],
                      "pages": {"NEW001/embed": EMBED}})
     phone.wait_for_function("() => window.__held.length >= 1")
+    phone.evaluate("() => { window.__night0 = night; }")  # the run that is going
     phone.evaluate("() => { overnightRun(true); overnightRun(true); overnightRun(); }")  # more starts while one is going
+    assert phone.evaluate("() => night === window.__night0"), "a start while one is going began nothing: it did not replace the run that is going"
     phone.evaluate("() => { window.__rn.hold = false; window.__held.splice(0).forEach((f) => f()); }")
     phone.wait_for_function("() => window.__rn.nightDone >= 1")
-    phone.wait_for_timeout(300)
     rn = phone.rn()
     assert rn["nightDone"] == 1, "one run, one ending"
     fetched = [c for c in rn["calls"] if c[0] == "fetchPage" and "NEW001" in c[1]]
