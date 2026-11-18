@@ -10,7 +10,7 @@ Read, in this order (about 10 minutes): `CLAUDE.md`, `docs/PROJECT_CONTINUATION.
 
 ## Do this (in order)
 1. Open the PR list and the agent list; do not redo finished work. Check A2-3 (`stabilize/a2-3-existing-models`, stacked on #66 at `a7ef556`): the implementer's report (resume it with SendMessage and `scratchpad/a23/STATE.md` if it was stopped), one combined Opus review, fixes, PR body; leave READY.
-2. Next roadmap task: after A2-3, S4-4 (list the files set aside), 5b (owner approval first), A2-2, A2-3, P4, A3, K1, U1-U4.
+2. Next roadmap task: after A2-3, S4-4 (list the files set aside), 5b (owner approval first), P4, A3, K1, U1-U4.
 3. Release rule: a PR that changes `android/app-shell/**` OR `.github/workflows/android-apk.yml` publishes a public release when merged; such PRs are verified and LEFT READY, never merged, until the owner decides (see section 12 of `docs/PROJECT_CONTINUATION.md`). R5 (#40) makes publishing manual; only the owner merges it.
 4. Keep `docs/PROJECT_CONTINUATION.md` and this file current after every work block (one docs PR per block).
 
