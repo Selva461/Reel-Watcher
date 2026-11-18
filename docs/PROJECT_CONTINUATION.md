@@ -13,7 +13,7 @@ Architecture [V, from the code and AGENTS.md]:
 - **Python engine** `src/reel_watcher/` and `webapp/`: the older PC edition (SQLite library). The Android app does not start it. Tests in `tests/` (Python; the "phone harness" drives the page in Chromium with a fake `window.RN`: `tests/test_phone_app.py`) and JUnit 4 in `android/app-shell/app/src/test/`.
 - **CI** `.github/workflows/`: `tests.yml` (uv run pytest and pip-audit; on push and pull_request), `android-ci.yml` (JUnit and assembleRelease on PRs that touch `android/app-shell`), `android-apk.yml` (a push to the default branch that touches `android/app-shell/**` builds the APK and PUBLISHES release `v<versionName>` and `apk-latest`; the repository is public).
 
-## 2. Repository state [V, 2026-11-18 14:40 UTC]
+## 2. Repository state [V, 2026-11-18 20:00 UTC]
 
 - Default (install) branch: `ccr-d0c0b070-bdpssy`, head **`c166615`** (merge of PR #59). App version on default: **versionName 1.3.11, versionCode 18**; nothing since #36 touched `android/app-shell/**`, so no release was published after v1.3.11.
 - Merged since the first records (none publishes): #41 R3 (CI runs once per PR commit), #38 the agent team, #43 and #45 R4-1/R4-1b (upgrade fixtures and round-trip tests), #49 Python lock (yt-dlp 2026.10.26, playwright 1.64.1, pytest 9.2.0; Dependabot #16 had been cancelled by an `apt-get` DNS failure on the runner, not by the packages), #50 `setup-uv` v10.2.0, #51 designs, #54 `83b4fb7` one shared Chromium per test run with a fresh context per test (17% faster, same 290 tests), #55 `c7e1d06` PC web settings race fix (a setting changed before the self-check answered was lost).
@@ -21,9 +21,9 @@ Architecture [V, from the code and AGENTS.md]:
 - Process rules in force (owner asked to cut waste and hitting the usage limit): at most 2 agents at a time; one combined Opus review per ordinary PR (a second reviewer only for persistence, permissions or the bridge, one after the other); no re-merging of moving stack branches by agents; agents push a WIP checkpoint at least every 40 minutes. A recurring hourly timer ("Reel Shelf autopilot") wakes the session after a usage-limit reset; the weekly limit may be used to 100%.
 - Main checkout: branch `stabilize/task-4-background-media-copy` at `8e3c275`, clean. Agent worktrees live under `.claude/worktrees/` and the session scratchpad.
 
-## 3. Open pull requests and branches [V, 2026-11-18 14:40 UTC]
+## 3. Open pull requests and branches [V, 2026-11-18 20:00 UTC]
 
-All app PRs publish a release when merged (unless #40 is merged first) and are **left READY, never merged by the AI**. Merge order and provisional versions: **#37 (1.3.12 / 19), #44 (1.3.13 / 20), #47 (1.3.14 / 21), #48 (1.3.15 / 22), #53 A1 (1.3.16 / 23), #52 S4-1 (1.3.17 / 24), #56 5a-1 (1.3.18 / 25), #57 A2-1 (1.3.19 / 26), #58 S4-2 (1.3.20 / 27), #33 Task 2b (1.3.21 / 28)**. Each branch contains the ones below it, except A1 (#53) and #57, which are siblings on the R4-2 / 5a-1 line, and #33, which contains #58 and so the whole line up to S4-2 (merge it last of that line); the siblings will conflict only in CHANGELOG.md, TESTING.md and build.gradle (renumber at merge time). Every PR below had an independent Opus review (data-integrity or security first where it matters) and its findings are fixed; all results are from the computer, none from a phone.
+All app PRs publish a release when merged (unless #40 is merged first) and are **left READY, never merged by the AI**. Merge order and provisional versions: **#37 (1.3.12 / 19), #44 (1.3.13 / 20), #47 (1.3.14 / 21), #48 (1.3.15 / 22), #53 A1 (1.3.16 / 23), #52 S4-1 (1.3.17 / 24), #56 5a-1 (1.3.18 / 25), #57 A2-1 (1.3.19 / 26), #58 S4-2 (1.3.20 / 27), #33 Task 2b (1.3.21 / 28), #67 S4-3 (1.3.22 / 29), #66 A2-2 (1.3.23 / 30)**. Each branch contains the ones below it, except A1 (#53) and #57, which are siblings on the R4-2 / 5a-1 line, and #33, which contains #58 and so the whole line up to S4-2 (merge it last of that line); #67 is stacked on #33 and #66 on #57; the siblings will conflict only in CHANGELOG.md, TESTING.md and build.gradle (renumber at merge time). Every PR below had an independent Opus review (data-integrity or security first where it matters) and its findings are fixed; all results are from the computer, none from a phone.
 
 | PR | What | Head | Review and device checks |
 |---|---|---|---|
@@ -36,6 +36,8 @@ All app PRs publish a release when merged (unless #40 is merged first) and are *
 | #56 | 5a-1: strict temp-file sweep (allowlist; never inboxes, library, models) | `acb3d6a` | SAFE TO MERGE (15 of 16 breaks, survivor has a second guard); E29-E30 |
 | #57 | A2-1: pinned model catalog, verified download (size and sha256, never installed if damaged); three hashes confirmed by real streamed downloads | `5028e67` | SAFE TO MERGE (live Hugging Face metadata re-checked); E31-E33 |
 | #58 | S4-2: "Back up now" button (no restore yet) | `31481ff` | SAFE TO MERGE after re-review (a BLOCKING privacy-wording High was fixed); E40-E43 |
+| #67 | S4-3: restore from a backup (the old library is always kept as `before-restore-*`), stacked on #33 | `1f58e80` | SAFE TO MERGE (data integrity first; Medium fixed: a reel shared during a restore); E44-E48 |
+| #66 | A2-2: the speech model download is verified (size, MD5, SHA-256, zip checked before unpacking, old model set aside), stacked on #57 | `a7ef556` | SAFE TO MERGE (security first; test gaps closed); E34-E38 |
 | #40 | R5: publishing a release is manual (`android-apk.yml`) | `bf20dcf` | only the owner merges it |
 | #33 | Task 2b: nightly run and the app no longer overlap (refreshed onto #58, 1.3.21 / 28) | `c511f47` | SAFE TO MERGE (first independent review: no Critical or High; test gaps found and closed); E9-E11 |
 | Dependabot #9, #5, #4, #2, #1 | AGP 9.5.0 and actions bumps that touch the Android workflows or `build.gradle` | n/a | publishing PRs: owner (the Python lock and `setup-uv` bumps were re-applied and merged as #49 and #50) |
@@ -98,11 +100,11 @@ Status legend: DONE, PR (open), AGENT (a background agent is on it), DESIGNED (d
 | 3 | R4-1 upgrade fixtures and round-trip tests | DESIGNED (tests only) | none | no |
 | 3 | R4-2 newer-library rule (`State.NEWER`) | DESIGNED | R4-1; Opus review | yes |
 | 4 | 5a temp-file sweep (allowlist) | TODO | Task 4 merged | yes |
-| 4 | S4 backup and restore (S4-1 to S4-4) | S4-1, S4-2 built; S4-3 in progress | S4-3 is stacked on #33 (`NightGuard`) | yes |
+| 4 | S4 backup and restore (S4-1 to S4-4) | S4-1, S4-2, S4-3 built (PRs #52, #58, #67); S4-4 TODO | S4-3 is stacked on #33 (`NightGuard`) | yes |
 | 5 | 5b delete shared videos after success | TODO (owner decision D2 recorded) | 5a and S4 (irreversible: follow the backup) | yes |
 | 5 | A1 retry cap, backoff, visible failure reasons | DESIGNED (A1-1 to A1-3) | R4-1 | yes |
 | 6 | P4 memory: scan instead of tree parse | TODO | P2, P3, device heap check; Opus design | yes |
-| 6 | A2 model hash verification | TODO | needs real hashes from a real download | yes |
+| 6 | A2 model hash verification | A2-1 (#57) and A2-2 (#66) built; A2-3 AGENT (branch `stabilize/a2-3-existing-models`, WIP checkpoint pushed) | real hashes measured by real downloads | yes |
 | 6 | A3 prompt budget and evaluation | TODO | Opus design | yes |
 | 7 | K1 user-editable notes with preserved edits; K2-K5 | TODO | A1, R4 | yes |
 | 7 | R1 reconcile AGENTS.md and README.md | TODO | owner says when | no |
@@ -172,14 +174,14 @@ Decisions recorded by the owner in the sessions (verbatim in spirit):
 
 ## 12b. Where the project stands (estimate, 2026-11-18 10:00 UTC)
 
-By task count with partial credit (merged 100%, built and independently reviewed but unmerged 85%, a design or an early start 5 to 30%, not started 0%): **about 60% of the roadmap is built, about 29% is merged to the default branch, and none has been checked on a real phone.** This is an estimate, not a measurement: the roadmap is not a fixed scope and can grow. Built and waiting for the owner: Task 4, P2, P3, R4-2, A1, S4-1, 5a-1, A2-1, S4-2 and Task 2b (all independently reviewed). Being built: S4-3 restore (stacked on #33). Designed only: S4-4, 5b (needs the owner's approval of the exact deletion rules), A2-2/A2-3. Not started: P4 memory, A3 prompt budget, K1 editable notes, U1-U4 storage and accessibility screens, R1 docs reconciliation.
+By task count with partial credit (merged 100%, built and independently reviewed but unmerged 85%, a design or an early start 5 to 30%, not started 0%): **about 66% of the roadmap is built, about 29% is merged to the default branch, and none has been checked on a real phone.** This is an estimate, not a measurement: the roadmap is not a fixed scope and can grow. Built and waiting for the owner: Task 4, P2, P3, R4-2, A1, S4-1, 5a-1, A2-1, S4-2, Task 2b, S4-3 and A2-2 (all independently reviewed). Being built: A2-3 (existing and picked models; one pure class pushed). Designed only: S4-4, 5b (needs the owner's approval of the exact deletion rules). Not started: P4 memory, A3 prompt budget, K1 editable notes, U1-U4 storage and accessibility screens, R1 docs reconciliation.
 
 Open owner decisions: **A1** a "not in the notes format" error counts toward the circuit breaker as the design says, so a model that gets the format wrong often could end a night after about 14 reels (alternative: only count model failures); **5b** deleting shared videos after success is a destructive user-data operation, the exact rules D-5b-1..6 in `docs/design/5a-5b-temp-files.md` need approval; **A2** D1-D5 (what to do with an existing unverified model, a failed check, redirect hosts); **S4/R4-2** a newer library has no way out of the newer screen except installing the newest build (D-R3), `VerifyJob` still reads a newer `reels.json` (harmless); whether to merge #40 so publishing becomes manual. Optional CI hardening: a retry or shorter timeout around the `apt-get` step of `tests.yml`; add `tests/fixtures/library/**` to the `android-ci.yml` paths so a fixtures-only change runs `LibraryFileTest`. Test-speed ideas not done: split the 65 s PC UI test `test_ui_every_screen_and_button_survives` (about 20% of the run), parallel runs (care: timing-budget tests).
 
 ## 13. Exact next steps (in order)
 
-1. Check `git ls-remote --heads origin`, the PR list and the agents. Check the S4-3 branch `stabilize/s4-3-restore` (implementer agent in the session; it was stopped once by a usage limit and resumed): then one combined Opus review, fix findings, write the PR body; update this file after each PR.
-2. Next roadmap tasks, each stacked and left READY (all publish): **S4-3 restore** (stacked on #33; in progress), then S4-4 (list the files set aside), 5b (only after the owner approves the rules), A2-2 (speech model) and A2-3 (existing and picked models), then P4, A3, K1, U1-U4, R1.
+1. Check `git ls-remote --heads origin`, the PR list and the agents. Check the A2-3 branch `stabilize/a2-3-existing-models` (implementer agent in the session; it stops and resumes with usage limits, resume it with SendMessage and its `scratchpad/a23/STATE.md`): then one combined Opus review, fix findings, write the PR body; update this file after each PR.
+2. Next roadmap tasks, each stacked and left READY (all publish): A2-3 (existing and picked models; in progress), then S4-4 (list the files set aside; stacked on #67), 5b (only after the owner approves the rules), then P4, A3, K1, U1-U4 (each needs an Opus design first), R1.
 3. Merge only PRs that touch neither `android/app-shell/**` nor `.github/workflows/android-apk.yml`, after green checks and an Opus review. Docs, `.claude/`, `tests/` and `tests.yml` PRs qualify.
 4. Owner to-do (do not wait): run the device checks E9-E11 and E13-E33, E40-E43; merge #40 if publishing should become manual; approve or change the decisions in 12b; then merge the app PRs in the order of section 3.
 
