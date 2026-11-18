@@ -376,10 +376,7 @@ def test_ui_check_identify_and_read(page):
     pg.select_option("#rt", "series")
     pg.get_by_role("button", name="Save").click()
     pg.get_by_text("Nothing to check. Nice.").wait_for()
-    # the settings screen shows its controls before it listens to them: it attaches the handlers only after its last
-    # request (the self-check status) is answered, and a change made earlier is lost, so wait for that answer
-    with pg.expect_request_finished(lambda r: r.url.endswith("/api/selfcheck")):
-        pg.goto(pg.running["base"] + "/#/settings")
+    pg.goto(pg.running["base"] + "/#/settings")
     pg.select_option("#region", "US")
     pg.get_by_text("Country saved").wait_for()
     assert pg.running["app"].settings()["region"] == "US"
