@@ -517,39 +517,51 @@ def test_ui_import_and_settings(page):
     assert Path(pg.running["lib"].dir / "settings.json").exists()
 
 
+HOLD_SELFCHECK = """(() => {
+  const real = window.fetch.bind(window);
+  window.__held = [];
+  window.fetch = (url, opts) => {
+    if (String(url).endsWith("/api/selfcheck") && !(opts && opts.method === "POST"))
+      return new Promise((done) => {
+        window.__held.push(() => done(real(url, opts)));
+        document.documentElement.dataset.held = window.__held.length;  // visible to the test (a script string cannot be polled: CSP)
+      });
+    return real(url, opts);
+  };
+})()"""
+RELEASE_AND_SETTLE = """async () => {
+  window.__held.splice(0).forEach((go) => go());
+  delete document.documentElement.dataset.held;
+  await (await fetch("/api/version")).json();  // a later round trip: the answers released above were handled first
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+}"""
+
+
 def test_ui_settings_work_before_the_selfcheck_answers(page):
     """A setting changed while the self-check status is still on its way is saved (it used to be dropped), and a late
-    answer neither undoes the change nor draws into another screen."""
+    answer neither undoes the change nor draws into another screen. The status request is held inside the page
+    (its fetch promise stays pending), which is deterministic: the test waits for the held request, not for time."""
     pg = page
-    held = []
-    pg.route("**/api/selfcheck", lambda route: held.append(route))  # held back until the test releases it
-    with pg.expect_request("**/api/selfcheck"):
-        pg.goto(pg.running["base"] + "/#/settings")
+    pg.evaluate(HOLD_SELFCHECK)
+    pg.goto(pg.running["base"] + "/#/settings")
+    pg.locator("html[data-held='1']").wait_for(state="attached")  # the page has asked for the status and is waiting for it
     pg.locator("#region").wait_for()
-    pg.evaluate("0")  # a round trip: the held request has reached the route handler
-    assert len(held) == 1
     pg.select_option("#region", "US")
     pg.get_by_role("switch", name="Online lookups").click()
-    pg.get_by_text("Online lookups on").wait_for(timeout=10000)  # saved although the self-check answer is still held back
+    pg.get_by_text("Online lookups on").wait_for(timeout=10000)  # saved although the status answer is held back
     assert pg.running["app"].settings()["region"] == "US"
     assert pg.running["app"].settings()["online"] is True
-    held.pop().continue_()
+    pg.evaluate(RELEASE_AND_SETTLE)
     pg.get_by_role("button", name="Run self-check").wait_for()  # the late answer filled in its own part
     assert pg.input_value("#region") == "US"
     assert pg.get_by_role("switch", name="Online lookups").get_attribute("aria-checked") == "true"
     # leaving before the answer arrives: the late answer must not throw or draw into the next screen
     pg.goto(pg.running["base"] + "/#/")
-    with pg.expect_request("**/api/selfcheck"):
-        pg.goto(pg.running["base"] + "/#/settings")
-    pg.locator("#region").wait_for()
-    pg.evaluate("0")
-    assert len(held) == 1
+    pg.goto(pg.running["base"] + "/#/settings")
+    pg.locator("html[data-held='1']").wait_for(state="attached")
     pg.goto(pg.running["base"] + "/#/identify")
     pg.get_by_role("heading", name="Identify").wait_for()
-    for route in held:  # both answers arrive now, while the Identify screen is showing
-        with pg.expect_response(lambda r: r.url.endswith("/api/selfcheck")):
-            route.continue_()
-    pg.evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))")  # the page has handled them
+    pg.evaluate(RELEASE_AND_SETTLE)
     assert pg.get_by_role("button", name="Run self-check").count() == 0
     assert pg.get_by_role("heading", name="Identify").is_visible()
 
