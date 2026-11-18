@@ -179,10 +179,9 @@ const Shots = (() => {
     return n;
   }
 
-  /** How many pictures have been read so far (what a backup says it holds). Loads the list when it is not loaded yet, like opening the screen. */
+  /** How many pictures have been read so far, for a backup's counts: 0 when the list is not loaded (it is never loaded for this: loading can set an unreadable list aside). */
   function total() {
-    load();
-    return counts().all;
+    return loaded ? counts().all : 0;
   }
 
   function screen() {

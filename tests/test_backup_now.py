@@ -7,6 +7,7 @@ given and answers as the test says (success, a failure sentence, the Android 8 a
 There is no restore button yet (S4-3). No network, no device."""
 import json
 import re
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
@@ -18,8 +19,12 @@ from test_shots import SHOTS_RN
 from test_verify_online import media
 
 NAME = "ReelShelf-backup-20261118-103000.zip"
-PRIVACY = ("The backup contains all your reels, notes, watchlist, quotes and products. Anyone who gets the file can read them. "
-           "It does not contain your settings, API keys, AI models, pictures or videos.")
+PRIVACY_DESIGN = ("The backup contains all your reels, notes, watchlist, quotes and products. Anyone who gets the file can read them. "
+                  "It does not contain your settings, API keys, AI models, pictures or videos.")
+# shots.json is in the backup byte for byte: for each screenshot read, the first 300 characters of its text and its file name and folder
+PRIVACY_SHOTS = "It also holds a short part of the text read from each of your screenshots, and their file names."
+PRIVACY = PRIVACY_DESIGN + " " + PRIVACY_SHOTS
+BACKUP_JAVA = Path(__file__).resolve().parents[1] / "android" / "app-shell" / "app" / "src" / "main" / "java" / "app" / "reelshelf" / "BackupNow.java"
 SAFE_LIBRARY = json.dumps({"reels": [{"code": f"BK{i:05d}", "url": f"https://www.instagram.com/reel/BK{i:05d}/", "status": "done",
                                       "notes": {"topic": f"topic {i}"}, "added_at": 1} for i in range(3)],
                            "inbox": [], "media": [media("m-dune", "Dune"), media("m-heat", "Heat")]})
@@ -37,6 +42,20 @@ BACKUP_RN = r"""
     if (a.hold) return;  // the test answers by hand
     setTimeout(() => (a.fail !== undefined ? rnDone(id, false, a.fail) : rnDone(id, true, typeof a.raw === "string" ? a.raw : JSON.stringify(a.ok))), 20);
   };
+})();
+"""
+
+
+# A screenshot list the page cannot use: loading it would make the page ask the phone to set it aside (libraryStartNew).
+BAD_SHOTS_RN = r"""
+(() => {
+  const st = window.__rn;
+  const keep = () => sessionStorage.setItem("rn", JSON.stringify(st));
+  Object.assign(window.RN, {
+    loadShots: () => "this is not a screenshot list",
+    storeShots: () => false,
+    libraryStartNew: (w) => { st.startNew = (st.startNew || []).concat([w]); keep(); return true; },
+  });
 })();
 """
 
@@ -85,6 +104,10 @@ def release(pg, ok, text):
 def test_back_up_now_sends_the_counts_and_says_where_it_saved(phone):
     shots = json.dumps({"v": 1, "seen": {f"k{i}": {"m": 1, "st": "done", "n": "a", "f": "f", "c": [], "x": ""} for i in range(4)}, "reels": {}})
     open_settings(phone, scripts=[SHOTS_RN], shotsDb=shots)
+    go(phone, "#/shots")  # the list is read when that screen opens; a backup never opens it itself
+    phone.get_by_role("heading", name="Screenshots").wait_for()
+    go(phone, "#/settings")
+    phone.locator("#backupnow").wait_for()
     library = phone.rn()["db"]  # as the page left it after opening (it migrates old libraries by itself)
     tap(phone)
     wait_saved(phone)
@@ -95,6 +118,26 @@ def test_back_up_now_sends_the_counts_and_says_where_it_saved(phone):
     assert status(phone) == f"Saved to Downloads/ReelShelf/{NAME} (3 reels, 2 titles, 5 MB)"
     assert phone.locator("#backupnow").is_enabled() and phone.locator("#backupnow").inner_text() == "Back up now"
     assert phone.rn()["db"] == library and phone.rn()["shotsDb"] == shots, "a backup changes nothing in the library or the screenshot list"
+
+
+def test_a_backup_does_not_open_the_screenshot_list_so_it_counts_none_that_are_not_loaded(phone):
+    shots = json.dumps({"v": 1, "seen": {f"k{i}": {"m": 1, "st": "done", "n": "a", "f": "f", "c": [], "x": ""} for i in range(4)}, "reels": {}})
+    open_settings(phone, scripts=[SHOTS_RN], shotsDb=shots)  # the Screenshots screen was never opened this time
+    tap(phone)
+    wait_saved(phone)
+    assert json.loads(backup_calls(phone)[0]["counts"])["screenshots"] == 0, "not loaded: no number is made up, and the list is not read for this"
+
+
+def test_a_backup_never_sets_an_unreadable_screenshot_list_aside(phone):
+    open_settings(phone, scripts=[BAD_SHOTS_RN])
+    tap(phone)
+    wait_saved(phone)
+    phone.wait_for_timeout(200)
+    assert not phone.rn().get("startNew"), "libraryStartNew(shots) was not asked: the damaged list is left exactly as it is"
+    assert json.loads(backup_calls(phone)[0]["counts"])["screenshots"] == 0
+    go(phone, "#/shots")  # opening the Screenshots screen does ask (so the check above could have failed)
+    phone.wait_for_function("(window.__rn.startNew || []).length === 1")
+    assert phone.rn()["startNew"] == ["shots"]
 
 
 def test_the_counts_follow_the_library_on_the_page_not_a_fixed_number(phone):
@@ -199,7 +242,8 @@ def test_the_result_that_arrives_after_leaving_settings_is_there_when_you_come_b
 def test_the_privacy_sentence_is_shown_exactly(phone):
     open_settings(phone)
     assert phone.get_by_text(PRIVACY, exact=True).is_visible()
-    assert PRIVACY in section(phone)
+    assert PRIVACY_DESIGN in section(phone), "the sentence of the design is all there"
+    assert PRIVACY_SHOTS in section(phone), "and it says the screenshots' text and file names are in the file too"
     assert "Backup and restore" in phone.locator("#backup h2").inner_text()
     assert "never deletes old backups" in section(phone)
     assert "Restoring a backup is not in this version yet" in section(phone)
@@ -312,6 +356,30 @@ def test_an_unreadable_library_offers_saving_the_file_and_no_backup(phone):
     locked_screen(phone)
     assert phone.locator("#backupnow").count() == 0 and "Back up now" not in phone.inner_text("#app")
     assert not backup_calls(phone)
+
+
+def sentence_buttons():
+    """The two button names BackupNow.java's LOCKED and LOCKED_NEWER sentences tell the user to use, read from the source."""
+    return re.findall(r'Use \\"([^"\\]+)\\"', BACKUP_JAVA.read_text(encoding="utf-8"))
+
+
+def test_the_sentence_for_an_unreadable_library_names_the_button_on_that_screen(phone):
+    names = sentence_buttons()
+    assert len(names) == 2, names
+    phone.context.add_init_script(LIB_RN)
+    phone.set_default_timeout(8000)
+    phone.open_with(unreadable())
+    locked_screen(phone)
+    assert phone.get_by_role("button", name=names[0], exact=True).count() == 1, names[0]
+
+
+def test_the_sentence_for_a_newer_library_names_the_button_on_that_screen(phone):
+    names = sentence_buttons()
+    assert len(names) == 2, names
+    phone.set_default_timeout(8000)
+    open_newer(phone, "phone", newer_reels(), newer_shots())
+    phone.get_by_text("This library was saved by a newer Reel Shelf.").first.wait_for()
+    assert phone.get_by_role("button", name=names[1], exact=True).count() == 1, names[1]
 
 
 @pytest.mark.parametrize("flavour", ["phone", "page"])
