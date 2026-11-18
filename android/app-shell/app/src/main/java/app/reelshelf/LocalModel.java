@@ -13,13 +13,8 @@ import com.google.ai.edge.litertlm.Message;
 import com.google.ai.edge.litertlm.SamplerConfig;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.InterruptedIOException;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.Collections;
 
 /**
@@ -31,10 +26,6 @@ import java.util.Collections;
 final class LocalModel {
     /** Default model: Qwen2.5 1.5B Instruct, 8-bit, Apache 2.0, about 1.6 GB, free to download without an account. */
     static final String DEFAULT_FILE = ModelCatalog.DEFAULT.file;
-
-    interface Progress {
-        void on(long done, long total);
-    }
 
     private final Context ctx;
     private final File dir;
@@ -92,74 +83,10 @@ final class LocalModel {
         new ModelVerifier(() -> stop).download(e, file(e.file), p);
     }
 
-    /** Downloads url into dest, resuming a partial download, with no check of the content (the speech model only). Throws InterruptedIOException("paused") when stopped. */
-    void download(String url, File dest, Progress p) throws IOException {
+    /** A verifier that stops when stopAll() is called: the speech model's ZIP is fetched through it, then unpacked (see ModelZip.fetch). */
+    ModelVerifier verifier() {
         stop = false;
-        File part = new File(dest.getPath() + ".part");
-        long have = part.exists() ? part.length() : 0;
-        HttpURLConnection c = open(url, have);
-        int code = c.getResponseCode();
-        if (code == 416 && have > 0) {  // the partial file is already complete
-            c.disconnect();
-            finish(part, dest);
-            return;
-        }
-        if (code == 200) have = 0;  // the server sent the whole file: start over
-        else if (code != 206) throw new IOException("The download server answered " + code + ". Try again later.");
-        long len = c.getContentLengthLong();
-        long total = len > 0 ? have + len : -1;
-        if (total > 0 && dir.getUsableSpace() < (total - have) + 200L * 1024 * 1024) {
-            c.disconnect();
-            throw new IOException("Not enough free space: the model needs " + (total / (1024 * 1024)) + " MB.");
-        }
-        try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(part, have > 0)) {
-            byte[] buf = new byte[1 << 16];
-            long done = have;
-            long lastReport = 0;
-            int n;
-            while ((n = in.read(buf)) > 0) {
-                if (stop) throw new InterruptedIOException("paused");
-                out.write(buf, 0, n);
-                done += n;
-                if (done - lastReport > 4L * 1024 * 1024) {
-                    lastReport = done;
-                    p.on(done, total);
-                }
-            }
-            p.on(done, total);
-        } finally {
-            c.disconnect();
-        }
-        if (total > 0 && part.length() != total) throw new IOException("The download stopped early. Tap Download to continue.");
-        finish(part, dest);
-    }
-
-    private static void finish(File part, File dest) throws IOException {
-        if (dest.exists() && !dest.delete()) throw new IOException("Could not replace the old model file");
-        if (!part.renameTo(dest)) throw new IOException("Could not save the model file");
-    }
-
-    /** Follows redirects by hand so the Range header (resume) reaches the final server. */
-    private static HttpURLConnection open(String url, long from) throws IOException {
-        String u = url;
-        for (int hop = 0; hop < 6; hop++) {
-            HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
-            c.setInstanceFollowRedirects(false);
-            c.setConnectTimeout(20000);
-            c.setReadTimeout(60000);
-            c.setRequestProperty("User-Agent", "ReelShelf-Android");
-            if (from > 0) c.setRequestProperty("Range", "bytes=" + from + "-");
-            int code = c.getResponseCode();
-            if (code >= 300 && code < 400 && c.getHeaderField("Location") != null) {
-                URL next = new URL(new URL(u), c.getHeaderField("Location"));
-                c.disconnect();
-                if (!"https".equals(next.getProtocol())) throw new IOException("Refused an insecure download address");
-                u = next.toString();
-                continue;
-            }
-            return c;
-        }
-        throw new IOException("Too many redirects");
+        return new ModelVerifier(() -> stop);
     }
 
     // ------------------------------------------------------------------ answers

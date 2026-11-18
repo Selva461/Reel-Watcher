@@ -22,8 +22,10 @@ import java.util.regex.Pattern;
 /**
  * Downloads one catalog model (ModelCatalog.Entry) so that a wrong or half-written file can never be taken for the model:
  * the size is checked against the catalog before anything is written and while writing, the SHA-256 is computed as the
- * bytes are written, and only a file with exactly the catalog size and fingerprint is renamed to its final name. A
- * download that fails the check loses only its own ".part" file: a model that is already installed is never touched.
+ * bytes are written, and only a file with exactly the catalog size and fingerprint is renamed to its final name. A row
+ * that also carries the publisher's MD5 (the speech model's ZIP) must match that too, and a row that names its one host
+ * (onlyHost) is fetched from that host and nowhere else, with no redirect. A download that fails the check loses only its
+ * own ".part" file: a model that is already installed is never touched.
  * A paused download continues with a Range request; the part already on disk is read once through the same digest.
  * Pure Java (files and HTTP only), tested on a computer against a local server.
  */
@@ -81,7 +83,8 @@ final class ModelVerifier {
      */
     void download(ModelCatalog.Entry e, File dest, Progress p) throws IOException {
         File part = new File(dest.getPath() + ".part");
-        MessageDigest sha = digest();
+        MessageDigest sha = digest("SHA-256");
+        MessageDigest md5 = e.md5 == null ? null : digest("MD5");
         long have = part.exists() ? part.length() : 0;
         if (have > e.bytes) {  // cannot be a piece of this model
             deleteQuietly(part);
@@ -92,17 +95,17 @@ final class ModelVerifier {
             if (control.freeSpace(dir) < (e.bytes - have) + RESERVE) {
                 throw new IOException("Not enough free space: the model needs " + (e.bytes / (1024 * 1024)) + " MB.");
             }
-            sha.reset();
+            reset(sha, md5);
             if (have > 0) {
                 p.on(have, e.bytes);
-                feed(sha, part, have);
+                feed(sha, md5, part, have);
             }
-            HttpURLConnection c = open(e.url, have);
+            HttpURLConnection c = open(e, have);
             try {
                 int code = c.getResponseCode();
                 if (code == 416 && have > 0) {  // the server holds fewer bytes than the part: only a complete, matching part is the model
                     c.disconnect();
-                    if (have == e.bytes && hex(sha.digest()).equals(e.sha256)) {
+                    if (have == e.bytes && matches(e, sha, md5)) {
                         install(part, dest);
                         return;
                     }
@@ -117,7 +120,7 @@ final class ModelVerifier {
                     if (len < 0 && have > 0) throw new IOException(ODD_ANSWER);  // the size is not known yet: the part must not be cut down for it
                     append = false;
                     have = 0;
-                    sha.reset();
+                    reset(sha, md5);
                 } else if (code == 206) {
                     Matcher m = CONTENT_RANGE.matcher(String.valueOf(c.getHeaderField("Content-Range")).trim());
                     if (!m.matches()) throw new IOException(ODD_ANSWER);
@@ -128,12 +131,12 @@ final class ModelVerifier {
                 } else {
                     throw new IOException("The download server answered " + code + ". Try again later.");
                 }
-                write(c, e, part, append, have, sha, p);
+                write(c, e, part, append, have, sha, md5, p);
             } finally {
                 c.disconnect();
             }
             if (part.length() != e.bytes) throw new IOException(STOPPED_EARLY);
-            if (!hex(sha.digest()).equals(e.sha256)) {
+            if (!matches(e, sha, md5)) {
                 deleteQuietly(part);  // only our own part: an installed model is never touched
                 throw new IOException(DAMAGED);
             }
@@ -143,11 +146,11 @@ final class ModelVerifier {
     }
 
     /** Reads the response into the part, hashing as it goes. Stops (and drops the part) when more than the catalog size arrives. */
-    private void write(HttpURLConnection c, ModelCatalog.Entry e, File part, boolean append, long have, MessageDigest sha, Progress p) throws IOException {
+    private void write(HttpURLConnection c, ModelCatalog.Entry e, File part, boolean append, long have, MessageDigest sha, MessageDigest md5, Progress p) throws IOException {
         long done = have;
         long lastReport = 0;
         boolean tooLong = false;
-        try (InputStream raw = c.getInputStream(); DigestInputStream in = new DigestInputStream(raw, sha);
+        try (InputStream raw = c.getInputStream(); InputStream in = hashing(raw, sha, md5);
              OutputStream out = new FileOutputStream(part, append)) {
             byte[] buf = new byte[BUFFER];
             int n;
@@ -177,8 +180,26 @@ final class ModelVerifier {
         p.on(done, e.bytes);
     }
 
-    /** Feeds the first n bytes of the part through the digest (once, when a download continues). */
-    private void feed(MessageDigest sha, File part, long n) throws IOException {
+    /** The response, read through the SHA-256 (and through the MD5 when the row has one). */
+    private static InputStream hashing(InputStream raw, MessageDigest sha, MessageDigest md5) {
+        InputStream in = new DigestInputStream(raw, sha);
+        return md5 == null ? in : new DigestInputStream(in, md5);
+    }
+
+    private static void reset(MessageDigest sha, MessageDigest md5) {
+        sha.reset();
+        if (md5 != null) md5.reset();
+    }
+
+    /** True only when the bytes read so far have the catalog's SHA-256 and, when the row lists one, its MD5. */
+    private static boolean matches(ModelCatalog.Entry e, MessageDigest sha, MessageDigest md5) {
+        boolean shaOk = hex(sha.digest()).equals(e.sha256);
+        boolean md5Ok = md5 == null || hex(md5.digest()).equals(e.md5);
+        return shaOk && md5Ok;
+    }
+
+    /** Feeds the first n bytes of the part through the digests (once, when a download continues). */
+    private void feed(MessageDigest sha, MessageDigest md5, File part, long n) throws IOException {
         try (InputStream in = new FileInputStream(part)) {
             byte[] buf = new byte[BUFFER];
             long left = n;
@@ -187,6 +208,7 @@ final class ModelVerifier {
                 int r = in.read(buf, 0, (int) Math.min(buf.length, left));
                 if (r < 0) throw new IOException("The partial download could not be read. Delete the model and download it again.");
                 sha.update(buf, 0, r);
+                if (md5 != null) md5.update(buf, 0, r);
                 left -= r;
             }
         }
@@ -204,12 +226,16 @@ final class ModelVerifier {
         }
     }
 
-    /** Follows redirects by hand (so the Range header reaches the final server); every address must be https on an allowed host. */
-    private HttpURLConnection open(String url, long from) throws IOException {
-        URL u = new URL(url);
+    /**
+     * Follows redirects by hand (so the Range header reaches the final server); every address must be https on an allowed
+     * host. A row with onlyHost is fetched from that host only, and a redirect is refused.
+     */
+    private HttpURLConnection open(ModelCatalog.Entry e, long from) throws IOException {
+        URL u = new URL(e.url);
         for (int hop = 0; hop < MAX_HOPS; hop++) {
             if (!"https".equals(u.getProtocol())) throw new IOException("Refused an insecure download address");
-            if (!allowedHost(u.getHost())) throw new IOException("Refused a download from another site (" + u.getHost() + "). Nothing was written.");
+            boolean hostOk = e.onlyHost == null ? allowedHost(u.getHost()) : e.onlyHost.equalsIgnoreCase(u.getHost());
+            if (!hostOk) throw new IOException("Refused a download from another site (" + u.getHost() + "). Nothing was written.");
             if (u.getUserInfo() != null) throw new IOException(ODD_ADDRESS);  // "user@" can hide the real host from another URL parser
             HttpURLConnection c = (HttpURLConnection) (testBase == null ? u : new URL(testBase + u.getFile())).openConnection();
             c.setInstanceFollowRedirects(false);
@@ -221,6 +247,7 @@ final class ModelVerifier {
             String to = c.getHeaderField("Location");
             if (code >= 300 && code < 400 && to != null) {
                 c.disconnect();
+                if (e.onlyHost != null) throw new IOException("Refused a download that was sent away from " + e.onlyHost + ". Nothing was written.");
                 if (to.indexOf('\\') >= 0) throw new IOException(ODD_ADDRESS);  // parsers disagree about "\"; no real address has one
                 u = new URL(u, to);
                 continue;
@@ -235,11 +262,11 @@ final class ModelVerifier {
         f.delete();
     }
 
-    private static MessageDigest digest() {
+    private static MessageDigest digest(String algorithm) {
         try {
-            return MessageDigest.getInstance("SHA-256");
+            return MessageDigest.getInstance(algorithm);
         } catch (NoSuchAlgorithmException x) {
-            throw new IllegalStateException(x);  // every Java has SHA-256
+            throw new IllegalStateException(x);  // every Java and Android has SHA-256 and MD5
         }
     }
 
