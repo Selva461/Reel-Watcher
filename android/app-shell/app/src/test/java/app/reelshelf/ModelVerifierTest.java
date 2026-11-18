@@ -714,4 +714,233 @@ public class ModelVerifierTest {
         assertTrue("the part stays", Files.isSymbolicLink(part.toPath()));
         assertNothingInstalled();
     }
+
+    // ------------------------------------------------------------------ the speech model: a ZIP from one host, checked before it is unpacked
+
+    private static void put(File f, byte[] b) throws IOException {
+        Files.createDirectories(f.getParentFile().toPath());
+        Files.write(f.toPath(), b);
+    }
+
+    private static final ModelZip.Plan SPEECH_PLAN = new ModelZip.Plan("m", 10, 100_000, "am", "conf");
+
+    /** A small model ZIP: the folder m with am/ and conf/. Its comment makes two ZIPs differ without changing what they unpack to. */
+    private static byte[] smallZip(String comment, String... extraNames) throws Exception {
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.ZipOutputStream z = new java.util.zip.ZipOutputStream(bytes)) {
+            z.setComment(comment);
+            List<String> names = new ArrayList<>(Arrays.asList("m/am/final.mdl", "m/conf/model.conf"));
+            names.addAll(Arrays.asList(extraNames));
+            for (String n : names) {
+                z.putNextEntry(new java.util.zip.ZipEntry(n));
+                z.write(("content of " + n).getBytes(StandardCharsets.UTF_8));
+                z.closeEntry();
+            }
+        }
+        return bytes.toByteArray();
+    }
+
+    private static String md5(byte[] b) throws Exception {
+        return ModelVerifier.hex(MessageDigest.getInstance("MD5").digest(b));
+    }
+
+    /** A row like the speech model's: one host, no redirect, SHA-256 and MD5 of this ZIP. */
+    private static ModelCatalog.Entry speechRow(byte[] zip) throws Exception {
+        return ModelCatalog.Entry.fromOneHost("speech-test", "tiny.zip", "https://alphacephei.com/vosk/models/tiny.zip", zip.length, sha(zip), md5(zip), "alphacephei.com");
+    }
+
+    private File speechZip() {
+        return new File(models, "tiny.zip");
+    }
+
+    private File speechZipPart() {
+        return new File(models, "tiny.zip.part");
+    }
+
+    private File speechRoot() throws IOException {
+        return new File(tmp.getRoot(), "speech");
+    }
+
+    /** The model that is already installed. */
+    private void installedSpeechModel() throws IOException {
+        put(new File(speechRoot(), "m/am/old.bin"), "OLD MODEL".getBytes(StandardCharsets.UTF_8));
+        put(new File(speechRoot(), "m/conf/old.conf"), "old conf".getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void assertOldSpeechModelKept() throws IOException {
+        assertEquals("OLD MODEL", new String(read(new File(speechRoot(), "m/am/old.bin")), StandardCharsets.UTF_8));
+        assertEquals("old conf", new String(read(new File(speechRoot(), "m/conf/old.conf")), StandardCharsets.UTF_8));
+        assertFalse("nothing of the new ZIP was unpacked", new File(speechRoot(), "m/am/final.mdl").exists());
+        assertEquals("no .unpack-* or .old-* is left", Arrays.asList("m"), Arrays.asList(speechRoot().list()));
+    }
+
+    private void fetchSpeech(Server s, ModelCatalog.Entry e, Ctl ctl) throws IOException {
+        ModelZip.fetch(new ModelVerifier(ctl, s.base), e, speechZip(), speechRoot(), SPEECH_PLAN, (d, t) -> progress.add(new long[]{d, t}));
+    }
+
+    private void fetchSpeech(Server s, ModelCatalog.Entry e) throws IOException {
+        fetchSpeech(s, e, new Ctl());
+    }
+
+    @Test
+    public void aSpeechZipIsCheckedThenUnpackedAndTheZipIsGone() throws Exception {
+        byte[] zip = smallZip("published");
+        Server s = serve(x -> whole(x, zip));
+        installedSpeechModel();
+        fetchSpeech(s, speechRow(zip));
+        assertEquals("content of m/am/final.mdl", new String(read(new File(speechRoot(), "m/am/final.mdl")), StandardCharsets.UTF_8));
+        assertFalse("the old model is replaced, not mixed", new File(speechRoot(), "m/am/old.bin").exists());
+        assertFalse(speechZip().exists());
+        assertFalse(speechZipPart().exists());
+        assertEquals(Arrays.asList("m"), Arrays.asList(speechRoot().list()));
+        assertEquals("ReelShelf-Android", s.userAgent);
+        for (long[] p : progress) assertEquals("the total is the catalog size", zip.length, p[1]);
+    }
+
+    @Test
+    public void aSpeechZipWithOneChangedByteIsNeverUnpacked_theOldModelStays_thePartIsDeleted() throws Exception {
+        byte[] zip = smallZip("published");
+        byte[] bad = zip.clone();
+        bad[bad.length - 2] ^= 1;  // inside the ZIP's comment: it would unpack just the same, so only the fingerprint can stop it
+        Server s = serve(x -> whole(x, bad));
+        installedSpeechModel();
+        IOException e = assertThrows(IOException.class, () -> fetchSpeech(s, speechRow(zip)));
+        assertEquals(ModelVerifier.DAMAGED, e.getMessage());
+        assertFalse("our own part is deleted", speechZipPart().exists());
+        assertFalse(speechZip().exists());
+        assertOldSpeechModelKept();
+    }
+
+    @Test
+    public void aSpeechZipThatFailsTheMd5IsRefusedEvenWhenTheSha256Matches_andTheOtherWayRound() throws Exception {
+        byte[] zip = smallZip("published");
+        ModelCatalog.Entry real = speechRow(zip);
+        ModelCatalog.Entry wrongMd5 = ModelCatalog.Entry.fromOneHost(real.id, real.file, real.url, real.bytes, real.sha256, md5(smallZip("another")), real.onlyHost);
+        ModelCatalog.Entry wrongSha = ModelCatalog.Entry.fromOneHost(real.id, real.file, real.url, real.bytes, sha(smallZip("another")), real.md5, real.onlyHost);
+        for (ModelCatalog.Entry row : new ModelCatalog.Entry[]{wrongMd5, wrongSha}) {
+            Server s = serve(x -> whole(x, zip));
+            installedSpeechModel();
+            assertEquals(ModelVerifier.DAMAGED, assertThrows(IOException.class, () -> fetchSpeech(s, row)).getMessage());
+            assertFalse(speechZipPart().exists());
+            assertOldSpeechModelKept();
+        }
+    }
+
+    @Test
+    public void theMd5IsAlsoCheckedWhenADownloadContinuesAndWhenTheServerSendsNoLength() throws Exception {
+        byte[] zip = smallZip("published");
+        ModelCatalog.Entry real = speechRow(zip);
+        ModelCatalog.Entry wrongMd5 = ModelCatalog.Entry.fromOneHost(real.id, real.file, real.url, real.bytes, real.sha256, md5(smallZip("another")), real.onlyHost);
+        int k = zip.length / 2;
+        write(speechZipPart(), prefix(zip, k));  // a paused download is continued: its part goes through both digests again
+        Server s = serve(x -> ranged(x, zip));
+        assertEquals(ModelVerifier.DAMAGED, assertThrows(IOException.class, () -> fetchSpeech(s, wrongMd5)).getMessage());
+        assertFalse(speechZipPart().exists());
+
+        write(speechZipPart(), prefix(zip, k));
+        Server again = serve(x -> ranged(x, zip));
+        fetchSpeech(again, real);
+        assertEquals(Arrays.asList("bytes=" + k + "-"), again.ranges);
+        assertTrue(new File(speechRoot(), "m/am/final.mdl").isFile());
+
+        Server chunky = serve(x -> chunked(x, zip, zip.length));
+        ModelZip.deleteTree(speechRoot().toPath());
+        fetchSpeech(chunky, real);
+        assertTrue(new File(speechRoot(), "m/am/final.mdl").isFile());
+    }
+
+    @Test
+    public void aSpeechZipOfTheWrongSizeOrCutShortIsNeverUnpacked() throws Exception {
+        byte[] zip = smallZip("published");
+        installedSpeechModel();
+        Server longer = serve(x -> whole(x, Arrays.copyOf(zip, zip.length + 10)));
+        assertEquals(ModelVerifier.WRONG_SIZE, assertThrows(IOException.class, () -> fetchSpeech(longer, speechRow(zip))).getMessage());
+        assertFalse(speechZipPart().exists());
+        assertOldSpeechModelKept();
+
+        Server cut = serve(x -> chunked(x, zip, zip.length - 20));
+        assertEquals(ModelVerifier.STOPPED_EARLY, assertThrows(IOException.class, () -> fetchSpeech(cut, speechRow(zip))).getMessage());
+        assertTrue("the unfinished download is kept to continue", speechZipPart().exists());
+        assertFalse(speechZip().exists());
+        assertEquals("OLD MODEL", new String(read(new File(speechRoot(), "m/am/old.bin")), StandardCharsets.UTF_8));
+        assertFalse(new File(speechRoot(), "m/am/final.mdl").exists());
+    }
+
+    @Test
+    public void aSpeechZipThatPassesTheCheckButHoldsAnEscapingNameIsRefused_theOldModelStays_theZipIsDeleted() throws Exception {
+        byte[] zip = smallZip("published", "m/../../evil.txt");  // a published file would never hold this; the fingerprint here is the bad ZIP's own
+        Server s = serve(x -> whole(x, zip));
+        installedSpeechModel();
+        assertEquals(ModelZip.UNSAFE, assertThrows(IOException.class, () -> fetchSpeech(s, speechRow(zip))).getMessage());
+        assertFalse(speechZip().exists());
+        assertFalse(speechZipPart().exists());
+        assertFalse(new File(tmp.getRoot(), "evil.txt").exists());
+        assertOldSpeechModelKept();
+    }
+
+    @Test
+    public void aSpeechDownloadIsOnlyFetchedFromItsOwnHostAndNeverRedirected() throws Exception {
+        byte[] zip = smallZip("published");
+        installedSpeechModel();
+        for (String to : new String[]{"https://alphacephei.com/vosk/models/other.zip", "https://huggingface.co/x/other.zip", "https://evil.example.com/x.zip", "/vosk/models/other.zip"}) {
+            Server s = serve(x -> reply(x, 302, new byte[0], "Location", to));
+            IOException e = assertThrows(to, IOException.class, () -> fetchSpeech(s, speechRow(zip)));
+            assertEquals(to, "Refused a download that was sent away from alphacephei.com. Nothing was written.", e.getMessage());
+            assertEquals("only the first address was asked", 1, s.requests.get());
+            assertFalse(speechZipPart().exists());
+            assertOldSpeechModelKept();
+        }
+        // the address itself must be on that host: a row for another host is refused before any request
+        ModelCatalog.Entry elsewhere = ModelCatalog.Entry.fromOneHost("t", "tiny.zip", "https://huggingface.co/x/tiny.zip", zip.length, sha(zip), md5(zip), "alphacephei.com");
+        Server none = serve(x -> whole(x, zip));
+        assertTrue(assertThrows(IOException.class, () -> fetchSpeech(none, elsewhere)).getMessage().startsWith("Refused a download from another site (huggingface.co)"));
+        assertEquals(0, none.requests.get());
+        // and an AI model row cannot be fetched from the speech host
+        ModelCatalog.Entry ai = new ModelCatalog.Entry("t", "tiny.litertlm", "https://alphacephei.com/x/tiny.litertlm", zip.length, sha(zip));
+        Server none2 = serve(x -> whole(x, zip));
+        assertTrue(assertThrows(IOException.class, () -> download(none2, ai, new Ctl())).getMessage().startsWith("Refused a download from another site (alphacephei.com)"));
+        assertEquals(0, none2.requests.get());
+    }
+
+    @Test
+    public void aPausedSpeechDownloadKeepsItsPartAndContinuesToAnUnpackedModel() throws Exception {
+        byte[] zip = smallZip("published");
+        installedSpeechModel();
+        Server s = serve(x -> whole(x, zip));
+        Ctl pause = new Ctl();
+        pause.stopAfterChecks = 0;
+        assertThrows(InterruptedIOException.class, () -> fetchSpeech(s, speechRow(zip), pause));
+        assertFalse(speechZip().exists());
+        assertOldSpeechModelKept();
+
+        write(speechZipPart(), prefix(zip, 100));
+        Server again = serve(x -> ranged(x, zip));
+        fetchSpeech(again, speechRow(zip));
+        assertEquals(Arrays.asList("bytes=100-"), again.ranges);
+        assertTrue(new File(speechRoot(), "m/am/final.mdl").isFile());
+        assertFalse(speechZipPart().exists());
+    }
+
+    @Test
+    public void whatAKilledUnpackLeftBehindIsCleanedAtTheNextDownload_andNeverCountsAsTheModel() throws Exception {
+        byte[] zip = smallZip("published");
+        put(new File(speechRoot(), ".unpack-99/m/am/half.bin"), "half".getBytes(StandardCharsets.UTF_8));
+        write(speechZip(), "a verified ZIP whose unpack was killed".getBytes(StandardCharsets.UTF_8));
+        assertFalse("a half-unpacked folder is not the model", new File(speechRoot(), "m").exists());
+        Server s = serve(x -> whole(x, zip));
+        fetchSpeech(s, speechRow(zip));
+        assertEquals(Arrays.asList("m"), Arrays.asList(speechRoot().list()));
+        assertTrue(new File(speechRoot(), "m/am/final.mdl").isFile());
+        assertFalse(speechZip().exists());
+    }
+
+    @Test
+    public void aFailedSpeechDownloadStillRestoresAModelThatWasSetAsideAndCutOff() throws Exception {
+        // the app was killed between the two renames of an earlier install: the old model is only in ".old-*"
+        put(new File(speechRoot(), ".old-5-5/am/old.bin"), "OLD MODEL".getBytes(StandardCharsets.UTF_8));
+        put(new File(speechRoot(), ".old-5-5/conf/old.conf"), "old conf".getBytes(StandardCharsets.UTF_8));
+        Server s = serve(x -> reply(x, 500, new byte[0]));
+        assertTrue(assertThrows(IOException.class, () -> fetchSpeech(s, speechRow(smallZip("published")))).getMessage().contains("500"));
+        assertOldSpeechModelKept();  // it was put back before the download started, and the failed download did not touch it
+    }
 }

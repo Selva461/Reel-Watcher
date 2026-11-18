@@ -16,6 +16,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -165,5 +166,119 @@ public class ModelCatalogTest {
             assertEquals("the page sends no address", "\"\"", m.group(1).trim());
         }
         assertTrue("the page still asks for downloads", calls >= 2);
+    }
+
+    // ------------------------------------------------------------------ the speech model's row
+
+    private static final Pattern HEX32 = Pattern.compile("^[0-9a-f]{32}$");
+
+    @Test
+    public void theSpeechRowIsPinnedToItsOwnHostWithBothFingerprints() throws Exception {
+        ModelCatalog.Entry e = ModelCatalog.SPEECH;
+        URL u = new URL(e.url);
+        assertEquals("https", u.getProtocol());
+        assertEquals("alphacephei.com", u.getHost());
+        assertEquals("the row names its one host", "alphacephei.com", e.onlyHost);
+        assertEquals("/vosk/models/" + ModelCatalog.SPEECH_FOLDER + ".zip", u.getPath());
+        assertEquals(ModelCatalog.SPEECH_FOLDER + ".zip", e.file);
+        assertTrue(e.url.endsWith("/" + e.file));
+        assertTrue("sha256: " + e.sha256, HEX64.matcher(e.sha256).matches());
+        assertTrue("md5: " + e.md5, HEX32.matcher(e.md5).matches());
+        assertTrue(e.bytes > 0);
+        assertTrue(e.accepted.isEmpty());
+        assertEquals("the folder the ZIP unpacks to is the name the app looks for", ModelCatalog.SPEECH_FOLDER, ModelCatalog.SPEECH_ZIP.folder);
+        // What was read from alphacephei.com (size = Content-Length, md5 = model-list.json) and measured by one real download
+        // on 2026-11-18. A change here is a release step (see the comment on the row): change these three values with it.
+        assertEquals(41_205_931L, e.bytes);
+        assertEquals("09ab50ccd62b674cbaa231b825f9c1cb", e.md5);
+        assertEquals("30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498", e.sha256);
+    }
+
+    @Test
+    public void theSpeechRowIsNotSomethingThePageCanAskForByName_andTheAiRowsHaveNoSpeechRules() {
+        assertFalse(ModelCatalog.ALL.contains(ModelCatalog.SPEECH));
+        assertNull(ModelCatalog.lookup(ModelCatalog.SPEECH.file));
+        assertNull(ModelCatalog.lookup(ModelCatalog.SPEECH.id));
+        assertNull(ModelCatalog.lookup(ModelCatalog.SPEECH_FOLDER));
+        for (ModelCatalog.Entry e : ModelCatalog.ALL) {
+            assertNull(e.id + " has no md5 to match", e.md5);
+            assertNull(e.id + " is fetched from Hugging Face's hosts, not from one host", e.onlyHost);
+        }
+    }
+
+    @Test
+    public void theUnpackLimitsSitJustAboveWhatThePublishedZipHolds() {
+        ModelZip.Plan p = ModelCatalog.SPEECH_ZIP;
+        assertEquals("the published ZIP holds 20 entries", 20, ModelCatalog.SPEECH_ENTRIES);
+        assertEquals("and 70898967 bytes once unpacked", 70_898_967L, ModelCatalog.SPEECH_UNPACKED);
+        assertTrue(p.maxEntries >= ModelCatalog.SPEECH_ENTRIES && p.maxEntries <= ModelCatalog.SPEECH_ENTRIES + 4);
+        assertTrue(p.maxBytes >= ModelCatalog.SPEECH_UNPACKED && p.maxBytes <= ModelCatalog.SPEECH_UNPACKED * 112 / 100);
+        assertTrue("well below the old 400 MB cap", p.maxBytes < 100L * 1024 * 1024);
+        assertEquals(Arrays.asList("am", "conf"), p.oneOf);
+    }
+
+    // ------------------------------------------------------------------ the speech download goes through the same gate as the AI model
+
+    private static String bridge() throws IOException {
+        return new String(Files.readAllBytes(repoFile("android/app-shell/app/src/main/java/app/reelshelf/LocalBridge.java").toPath()), StandardCharsets.UTF_8);
+    }
+
+    /** The text of one method: from its signature to the brace that closes it. */
+    private static String body(String src, String signature) {
+        int from = src.indexOf(signature);
+        assertTrue(signature + " was not found", from >= 0);
+        int open = src.indexOf('{', from);
+        int depth = 0;
+        for (int i = open; i < src.length(); i++) {
+            if (src.charAt(i) == '{') depth++;
+            if (src.charAt(i) == '}' && --depth == 0) return src.substring(from, i + 1);
+        }
+        fail("no end for " + signature);
+        return null;
+    }
+
+    @Test
+    public void downloadSpeechTakesTheSharedFlagBeforeItStartsAndGivesItBackAtTheEnd() throws Exception {
+        // A source-text check (the bridge needs Android, so it cannot run here): only one download at a time, AI model or speech model.
+        String src = bridge();
+        String speech = body(src, "public void downloadSpeech(int id)");
+        String model = body(src, "public void downloadModel(int id, String url, String name)");
+        for (String m : new String[]{speech, model}) {
+            int check = m.indexOf("if (downloading) {");
+            int take = m.indexOf("downloading = true;");
+            int run = m.indexOf("net.execute(");
+            assertTrue("both downloads look at the shared flag first", check >= 0 && check < take);
+            assertTrue("and take it before the work is handed to the worker", take < run);
+            assertTrue("and give it back in a finally block", m.indexOf("downloading = false;", m.indexOf("finally {")) > 0);
+        }
+        assertFalse("the speech download is not gated by a flag of its own", speech.contains("if (speechDownloading)"));
+        assertTrue(src.contains("private volatile boolean downloading;"));
+        assertEquals("one flag for the gate", 1, src.split("private volatile boolean downloading;", -1).length - 1);
+        assertTrue("the AI model's card does not show the speech download", body(src, "public String modelInfo(String name)").contains("downloading && !speechDownloading"));
+    }
+
+    @Test
+    public void downloadSpeechGoesOnlyThroughTheVerifiedPath() throws Exception {
+        String src = bridge();
+        String speech = body(src, "public void downloadSpeech(int id)");
+        assertTrue(speech.contains("ModelZip.fetch("));
+        assertTrue(speech.contains("ModelCatalog.SPEECH,"));
+        assertTrue(speech.contains("ModelCatalog.SPEECH_ZIP"));
+        assertFalse("the ZIP does not go to the cache folder, which Android may empty", speech.contains("getCacheDir"));
+        String model = new String(Files.readAllBytes(repoFile("android/app-shell/app/src/main/java/app/reelshelf/LocalModel.java").toPath()), StandardCharsets.UTF_8);
+        assertFalse("no download without a check is left", model.contains("download(String"));
+        assertFalse(model.contains("HttpURLConnection"));
+        String speechModel = new String(Files.readAllBytes(repoFile("android/app-shell/app/src/main/java/app/reelshelf/SpeechModel.java").toPath()), StandardCharsets.UTF_8);
+        assertFalse("the old unpack (no checks) is gone", speechModel.contains("unpack("));
+        assertFalse("the speech model has no address of its own besides the catalog row", speechModel.contains("https://"));
+    }
+
+    @Test
+    public void thePageAsksForTheSpeechModelWithoutAnAddress() throws Exception {
+        String js = localJs();
+        assertFalse("local.js must not name the speech server", js.contains("alphacephei"));
+        Matcher m = Pattern.compile("phone\\(\"downloadSpeech\"([^)]*)\\)").matcher(js);
+        assertTrue(m.find());
+        assertEquals("no argument at all", "", m.group(1).trim());
     }
 }

@@ -1167,10 +1167,11 @@ function speechInfo() { try { return JSON.parse(sync("speechInfo") || "{}"); } c
 function speechHtml() {
   const si = speechInfo();
   if (!RN || !RN.speechInfo) return "";
+  const paused = !si.ready && !speechDl && si.partial > 0;  // an unfinished download is kept and continued
   return `<div class="stack"><h2>What reels say</h2><div class="card stack">
-    <div class="row between"><strong>Speech to text (English)</strong><span class="tag ${si.ready ? "ok" : "warn"}">${si.ready ? "Ready" : speechDl ? "Downloading" : "Not downloaded"}</span></div>
-    <span class="small muted">Turns what is said in a reel into text, on the phone, with no internet after the download. About 40 MB.</span>
-    ${si.ready ? `<button class="btn block danger" id="delsp">Delete the speech model</button>` : speechDl ? `<span class="small muted" id="sptext">${mb(speechDl.d)} of ${mb(speechDl.t)}</span>` : `<button class="btn primary block" id="dlsp">Download speech to text</button>`}
+    <div class="row between"><strong>Speech to text (English)</strong><span class="tag ${si.ready ? "ok" : "warn"}">${si.ready ? "Ready" : speechDl ? "Downloading" : paused ? "Paused" : "Not downloaded"}</span></div>
+    <span class="small muted">Turns what is said in a reel into text, on the phone, with no internet after the download. About 40 MB. It is checked against the published file before it is installed.</span>
+    ${si.ready ? `<button class="btn block danger" id="delsp">Delete the speech model</button>` : speechDl ? `<span class="small muted" id="sptext">${mb(speechDl.d)} of ${mb(speechDl.t)}</span>` : `<button class="btn primary block" id="dlsp">${paused ? "Continue download" : "Download speech to text"}</button>`}
     <p class="hint">Start (and the nightly run) then reads each reel's video: the text on screen and the spoken words. Reels Instagram gives no video for stay caption only.</p></div></div>`;
 }
 function bindSpeech() {

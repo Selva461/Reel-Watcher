@@ -591,7 +591,7 @@ final class LocalBridge {
             return;
         }
         if (downloading) {
-            done(id, false, "Already downloading");
+            done(id, false, speechDownloading ? "Speech to text is downloading. Wait until it is done, then download the model." : "Already downloading");
             return;
         }
         downloading = true;
@@ -809,7 +809,7 @@ final class LocalBridge {
     public void downloadSpeech(int id) {
         if (!ok()) return;
         if (downloading) {
-            done(id, false, "Already downloading");
+            done(id, false, speechDownloading ? "Already downloading" : "The AI model is downloading. Wait until it is done, then download speech to text.");
             return;
         }
         speechDownloading = true;
