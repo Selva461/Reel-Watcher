@@ -166,13 +166,32 @@ public class BackupNowTest {
 
     @Test
     public void everySentenceIsPlainLanguageWithNoPathAndNoExceptionText() {
-        for (String s : new String[]{BackupNow.BUSY, BackupNow.LOCKED, BackupNow.NOTHING, BackupNow.READ_BACK, BackupNow.OUT_OF_MEMORY,
+        for (String s : new String[]{BackupNow.BUSY, BackupNow.LOCKED, BackupNow.LOCKED_NEWER, BackupNow.NOTHING, BackupNow.READ_BACK, BackupNow.OUT_OF_MEMORY,
                 BackupNow.DISK_FULL, BackupNow.GENERIC, BackupNow.notEnoughSpace(MB, 0)}) assertPlain(s);
     }
 
     @Test
-    public void theLockedSentencePointsToSavingTheUnreadableFile() {
-        assertTrue(BackupNow.LOCKED.contains("Save the unreadable file"));
+    public void theLockedSentencesNameTheButtonThatReallyIsOnEachScreen() {
+        // lockedScreen (unreadable) has "Save the unreadable file to Downloads"; newerScreen has "Save a copy to Downloads" (local.js; a page test checks both)
+        assertTrue(BackupNow.LOCKED, BackupNow.LOCKED.contains("\"Save the unreadable file to Downloads\""));
+        assertTrue(BackupNow.LOCKED_NEWER, BackupNow.LOCKED_NEWER.contains("\"Save a copy to Downloads\""));
+        assertFalse("the unreadable screen has no \"Save a copy\" button", BackupNow.LOCKED.contains("Save a copy"));
+        assertFalse("the newer screen has no \"unreadable file\" button", BackupNow.LOCKED_NEWER.contains("unreadable file"));
+        assertTrue(BackupNow.LOCKED_NEWER.contains("newer Reel Shelf"));
+    }
+
+    @Test
+    public void theLockedSentenceFollowsWhyTheLibraryIsLocked() {
+        assertEquals(BackupNow.LOCKED_NEWER, BackupNow.locked(true));
+        assertEquals(BackupNow.LOCKED, BackupNow.locked(false));
+    }
+
+    @Test
+    public void anOutOfMemoryErrorAnywhereGivesTheMemorySentence() {
+        assertEquals(BackupNow.OUT_OF_MEMORY, BackupNow.sentenceFor(new OutOfMemoryError("Failed to allocate 123 bytes at /data/x")));
+        assertEquals(BackupNow.OUT_OF_MEMORY, BackupNow.sentenceFor(new RuntimeException("wrapped", new OutOfMemoryError())));
+        assertFalse(BackupNow.sentenceFor(new OutOfMemoryError("/data/x")).contains("/data"));
+        assertEquals("any other Error is the general sentence, never its text", BackupNow.GENERIC, BackupNow.sentenceFor(new StackOverflowError("deep /data/y")));
     }
 
     @Test
@@ -206,6 +225,149 @@ public class BackupNowTest {
         IOException b = new IOException("b", a);
         a.initCause(b);
         assertEquals(BackupNow.GENERIC, BackupNow.sentenceFor(b));
+    }
+
+    // ------------------------------------------------------------------ names that are taken (Android 8 and 9)
+
+    @Test
+    public void aTakenNameGetsANumberBeforeTheExtension() {
+        assertEquals("ReelShelf-backup-20231114-221320-2.zip", BackupNow.numbered("ReelShelf-backup-20231114-221320.zip", 2));
+        assertEquals("a-7.zip", BackupNow.numbered("a.zip", 7));
+        assertEquals("no extension", "plain-3", BackupNow.numbered("plain", 3));
+        assertEquals("a leading dot is not an extension", ".hidden-2", BackupNow.numbered(".hidden", 2));
+        assertEquals("only the last dot counts", "a.b-2.zip", BackupNow.numbered("a.b.zip", 2));
+    }
+
+    // ------------------------------------------------------------------ saving as NAME.part, named only when the read-back passed
+
+    private static String text(File f) throws IOException {
+        return new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+    }
+
+    private static BackupNow.Source bytes(String s) {
+        return out -> {
+            out.write(s.getBytes(StandardCharsets.UTF_8));
+            return s.length();
+        };
+    }
+
+    @Test
+    public void aGoodFileGetsItsFinalNameAndNoPartIsLeft() throws Exception {
+        File dir = new File(tmp.newFolder(), "ReelShelf");  // made when missing
+        File f = BackupNow.saveProven(dir, "b.zip", bytes("backup"), "empty", in -> {
+        });
+        assertEquals(new File(dir, "b.zip"), f);
+        assertEquals("backup", text(f));
+        assertArrayEquals(new String[]{"b.zip"}, dir.list());
+    }
+
+    @Test
+    public void untilTheReadBackPassesThereIsOnlyAPartFileAndNoFileWithTheFinalName() throws Exception {
+        File dir = tmp.newFolder();
+        final boolean[] looked = {false};
+        BackupNow.saveProven(dir, "b.zip", bytes("backup"), "empty", in -> {
+            looked[0] = true;
+            assertFalse("no file with the final name yet: a cloud upload or a person cannot take it for a backup", new File(dir, "b.zip").exists());
+            assertEquals("backup", new String(readAll(in), StandardCharsets.UTF_8));
+            assertTrue(new File(dir, "b.zip.part").isFile());
+        });
+        assertTrue(looked[0]);
+        assertFalse(new File(dir, "b.zip.part").exists());
+        assertTrue(new File(dir, "b.zip").isFile());
+    }
+
+    private static byte[] readAll(InputStream in) throws IOException {
+        ByteArrayOutputStream o = new ByteArrayOutputStream();
+        byte[] b = new byte[1024];
+        for (int r; (r = in.read(b)) > 0; ) o.write(b, 0, r);
+        return o.toByteArray();
+    }
+
+    @Test
+    public void aFailedReadBackLeavesNothingAtAll() throws Exception {
+        File dir = tmp.newFolder();
+        try {
+            BackupNow.saveProven(dir, "b.zip", bytes("backup"), "empty", in -> {
+                throw new BackupNow.Failure(BackupNow.READ_BACK);
+            });
+            org.junit.Assert.fail("the failure must reach the caller");
+        } catch (BackupNow.Failure expected) {
+            assertEquals(BackupNow.READ_BACK, expected.getMessage());
+        }
+        assertEquals("neither the file nor its .part", 0, dir.list().length);
+    }
+
+    @Test
+    public void aWriterThatFailsOrHasNothingLeavesNothing() throws Exception {
+        File dir = tmp.newFolder();
+        try {
+            BackupNow.saveProven(dir, "b.zip", out -> {
+                out.write(1);
+                throw new IOException("write failed: ENOSPC (No space left on device)");
+            }, "empty", in -> org.junit.Assert.fail("not read back after a failed write"));
+            org.junit.Assert.fail();
+        } catch (IOException expected) {
+            assertEquals(BackupNow.DISK_FULL, BackupNow.sentenceFor(expected));
+        }
+        try {
+            BackupNow.saveProven(dir, "b.zip", out -> -1, "There is nothing to back up", in -> org.junit.Assert.fail("nothing to read back"));
+            org.junit.Assert.fail();
+        } catch (IOException expected) {
+            assertEquals("There is nothing to back up", expected.getMessage());
+        }
+        assertEquals(0, dir.list().length);
+    }
+
+    @Test
+    public void anErrorFromTheReadBackAlsoLeavesNothingAndIsRethrown() throws Exception {
+        File dir = tmp.newFolder();
+        try {
+            BackupNow.saveProven(dir, "b.zip", bytes("backup"), "empty", in -> {
+                throw new OutOfMemoryError("test");
+            });
+            org.junit.Assert.fail();
+        } catch (OutOfMemoryError expected) {
+            // rethrown, after the clean-up
+        }
+        assertEquals(0, dir.list().length);
+    }
+
+    @Test
+    public void aFileThatIsAlreadyThereIsNeverReplacedOrDeleted() throws Exception {
+        File dir = tmp.newFolder();
+        File old = new File(dir, "b.zip");
+        Files.write(old.toPath(), "older backup".getBytes(StandardCharsets.UTF_8));
+        File f = BackupNow.saveProven(dir, "b.zip", bytes("new"), "empty", in -> {
+        });
+        assertEquals(new File(dir, "b-2.zip"), f);
+        assertEquals("older backup", text(old));
+        assertEquals("new", text(f));
+        File third = BackupNow.saveProven(dir, "b.zip", bytes("third"), "empty", in -> {
+        });
+        assertEquals(new File(dir, "b-3.zip"), third);
+        // and when the new one fails, the older ones are still there
+        try {
+            BackupNow.saveProven(dir, "b.zip", bytes("fourth"), "empty", in -> {
+                throw new IOException("no");
+            });
+            org.junit.Assert.fail();
+        } catch (IOException expected) {
+            // fine
+        }
+        assertEquals("older backup", text(old));
+        assertEquals("new", text(f));
+        assertEquals("third", text(third));
+        assertEquals(3, dir.list().length);
+    }
+
+    @Test
+    public void aLeftoverPartFileOfThatNameIsNotOverwrittenEither() throws Exception {
+        File dir = tmp.newFolder();
+        Files.write(new File(dir, "b.zip.part").toPath(), "half".getBytes(StandardCharsets.UTF_8));  // from a backup that was cut off
+        File f = BackupNow.saveProven(dir, "b.zip", bytes("new"), "empty", in -> {
+        });
+        assertEquals(new File(dir, "b-2.zip"), f);
+        assertEquals("half", text(new File(dir, "b.zip.part")));
     }
 
     // ------------------------------------------------------------------ the byte counter

@@ -246,8 +246,12 @@ final class LocalBridge {
     }
 
     /**
-     * emptyMessage is what a writer that returns -1 (nothing to write) says. readBack, when not null, is given the saved
-     * file to look at once it is complete; if it throws, the file is deleted like a half-written one.
+     * emptyMessage is what a writer that returns -1 (nothing to write) says. readBack, when not null (a backup), is given the
+     * saved file to look at once it is complete; the file is only a real file in Downloads once it passed: until then it is
+     * hidden (Android 10 and newer: IS_PENDING) or named NAME.part (Android 8 and 9), so no other app, cloud upload or person
+     * sees a half-finished or unproven file as a backup. When it fails, or anything else goes wrong (an Error too), the file
+     * is deleted. A backup also never replaces a file of the same name on Android 8 and 9, and the place returned names the
+     * file as Android really saved it (it may have added " (1)" to the name).
      */
     private String saveToDownloads(String name, String mime, Writer w, String emptyMessage, ReadBack readBack) throws IOException {
         if (Build.VERSION.SDK_INT >= 29) {
@@ -256,8 +260,10 @@ final class LocalBridge {
             v.put(MediaStore.Downloads.DISPLAY_NAME, name);
             v.put(MediaStore.Downloads.MIME_TYPE, mime);
             v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ReelShelf");
+            if (readBack != null) v.put(MediaStore.Downloads.IS_PENDING, 1);
             Uri uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
             if (uri == null) throw new IOException("Android did not give a place to save");
+            String saved = name;
             try {
                 try (OutputStream out = cr.openOutputStream(uri)) {
                     if (out == null) throw new IOException("Could not write the file");
@@ -268,32 +274,43 @@ final class LocalBridge {
                         if (in == null) throw new IOException("Could not read the file back");
                         readBack.check(in);
                     }
+                    ContentValues visible = new ContentValues();
+                    visible.put(MediaStore.Downloads.IS_PENDING, 0);  // only now is it a file in Downloads
+                    if (cr.update(uri, visible, null, null) < 1) throw new IOException("Could not finish the file");
+                    saved = displayName(cr, uri, name);
                 }
-            } catch (IOException | RuntimeException e) {
-                cr.delete(uri, null, null);  // no half-written file left in Downloads
-                throw e;
+            } catch (Throwable t) {  // an Error too: nothing half-finished stays in Downloads
+                cr.delete(uri, null, null);
+                throw t;
             }
-            return "Downloads/ReelShelf/" + name;
+            return "Downloads/ReelShelf/" + saved;
         }
         File d = new File(act.ctx().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "ReelShelf");
+        if (readBack != null) return BackupNow.saveProven(d, name, w::to, emptyMessage, readBack::check).getPath();
         //noinspection ResultOfMethodCallIgnored
         d.mkdirs();
         File f = new File(d, name);
-        try {
-            try (OutputStream out = new FileOutputStream(f)) {
-                if (w.to(out) < 0) throw new IOException(emptyMessage);
-            }
-            if (readBack != null) {
-                try (InputStream in = new java.io.FileInputStream(f)) {
-                    readBack.check(in);
-                }
-            }
+        try (OutputStream out = new FileOutputStream(f)) {
+            if (w.to(out) < 0) throw new IOException(emptyMessage);
         } catch (IOException | RuntimeException e) {
             //noinspection ResultOfMethodCallIgnored
             f.delete();
             throw e;
         }
         return f.getPath();
+    }
+
+    /** The name Android gave a file it saved in Downloads (it renames a duplicate to "name (1).zip"); fallback when it cannot be asked. */
+    private static String displayName(android.content.ContentResolver cr, Uri uri, String fallback) {
+        try (android.database.Cursor c = cr.query(uri, new String[]{MediaStore.MediaColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String n = c.getString(0);
+                if (n != null && !n.isEmpty()) return n;
+            }
+        } catch (RuntimeException ignored) {
+            // the name asked for is the best guess
+        }
+        return fallback;
     }
 
     /**
@@ -308,14 +325,27 @@ final class LocalBridge {
     public void backupLibrary(int id, String countsJson) {
         if (!ok()) return;
         work.execute(() -> {
-            BackupNow.Outcome o = makeBackup(countsJson);  // everything is cleaned up before the page hears about it, so a click right after is not "busy"
+            BackupNow.Outcome o;
+            try {
+                o = makeBackup(countsJson);  // everything is cleaned up before the page hears about it, so a click right after is not "busy"
+            } catch (Throwable t) {  // an Error too (out of memory): the page must never stay on "Backing up..."
+                o = BackupNow.fail(BackupNow.sentenceFor(t));
+            }
             done(id, o.ok, o.text);
         });
     }
 
-    @SuppressWarnings("deprecation")
     private BackupNow.Outcome makeBackup(String countsJson) {
         if (!LIBRARY_JOB.compareAndSet(false, true)) return BackupNow.fail(BackupNow.BUSY);
+        try {
+            return backupHoldingTheFlag(countsJson);
+        } finally {
+            LIBRARY_JOB.set(false);  // whatever happens inside, the flag cannot stay set
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private BackupNow.Outcome backupHoldingTheFlag(String countsJson) {
         File dir = act.ctx().getFilesDir();
         File snaps = new File(dir, "backup-work");  // hard links to the library files: only ever read or deleted, never opened for writing
         File staging = new File(dir, "restore-staging");  // same volume as the library; the read-back unpacks here
@@ -328,7 +358,7 @@ final class LocalBridge {
                 try {
                     haveReels = reels.snapshotTo(reelsSnap);
                 } catch (IOException e) {
-                    if (reels.locked()) return BackupNow.fail(BackupNow.LOCKED);  // unreadable or newer: never backed up
+                    if (reels.locked()) return BackupNow.fail(BackupNow.locked(reels.state() == LibraryFile.State.NEWER));  // unreadable or newer: never backed up
                     throw e;
                 }
                 if (haveReels) {
@@ -369,7 +399,7 @@ final class LocalBridge {
             String name = BackupNow.fileName(named, java.util.TimeZone.getDefault());
             long[] size = new long[1];
             final long raw = reelsBytes + shotsBytes;
-            saveToDownloads(name, "application/zip", out -> {
+            String place = saveToDownloads(name, "application/zip", out -> {
                 BackupNow.Counter counter = new BackupNow.Counter(out);
                 java.io.BufferedOutputStream buffered = new java.io.BufferedOutputStream(counter, 64 * 1024);
                 LibraryBackup.write(buffered, reelsSnap, reels.supported(), withShots ? shotsSnap : null, shots.supported(), counts, vName, vCode, now);
@@ -385,14 +415,14 @@ final class LocalBridge {
                 }
                 if (!c.ok()) throw new BackupNow.Failure(BackupNow.READ_BACK);
             });
+            String saved = new File(place).getName();  // the name it really has: Android may have changed it ("name (1).zip") and a taken name is not reused
             boolean appFolder = Build.VERSION.SDK_INT < 29;  // Android 8 and 9: the app's own folder, deleted with the app
-            return BackupNow.ok(name, BackupNow.where(appFolder, act.ctx().getPackageName(), name), size[0], counts, appFolder, shotsSkipped);
+            return BackupNow.ok(saved, BackupNow.where(appFolder, act.ctx().getPackageName(), saved), size[0], counts, appFolder, shotsSkipped);
         } catch (IOException | RuntimeException e) {
             return BackupNow.fail(BackupNow.sentenceFor(e));
         } finally {
             LibraryBackup.clear(snaps);
             LibraryBackup.clear(staging);
-            LIBRARY_JOB.set(false);
         }
     }
 

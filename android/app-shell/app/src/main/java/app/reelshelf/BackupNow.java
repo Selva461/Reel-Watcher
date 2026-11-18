@@ -3,8 +3,13 @@ package app.reelshelf;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.Files;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -20,10 +25,16 @@ final class BackupNow {
     }
 
     static final String BUSY = "Another backup is already running. Wait for it to finish.";
-    static final String LOCKED = "Your library could not be opened, so it cannot be backed up. Use Save the unreadable file instead.";
+    /**
+     * The library is locked, so there is no backup. These two name the button that really is on the screen shown then
+     * (lockedScreen: "Save the unreadable file to Downloads", newerScreen: "Save a copy to Downloads"); a test checks that
+     * both names are on those screens. The name is the text between the escaped quotes after "Use".
+     */
+    static final String LOCKED = "Your library could not be read, so it cannot be backed up. Use \"Save the unreadable file to Downloads\" instead.";
+    static final String LOCKED_NEWER = "Your library was saved by a newer Reel Shelf, so this version cannot back it up. Use \"Save a copy to Downloads\", and install the newest Reel Shelf.";
     static final String NOTHING = "There is nothing to back up yet.";
     static final String READ_BACK = "The backup was saved but could not be read back correctly, so it was deleted. Your library was not changed. Please try again.";
-    static final String OUT_OF_MEMORY = "The phone ran out of memory while checking the backup, so it was not kept. Close other apps and try again. Your library was not changed.";
+    static final String OUT_OF_MEMORY = "The phone ran out of memory while making or checking the backup, so it was not kept. Close other apps and try again. Your library was not changed.";
     static final String DISK_FULL = "The phone ran out of space while saving the backup, so it was deleted. Free up space and try again. Your library was not changed.";
     static final String GENERIC = "The backup could not be saved. Your library was not changed. Please try again.";
     /** What a writer that has nothing to write says (see LocalBridge.saveToDownloads). */
@@ -114,6 +125,11 @@ final class BackupNow {
         return new Outcome(true, o.toString());
     }
 
+    /** The sentence when the library is locked: newer is true when a newer Reel Shelf saved it (the screen then has another button). */
+    static String locked(boolean newer) {
+        return newer ? LOCKED_NEWER : LOCKED;
+    }
+
     static Outcome fail(String sentence) {
         return new Outcome(false, sentence);
     }
@@ -141,10 +157,55 @@ final class BackupNow {
         int depth = 0;
         for (Throwable t = e; t != null && depth < 6; t = t.getCause(), depth++) {
             if (t instanceof Failure) return t.getMessage();
+            if (t instanceof OutOfMemoryError) return OUT_OF_MEMORY;
             String m = t.getMessage();
             if (m != null && (m.contains("ENOSPC") || m.contains("No space left"))) return DISK_FULL;
         }
         return GENERIC;
+    }
+
+    /** NAME-2.ext, NAME-3.ext ...: the next name to try when one is taken. */
+    static String numbered(String name, int n) {
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(0, dot) + "-" + n + name.substring(dot) : name + "-" + n;
+    }
+
+    /** What is written to a file: returns the number of bytes, or -1 for "nothing to write". */
+    interface Source {
+        long to(OutputStream out) throws IOException;
+    }
+
+    /** Looks at a file that is complete and throws when it is not good. */
+    interface Proof {
+        void check(InputStream in) throws IOException;
+    }
+
+    /**
+     * Android 8 and 9 (and tests): saves into dir so that a file with the final name is only ever a good one. It is written
+     * as NAME.part, read back with proof, and only then renamed to NAME; it never replaces a file that is already there (the
+     * next free name, NAME-2.ext and so on, is taken instead). When anything fails, even an Error, the .part is deleted and
+     * the exception is rethrown. Returns the file with its final name.
+     */
+    static File saveProven(File dir, String name, Source w, String emptyMessage, Proof proof) throws IOException {
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        File fin = new File(dir, name);
+        for (int i = 2; fin.exists() || new File(dir, fin.getName() + ".part").exists(); i++) fin = new File(dir, numbered(name, i));
+        File part = new File(dir, fin.getName() + ".part");
+        try {
+            try (OutputStream out = new FileOutputStream(part)) {
+                if (w.to(out) < 0) throw new IOException(emptyMessage);
+            }
+            try (InputStream in = new FileInputStream(part)) {
+                proof.check(in);
+            }
+            Files.move(part.toPath(), fin.toPath());  // without REPLACE_EXISTING: it throws rather than overwrite
+            return fin;
+        } catch (Throwable t) {
+            //noinspection ResultOfMethodCallIgnored
+            part.delete();
+            throw t;
+        }
     }
 
     /** Counts the bytes that go through to out (the size of the saved file). Does not close out. */
