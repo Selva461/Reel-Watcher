@@ -1210,8 +1210,10 @@ function backupInner() {
       <button class="btn primary block" id="backupnow" ${backup.running ? "disabled" : ""}>${backup.running ? "Backing up..." : "Back up now"}</button>
       ${status}
       <a class="btn block" href="#/restore" id="restorebtn">Restore from a backup</a>
+      <a class="btn block" href="#/kept" id="keptbtn">Files kept for safety</a>
       <p class="hint">The backup contains all your reels, notes, watchlist, quotes and products. Anyone who gets the file can read them. It does not contain your settings, API keys, AI models, pictures or videos. It also holds a short part of the text read from each of your screenshots, and their file names.</p>
       <p class="hint">It is saved in Downloads/ReelShelf. Keep it somewhere safe, or delete it when you no longer need it: Reel Shelf never deletes old backups for you. Restoring replaces your library with a backup after you confirm; the library you have now is kept on the phone, not deleted.</p>
+      <p class="hint">Files kept for safety lists the copies Reel Shelf set aside on this phone (a library it could not read, or the library a restore replaced) and any temporary restore files. You choose whether to save or delete each one; Reel Shelf never deletes them for you.</p>
     </div>`;
 }
 function paintBackup() {
@@ -1391,6 +1393,155 @@ function restoreGo() {
   });
 }
 
+// ------------------------------------------------------------------ Files kept for safety (#/kept): the copies Reel Shelf set aside (S4-4)
+// The phone lists them (RN.keptFiles) and checks every name again; the page only ever passes back a name from that list. Save to Downloads is
+// RN.saveKept(name). Delete is two steps: RN.askDeleteKept(name) answers with the file as it is now and a one-use token for the confirm screen,
+// and RN.deleteKept(name, token) deletes only that file. Nothing is deleted without the confirm screen, and never while work runs (the phone
+// refuses too). The library itself, its previous copy and everything else are not in the list. Not reachable while the library is locked.
+const KEPT_WORK = "Reel Shelf is busy with a job (writing notes, reading screenshots, an online check, a download or the nightly run). Stop it, or wait until it is done, then try again. Nothing was deleted.";  // KeptFiles.WORK
+const KEPT_BUSY = "Another backup, restore or file action is already running. Wait for it to finish, then try again. Nothing was deleted.";  // KeptFiles.BUSY
+const KEPT_PRIVACY = "A file kept for safety is a copy of your private library: your reels, notes, watchlist, quotes and products (for the screenshot list, a short part of the text read from each screenshot, and their file names). Saving one to Downloads/ReelShelf puts a copy where other apps and file managers can read it, and anyone who gets that file can read it. It does not contain your settings, API keys or AI models.";
+function keptFresh() { return { items: null, error: "", msg: null, saved: {}, confirm: null, busy: "" }; }
+let kept = keptFresh();  // items: null until listed; msg: {bad, text}; saved: name -> the answer of the last Save; confirm: {name, token, item}; busy: "" | "save:NAME" | "delete"
+function keptBlocked() {
+  if (workNow()) return KEPT_WORK;
+  if (sync("nightActive")) return KEPT_WORK;
+  if (backup.running || restore.busy) return KEPT_BUSY;
+  return "";
+}
+function keptLoad() {
+  let r = null;
+  try { r = JSON.parse(sync("keptFiles")); } catch (e) { /* the sentence below */ }
+  if (r && typeof r === "object" && Array.isArray(r.items)) {
+    kept.items = r.items.filter((x) => x && typeof x === "object" && typeof x.name === "string" && x.name);
+    kept.error = typeof r.error === "string" ? r.error : "";
+  } else {
+    kept.items = [];
+    kept.error = "The list of kept files could not be read. Nothing was changed.";
+  }
+}
+function keptDate(ms) {
+  const d = new Date(Number(ms) || 0);
+  return !Number(ms) || isNaN(d) ? "" : d.toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function keptSize(n) { n = Number(n) || 0; return n < 1024 ? plural(n, "byte") : backupSize(n); }
+function keptTitle(it) {
+  const what = it.library === "shots" ? "screenshot list" : "library";
+  if (it.kind === "temp") return "Temporary restore files";
+  if (it.kind === "before_restore") return `Your ${what} before a restore`;
+  if (it.kind === "bad_backup") return `Damaged earlier copy of your ${what}`;
+  if (it.kind === "bad") return `Your ${what} that could not be read`;
+  return "A file kept for safety";
+}
+function keptWhy(it) {
+  if (it.kind === "temp") return "Left over from checking a backup file. Your library is not affected.";
+  if (it.kind === "before_restore") return "Kept when a backup replaced it.";
+  if (it.kind === "bad" || it.kind === "bad_backup") return "Set aside, not deleted, when it could not be read.";
+  return "";
+}
+function keptCard(it) {
+  const st = kept.saved[it.name];
+  const done = !st ? "" : st.ok
+    ? `<span class="small" role="status"><strong>Saved to ${esc(st.where)}</strong> (${esc(keptSize(st.bytes))})</span>
+       ${st.uninstall_warning ? `<span class="small"><strong>This file is in the app's own folder on this version of Android, so it is deleted if you uninstall Reel Shelf.</strong> Copy it somewhere else (for example with a file manager) to keep it.</span>` : ""}
+       <span class="small">That copy is private data too: delete it from Downloads when you no longer need it.</span>`
+    : `<span class="small" role="alert"><strong>${esc(st.text)}</strong></span>`;
+  const off = kept.busy ? "disabled" : "";
+  const when = it.kind === "temp" ? `${esc(plural(Number(it.files) || 0, "file"))}, changed ${esc(keptDate(it.at))}` : `Kept since ${esc(keptDate(it.at))}`;
+  const del = `<button class="btn ${it.kind === "temp" ? "block " : ""}danger" data-kdel="${esc(it.name)}" ${off}>Delete</button>`;
+  const save = `<button class="btn" data-ksave="${esc(it.name)}" ${off}>${kept.busy === "save:" + it.name ? "Saving..." : "Save to Downloads"}</button>`;
+  return `<div class="card stack"><strong>${esc(keptTitle(it))}</strong>
+    <span class="small">${when} · ${esc(keptSize(it.size))}</span>
+    <span class="small muted">${esc(keptWhy(it))}</span>
+    ${it.kind === "temp" ? "" : `<span class="small muted">${esc(it.name)}</span>`}
+    ${done}
+    ${it.kind === "temp" ? del : `<div class="grid2">${save}${del}</div>`}</div>`;
+}
+function keptScreen() {
+  if (kept.items === null) keptLoad();
+  if (kept.confirm) { keptConfirmScreen(); return; }
+  const msg = kept.msg ? `<span class="small" role="${kept.msg.bad ? "alert" : "status"}"><strong>${esc(kept.msg.text)}</strong></span>` : "";
+  const err = kept.error ? `<span class="small" role="alert"><strong>${esc(kept.error)}</strong></span>` : "";
+  $app.innerHTML = `${header("Files kept for safety", "#/settings")}
+    <div class="card stack">
+      <span>Reel Shelf set these aside on this phone and never deletes them by itself: a library file it could not read, or the library a restore replaced. They use space on the phone.</span>
+      <p class="hint" id="keptprivacy">${esc(KEPT_PRIVACY)}</p>
+      ${msg}${err}</div>
+    ${kept.items.length ? kept.items.map(keptCard).join("") : kept.error ? "" : `<div class="empty">Nothing is kept for safety. A copy appears here when Reel Shelf sets aside a library it could not read, or the library a restore replaced.</div>`}`;
+  bind("[data-ksave]", "click", (e, b) => keptSave(b.dataset.ksave));
+  bind("[data-kdel]", "click", (e, b) => keptAsk(b.dataset.kdel));
+}
+/** Save to Downloads: a copy, checked by reading it back; the kept file stays where it is. */
+function keptSave(name) {
+  if (kept.busy) return;
+  const mine = kept;
+  mine.busy = "save:" + name;
+  mine.msg = null;
+  delete mine.saved[name];
+  keptScreen();
+  phone("saveKept", name).then((t) => {
+    let r = null;
+    try { r = JSON.parse(t); } catch (e) { /* the sentence below */ }
+    mine.saved[name] = r && typeof r === "object" && typeof r.where === "string" ? { ...r, ok: true } : { ok: false, text: "The file could not be saved. The kept file was not changed." };
+  }, (e) => { mine.saved[name] = { ok: false, text: e.message }; }).then(() => {
+    mine.busy = "";
+    if (kept === mine && location.hash === "#/kept") keptScreen();
+  });
+}
+/** Delete, step 1: ask the phone for the file's facts and a token. Nothing is deleted; the confirm screen comes next. */
+function keptAsk(name) {
+  if (kept.busy) return;
+  const why = keptBlocked();
+  if (why) { kept.msg = { bad: true, text: why }; keptScreen(); return; }
+  let a = null;
+  try { a = JSON.parse(sync("askDeleteKept", name)); } catch (e) { /* the sentence below */ }
+  if (a && typeof a === "object" && a.ok === true && typeof a.token === "string" && a.token && a.item && typeof a.item === "object" && a.item.name === name) {
+    kept.confirm = { name, token: a.token, item: a.item };
+    kept.msg = null;
+  } else {
+    kept.msg = { bad: true, text: a && typeof a.text === "string" && a.text ? a.text : "That file could not be checked. Nothing was deleted." };
+    keptLoad();  // it may be gone
+  }
+  keptScreen();
+}
+function keptConfirmScreen() {
+  const c = kept.confirm, it = c.item;
+  const date = keptDate(it.at);
+  const what = it.kind === "temp"
+    ? `Delete the temporary restore files (${plural(Number(it.files) || 0, "file")}, ${keptSize(it.size)} together)?`
+    : `Delete "${keptTitle(it)}", the file ${it.name}${date ? ", kept since " + date : ""} (${keptSize(it.size)})?`;
+  const msg = kept.msg ? `<span class="small" role="alert"><strong>${esc(kept.msg.text)}</strong></span>` : "";
+  $app.innerHTML = `${header("Delete this file?", "#/settings")}
+    <div class="card stack"><strong>Delete this file?</strong>
+      <span id="kquestion">${esc(what + " This cannot be undone: once it is deleted it is gone from the phone.")}</span>
+      <span class="small">${it.kind === "temp" ? "They are only copies made while a backup file was checked. Your library is not touched." : "Your current library is not touched. If you might need this file, cancel and save it to Downloads first."}</span>
+      ${msg}
+      <button class="btn block danger" id="kgo" ${kept.busy ? "disabled" : ""}>${kept.busy === "delete" ? "Deleting..." : "Delete this file"}</button>
+      <button class="btn block" id="kcancel" ${kept.busy ? "disabled" : ""}>Cancel</button></div>`;
+  bind("#kgo", "click", keptGo);
+  bind("#kcancel", "click", () => { kept.confirm = null; kept.msg = null; keptScreen(); });
+}
+/** Delete, step 2, only from the confirm screen with the token the phone gave. Whatever the answer, back to the list, read again. */
+function keptGo() {
+  const c = kept.confirm;
+  if (!c || kept.busy) return;
+  const why = keptBlocked();
+  if (why) { kept.msg = { bad: true, text: why }; keptScreen(); return; }
+  const mine = kept;
+  mine.busy = "delete";
+  mine.msg = null;
+  keptScreen();
+  phone("deleteKept", c.name, c.token).then(() => {
+    mine.msg = { bad: false, text: `Deleted: ${keptTitle(c.item)} (${keptSize(c.item.size)}). It cannot be brought back.` };
+  }, (e) => { mine.msg = { bad: true, text: e.message }; }).then(() => {
+    mine.busy = "";
+    mine.confirm = null;
+    if (kept !== mine) return;
+    keptLoad();
+    if (location.hash === "#/kept") keptScreen();
+  });
+}
+
 function settingsScreen() {
   const info = modelInfo();
   const m = MODELS.find((x) => x.file === settings.modelFile);
@@ -1494,7 +1645,7 @@ const ROUTES = [
   [/^#\/add$/, addScreen, "inbox"], [/^#\/run$/, runScreen, "inbox"],
   [/^#\/shots$/, () => Shots.screen(), "inbox"], [/^#\/shots\/review$/, () => Shots.review(), "inbox"], [/^#\/settings$/, settingsScreen, ""],
   [/^#\/check$/, () => Verify.screen(), "inbox"], [/^#\/quotes$/, () => { lib.kind = "quotes"; location.replace("#/"); }, "lib"],
-  [/^#\/restore$/, restoreScreen, ""],
+  [/^#\/restore$/, restoreScreen, ""], [/^#\/kept$/, keptScreen, ""],
 ];
 
 /** The library file could not be read. Nothing is saved over it; you choose what happens next. */
@@ -1570,6 +1721,7 @@ function render() {
   if (handingOver) { paintTabs(""); topBar(false); handOverScreen(); return; }  // first on every route, the restore screen included
   if (restore.busy === "restore") { paintTabs(""); topBar(false); restoreScreen(); return; }  // while it installs this is the only screen: nothing else may save over it
   if (location.hash !== "#/restore" && !restore.busy && (restore.preview || restore.step === "done")) restoreDrop();  // left the screen: a checked backup is dropped, a result is forgotten
+  if (location.hash !== "#/kept" && kept.items !== null) kept = keptFresh();  // left the screen: a pending delete confirmation and the list are forgotten
   if (dbLocked) { paintTabs(""); topBar(false); if (dbNewer) newerScreen(); else if (location.hash === "#/restore") restoreScreen(); else lockedScreen(); return; }
   const h = location.hash || "#/";
   for (const [rx, fn, tab, top] of ROUTES) {
