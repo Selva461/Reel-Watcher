@@ -251,6 +251,9 @@ public class ModelCatalogTest {
             assertTrue("and take it before the work is handed to the worker", take < run);
             assertTrue("and give it back in a finally block", m.indexOf("downloading = false;", m.indexOf("finally {")) > 0);
         }
+        String atTheEnd = speech.substring(speech.indexOf("finally {"));
+        assertTrue("the speech label is cleared before the shared flag is given back (a new download may start the moment the flag is free)",
+                atTheEnd.indexOf("speechDownloading = false;") >= 0 && atTheEnd.indexOf("speechDownloading = false;") < atTheEnd.indexOf("downloading = false;"));
         assertFalse("the speech download is not gated by a flag of its own", speech.contains("if (speechDownloading)"));
         assertTrue(src.contains("private volatile boolean downloading;"));
         assertEquals("one flag for the gate", 1, src.split("private volatile boolean downloading;", -1).length - 1);

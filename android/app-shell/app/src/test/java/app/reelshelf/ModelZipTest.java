@@ -367,11 +367,8 @@ public class ModelZipTest {
     @Test
     public void aZipThatLiesAboutItsSizeIsStoppedByTheBytesReallyWritten() throws Exception {
         byte[] z = new Z().dir("m/").dir("m/am/").file("m/zeros", new byte[2_000_000]).done();
-        byte[] lying = size(z, "m/zeros", 10);  // the directory says 10 bytes, the data inflates to 2 MB
-        IOException e = assertThrows(IOException.class, () -> install(lying));
-        assertTrue(e.getMessage(), e.getMessage().equals(ModelZip.TOO_BIG) || e.getMessage().equals(ModelZip.BROKEN));
-        assertOldModelKept();
-        assertOnlyTheModelIsInRoot();
+        byte[] lying = size(z, "m/zeros", 10);  // the directory says 10 bytes (inside the 1000 limit), the data inflates to 2 MB (far over it)
+        assertRefused("a size that lies", lying, ModelZip.TOO_BIG);  // only the count of the bytes really written can say this
     }
 
     // ------------------------------------------------------------------ a ZIP that is not whole
@@ -482,6 +479,43 @@ public class ModelZipTest {
         ModelZip.recover(root, "m");
         assertOldModelKept();  // the newest one came back
         assertOnlyTheModelIsInRoot();
+    }
+
+    @Test
+    public void ifThePutBackFailsEveryOldFolderIsKept_neverDeletedWhileTheModelIsMissing_andTheLeftoverUnpackIsRemoved() throws Exception {
+        ModelZip.deleteTree(new File(root, "m").toPath());
+        write(new File(root, ".old-1-1/am/old.bin"), "OLDER MODEL".getBytes(StandardCharsets.UTF_8));
+        write(new File(root, ".old-2-1/am/old.bin"), "OLD MODEL".getBytes(StandardCharsets.UTF_8));
+        write(new File(root, ".old-2-1/conf/old.conf"), "old conf".getBytes(StandardCharsets.UTF_8));
+        write(new File(root, ".unpack-9/m/am/x"), "half".getBytes(StandardCharsets.UTF_8));
+        ModelZip.Mover failing = (from, to) -> {
+            throw new IOException("disk says no");
+        };
+        ModelZip.recover(root, "m", failing);
+        assertEquals("both set-aside models survive, the model folder is still missing, only our unfinished unpack is gone",
+                Arrays.asList(".old-1-1", ".old-2-1"), names(root));
+        assertEquals("OLD MODEL", snapshot(new File(root, ".old-2-1")).get("am/old.bin"));
+        assertEquals("OLDER MODEL", snapshot(new File(root, ".old-1-1")).get("am/old.bin"));
+
+        ModelZip.recover(root, "m");  // the next time the disk lets it
+        assertOldModelKept();
+        assertOnlyTheModelIsInRoot();
+    }
+
+    @Test
+    public void ifTheNewestPutBackFailsAnOlderOldFolderIsNotPutBackInItsPlace() throws Exception {
+        ModelZip.deleteTree(new File(root, "m").toPath());
+        write(new File(root, ".old-1-1/am/old.bin"), "OLDER MODEL".getBytes(StandardCharsets.UTF_8));
+        write(new File(root, ".old-2-1/am/old.bin"), "OLD MODEL".getBytes(StandardCharsets.UTF_8));
+        int[] calls = {0};
+        ModelZip.Mover failsOnce = (from, to) -> {
+            if (++calls[0] == 1) throw new IOException("disk says no");
+            Files.move(from.toPath(), to.toPath(), StandardCopyOption.ATOMIC_MOVE);
+        };
+        ModelZip.recover(root, "m", failsOnce);
+        assertEquals("only the newest was tried", 1, calls[0]);
+        assertEquals(Arrays.asList(".old-1-1", ".old-2-1"), names(root));
+        assertEquals("OLD MODEL", snapshot(new File(root, ".old-2-1")).get("am/old.bin"));
     }
 
     @Test

@@ -825,8 +825,8 @@ final class LocalBridge {
             } catch (Exception e) {
                 done(id, false, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             } finally {
+                speechDownloading = false;  // first: once "downloading" is free, a new download may start and set its own label
                 downloading = false;
-                speechDownloading = false;
             }
         });
     }

@@ -124,9 +124,14 @@ final class ModelZip {
 
     /**
      * Cleans up what a failed or killed install left in root. First, if the model folder is missing and an old one was set
-     * aside, the old one is put back (the swap was cut between its two renames); then every ".unpack-*" and ".old-*" is removed.
+     * aside, the old one is put back (the swap was cut between its two renames); then every ".unpack-*" is removed, and every
+     * ".old-*" too, but only when a model folder is there. If the put-back fails, every ".old-*" is kept for the next time.
      */
     static void recover(File root, String folder) {
+        recover(root, folder, ATOMIC);
+    }
+
+    static void recover(File root, String folder, Mover mover) {
         File[] kids = root.listFiles();
         if (kids == null) return;
         Arrays.sort(kids);
@@ -136,11 +141,11 @@ final class ModelZip {
                 File k = kids[i];
                 if (k.getName().startsWith(OLD) && k.isDirectory()) {
                     try {
-                        ATOMIC.move(k, target);
-                        break;
+                        mover.move(k, target);
                     } catch (IOException ignored) {
-                        // kept where it is: nothing here deletes it
+                        // kept where it is, and so are the older ones: nothing below deletes an ".old-*" while the model is missing
                     }
+                    break;
                 }
             }
         }

@@ -482,6 +482,35 @@ public class ModelVerifierTest {
     }
 
     @Test
+    public void aResumeRequestThatIsRedirectedToAnotherHostIsRefused_thePartIsKept() throws Exception {
+        byte[] kept = prefix(good, 70000);
+        for (String to : new String[]{"https://evil.example.com/x.litertlm", "https://huggingface.co.evil.com/x.litertlm", "https://hf.co.evil.com/x.litertlm"}) {
+            write(part, kept);
+            Server s = serve(x -> reply(x, 302, new byte[0], "Location", to));
+            IOException e = assertThrows(to, IOException.class, () -> download(s));
+            assertTrue(to + ": " + e.getMessage(), e.getMessage().startsWith("Refused a download from another site ("));
+            assertEquals(to + ": the resume request was sent, only that one", Arrays.asList("bytes=70000-"), s.ranges);
+            assertArrayEquals("the part is not touched", kept, read(part));
+            assertNothingInstalled();
+        }
+    }
+
+    @Test
+    public void aResumeRequestForAnAddressOnANonAllowedHostIsNeverSent() throws Exception {
+        byte[] kept = prefix(good, 70000);
+        for (String url : new String[]{"https://example.com/tiny.litertlm", "https://huggingface.co.evil.com/tiny.litertlm", "https://alphacephei.com/tiny.litertlm"}) {
+            write(part, kept);
+            ModelCatalog.Entry elsewhere = new ModelCatalog.Entry("t", "tiny.litertlm", url, good.length, sha(good));
+            Server s = serve(x -> ranged(x, good));
+            IOException e = assertThrows(url, IOException.class, () -> download(s, elsewhere, new Ctl()));
+            assertTrue(url + ": " + e.getMessage(), e.getMessage().startsWith("Refused a download from another site ("));
+            assertEquals(url + ": nothing was asked of any server", 0, s.requests.get());
+            assertArrayEquals("the part is not touched", kept, read(part));
+            assertNothingInstalled();
+        }
+    }
+
+    @Test
     public void tooManyRedirectsAreRefused() throws Exception {
         Server s = serve(x -> reply(x, 302, new byte[0], "Location", "https://huggingface.co/again"));
         assertEquals("Too many redirects", assertThrows(IOException.class, () -> download(s)).getMessage());
