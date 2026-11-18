@@ -127,13 +127,10 @@ function reel(code) { return db.reels.find((r) => r.code === code || r.ig_code =
 
 const MODELS = [
   { id: "qwen", name: "Qwen2.5 1.5B", file: "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
-    url: "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
     size: 1.6e9, note: "Free, about 1.6 GB, good for English notes. Needs a phone with 6 GB of RAM or more." },
   { id: "gemma4", name: "Gemma 4 E2B (watches the reel)", file: "gemma-4-E2B-it.litertlm",
-    url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
     size: 2.59e9, note: "Recommended. Free, about 2.6 GB. Looks at key frames and listens to the sound of each reel, plus the text on screen and what is said, then writes the intent, tone and points. About a minute per reel: best at night on the charger." },
   { id: "gemma4e4", name: "Gemma 4 E4B (best quality, slower)", file: "gemma-4-E4B-it.litertlm",
-    url: "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm",
     size: 3.66e9, note: "Free, about 3.7 GB. Same as E2B but more accurate, about twice as slow. Needs 8 GB of RAM or more." },
 ];
 const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en", tmdbKey: "", omdbKey: "", metaAi: false, webLookup: false };
@@ -619,7 +616,7 @@ async function overnightRun(auto) {
     else if (!mi.ready) {  // at night only a download you already started is continued
       const m = MODELS.find((x) => x.file === settings.modelFile) || MODELS[0];
       onProgress.download = (d, t) => { night.detail = `Downloading the AI model: ${mb(d)} of ${mb(t > 0 ? t : m.size)}`; };
-      try { await phone("downloadModel", m.url, m.file); say("AI model downloaded"); }
+      try { await phone("downloadModel", "", m.file); say("AI model downloaded"); }
       catch (e) { say("AI model not downloaded (" + e.message + "): notes are written without AI"); }
     } else say("AI model ready");
     if (!night.stop) {
@@ -1251,7 +1248,7 @@ function settingsScreen() {
     };
     modelDl = { d: 0, t: m.size };
     workTick();
-    phone("downloadModel", m.url, m.file).then(() => { modelDl = null; toast("The AI model is ready"); if (location.hash === "#/settings") settingsScreen(); })
+    phone("downloadModel", "", m.file).then(() => { modelDl = null; toast("The AI model is ready"); if (location.hash === "#/settings") settingsScreen(); })
       .catch((err) => { modelDl = null; if (err.message !== "paused") toast(err.message); if (location.hash === "#/settings") settingsScreen(); });
     setTimeout(() => { if (location.hash === "#/settings") settingsScreen(); }, 300);
   });
