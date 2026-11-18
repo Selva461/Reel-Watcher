@@ -5,6 +5,41 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.25
+<!-- Written as S4-4 on top of 1.3.22; the number is provisional (merge order). -->
+- New: Settings > Backup and restore > **Files kept for safety**. Reel Shelf never deletes a library file it could not
+  read, or the library a restore replaced: it sets them aside in its private storage. Until now they were invisible and
+  took space for ever. The new screen lists them, newest first, with what each one is, the date it was set aside and its
+  size: your library or screenshot list **that could not be read**, a **damaged earlier copy** of one, and **your library
+  (or screenshot list) before a restore**. Leftover files from checking a backup (`restore-staging`, `backup-check`) are
+  one row, **Temporary restore files**, with their total size.
+- **Save to Downloads** puts a copy of one of them in Downloads/ReelShelf as a `.txt` file (named like
+  `reels-before-restore-<date>-<time>.txt`), the same way Back up now does: it only appears in Downloads once it has been
+  read back and found complete, and it is deleted again if anything goes wrong. The screen says that the copy is private
+  data that other apps and file managers can read (your reels, notes, watchlist, quotes and products, or the text read from
+  your screenshots), and on Android 8 and 9 that the copy is deleted if you uninstall Reel Shelf. Saving never changes or
+  removes the kept file, and is allowed whatever else is running. The temporary files cannot be saved, only deleted.
+- **Delete** is only ever your own tap, and has two steps. The first asks the phone for the file and opens a screen that
+  names the file, the date it was set aside and its size, and says "This cannot be undone: once it is deleted it is gone
+  from the phone." Only **Delete this file** on that screen deletes it (one file; never a folder; the confirmation works
+  once and runs out after two minutes). Delete is refused, with a plain sentence and nothing deleted, while a job you
+  started or the nightly run is going, while a backup or restore is running, when the library or the screenshot list cannot
+  be read or was saved by a newer Reel Shelf (the files kept may then be the only copy of something you need), when a
+  restore is waiting for the temporary files, and when the file changed after you looked at it. Listing and saving are never
+  refused.
+- Only these files are ever listed or touched: `reels.json` / `shots.json` followed by `.bad-<date>-<time>`,
+  `.bak.bad-<date>-<time>` or `.before-restore-<date>-<time>` (with `-2`, `-3` ... when two were set aside in the same
+  second), and the plain files directly inside `restore-staging` and `backup-check`. Never your current library, its previous
+  copy (`.bak`), a file of a write that is running, the AI or speech models, the picture and video inboxes, shared files that
+  are being copied, a link, or a folder. The page only passes back a name from the list; the phone checks it again against
+  these patterns and looks the file up again before it saves or deletes anything. The automatic clean-up of leftover temporary
+  files is unchanged and still never removes any of these.
+- The library screens for "could not be read" and "newer Reel Shelf" do not have this entry (they are the only screens
+  shown then); it is in Settings once the library opens.
+- Checked with automatic tests on a computer (the page, and the parts that need no phone, including real files in a
+  folder: every name the library code makes, a link, a delete without the confirmation, a delete while work or a restore
+  runs). Not tried on a phone yet: see TESTING.md, E60 to E65.
+
 ## 1.3.22
 <!-- Written as S4-3 on top of 1.3.21; the number is provisional (merge order). -->
 - You can now **restore a backup**. Settings > Backup and restore > **Restore from a backup** (next to Back up now), and
