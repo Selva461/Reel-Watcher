@@ -696,3 +696,52 @@ def test_the_phones_own_refusal_for_a_newer_library_is_shown_and_nothing_changes
     phone.locator("#app [role=alert]").wait_for()
     assert alert(phone) == sentence and "newer Reel Shelf" in sentence
     assert phone.rn()["db"] == phone.start_db and not phone.rn().get("setAside")
+
+
+# ---------------------------------------------------------------- the bridge itself (LocalBridge.java cannot run here: what it must do is pinned in its source)
+
+def java_method(name, file="LocalBridge.java"):
+    """The text of a method of a Java file (from its signature to the matching closing brace)."""
+    text = (JAVA / file).read_text(encoding="utf-8")
+    m = re.search(r"\n    (?:@JavascriptInterface\n    )?(?:public |private )?(?:static )?[\w.<>\[\]]+ %s\([^)]*\) \{" % re.escape(name), text)
+    assert m, name
+    depth = 0
+    for j in range(m.end() - 1, len(text)):
+        depth += {"{": 1, "}": -1}.get(text[j], 0)
+        if depth == 0:
+            return text[m.start():j + 1]
+    raise AssertionError("unbalanced " + name)
+
+
+def test_the_bridge_asks_about_work_and_nights_before_choosing_after_the_picker_and_before_installing():
+    busy = java_method("busyWithWork")
+    for needed in ("act.isNight()", "WorkService.isRunning()", "WorkService.nightActive()"):
+        assert needed in busy, needed
+    assert "busyWithWork()" in java_method("chooseBackup"), "before the picker opens"
+    assert "busyWithWork()" in java_method("stageHoldingTheFlag"), "after it: a night can start while the picker is open"
+    restore = java_method("restoreStaged")
+    assert "busyWithWork()" in restore and restore.index("busyWithWork()") < restore.index("RestoreNow.install("), "before anything is installed"
+
+
+def test_the_bridge_restores_only_the_staged_backup_by_its_token_and_always_empties_staging():
+    restore = java_method("restoreStaged")
+    assert "STAGE.take(token)" in restore and restore.index("STAGE.take(token)") < restore.index("RestoreNow.install(")
+    assert "LibraryBackup.clear(restoreStaging())" in restore and "finally" in restore, "staging is emptied whatever the answer"
+    choose = java_method("stageHoldingTheFlag")
+    assert choose.index("STAGE.clear()") < choose.index("LibraryBackup.check("), "the old token dies before new files are unpacked"
+    cancel = java_method("cancelRestore")
+    assert "STAGE.clear()" in cancel and "LibraryBackup.clear(restoreStaging())" in cancel
+
+
+def test_the_backup_the_page_makes_first_unpacks_in_another_folder_than_the_waiting_restore():
+    backup = java_method("backupHoldingTheFlag")
+    folder = re.search(r'File staging = new File\(dir, "([\w-]+)"\)', backup).group(1)
+    waiting = re.search(r'new File\(act\.ctx\(\)\.getFilesDir\(\), "([\w-]+)"\)', java_method("restoreStaging")).group(1)
+    assert waiting == "restore-staging" and folder != waiting, (folder, waiting)
+
+
+def test_only_one_library_job_runs_at_a_time_and_the_flag_is_always_released():
+    for name in ("stageBackup", "restoreStaged", "cancelRestore"):
+        body = java_method(name)
+        assert "LIBRARY_JOB.compareAndSet(false, true)" in body and "LIBRARY_JOB.set(false)" in body, name
+        assert "finally" in body, name
