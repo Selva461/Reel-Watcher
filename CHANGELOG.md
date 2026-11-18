@@ -5,6 +5,36 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.22
+<!-- Written as S4-3 on top of 1.3.21; the number is provisional (merge order). -->
+- You can now **restore a backup**. Settings > Backup and restore > **Restore from a backup** (next to Back up now), and
+  the same button on the screen that says your library could not be read. Choose a file made by Back up now with
+  Android's own file picker. Reel Shelf checks it first (the whole file, its sizes and checksums, and that it is a
+  library this version can read) and only then shows what it would do: "Replace your library (N reels, M titles) with
+  the backup from <date> (X reels, Y titles)? Your current library is kept on the phone, not deleted." Nothing changes
+  until you tap **Restore this backup**. A file that is not a Reel Shelf backup (a plain reels.json, a notes export
+  (JSON), a photo, another ZIP), a damaged or cut-off one, one made by a newer Reel Shelf, or one that does not fit in
+  the free space is refused with a plain sentence, and nothing is changed.
+- The box **Save a backup of the current library first** is ticked by default: Reel Shelf makes a backup of what you
+  have now (as Back up now does) and only then restores. If that backup cannot be made, nothing is restored; untick the
+  box to go on without it. (A library that cannot be read cannot be backed up: it is set aside instead.)
+- Nothing is deleted. The library you had is kept in Reel Shelf's private storage as `reels.json.before-restore-<date>-<time>`
+  (and `shots.json.before-restore-...` for the list of read screenshots when the backup has one), and the screen says
+  so. If the backup has no list of read screenshots, yours is left as it is. If the reels were restored and the screenshot
+  list could not be, the screen says exactly that.
+- Restoring is refused while a job you started (notes, screenshots, an online check, a download) or the nightly run is
+  going, and never replaces a library saved by a newer Reel Shelf (the screen for that has no restore button). It
+  works on a library that cannot be read, which makes it a way back, and on a new install with no library. The
+  "The nightly run is finishing" screen still comes first on every screen. After a restore the app reads your
+  library, settings and screenshot list again; a reel you shared while the library was shut is filed into the restored
+  library once.
+- Pictures and videos, the AI models, your settings and your API keys are not in a backup, so they are not restored:
+  "Pictures and videos are not in backups; reels whose video is no longer on this phone keep their notes."
+- A backup's read-back (Back up now) now unpacks into its own folder (`backup-check`) instead of `restore-staging`, so
+  the backup made before a restore cannot empty the restore that is waiting.
+- Checked with automatic tests on a computer (the page, and the parts of the restore that need no phone, including a
+  backup restored over a real library on disk). Not tried on a phone yet: see TESTING.md, E44 to E48.
+
 ## 1.3.21
 <!-- Written and reviewed as 1.3.9 (Task 2b), before 1.3.10 to 1.3.20 existed; it keeps that text and is numbered after 1.3.20. -->
 - The nightly run and the app no longer get in each other's way. If Reel Shelf is on screen when the nightly run is

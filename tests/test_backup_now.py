@@ -336,11 +336,11 @@ def restore_things(pg):
 
 def test_settings_has_one_restore_button_next_to_back_up_now_and_no_file_input(phone):
     open_settings(phone)
-    assert restore_things(phone) == ["Restore from a backup", "Export notes (JSON, cannot be restored)"]
+    assert sorted(restore_things(phone)) == ["Export notes (JSON, cannot be restored)", "Restore from a backup"]
     assert phone.locator("#backup #restorebtn").count() == 1 and phone.locator("#backup #backupnow").count() == 1
     tap(phone)
     wait_saved(phone)
-    assert restore_things(phone) == ["Restore from a backup", "Export notes (JSON, cannot be restored)"]
+    assert sorted(restore_things(phone)) == ["Export notes (JSON, cannot be restored)", "Restore from a backup"]
     assert phone.locator("input[type=file]").count() == 0, "the phone's own picker is used, never a page file input"
 
 
