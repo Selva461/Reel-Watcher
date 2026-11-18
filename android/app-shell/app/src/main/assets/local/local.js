@@ -1231,9 +1231,9 @@ function startModelDownload(m) {
     const tot = t > 0 ? t : m.size;
     if (bar) bar.style.width = Math.round((d / tot) * 100) + "%";
     if (txt) txt.textContent = `${mb(d)} of ${mb(tot)}`;
-    modelDl = { d, t: tot };
+    modelDl = { d, t: tot, file: m.file };
   };
-  modelDl = { d: 0, t: m.size };
+  modelDl = { d: 0, t: m.size, file: m.file };  // which model: the phone has one download flag, so another model's card must not look like it downloads
   workTick();
   phone("downloadModel", "", m.file).then(() => { modelDl = null; toast("The AI model is ready"); if (location.hash === "#/settings") settingsScreen(); })
     .catch((err) => { modelDl = null; if (err.message !== "paused") toast(err.message); if (location.hash === "#/settings") settingsScreen(); });
@@ -1250,7 +1250,7 @@ function settingsScreen() {
   const m = MODELS.find((x) => x.file === settings.modelFile);
   const others = (info.installed || []).filter((f) => !MODELS.some((x) => x.file === f));
   const dl = !!info.downloading;
-  const redl = !!(info.ready && dl && m);  // downloading again over a model file that is already there
+  const redl = !!(info.ready && dl && m && modelDl && modelDl.file === m.file);  // downloading again over a model file that is already there (this card's file, not another model's download)
   const pct = m && info.partial ? Math.round((info.partial / m.size) * 100) : 0;
   const seg = (key, opts) => `<div class="seg">${opts.map(([v, l]) => `<button data-set="${key}" data-val="${esc(JSON.stringify(v))}" aria-pressed="${settings[key] === v}">${l}</button>`).join("")}</div>`;
   $app.innerHTML = `${header("Settings", "#/")}

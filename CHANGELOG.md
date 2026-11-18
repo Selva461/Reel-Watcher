@@ -10,20 +10,27 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
   The first time Settings shows one, Reel Shelf reads the file once in the background (about a minute for the big ones
   on a slow phone; the card says "Checking this model file", with a **Stop checking** button) and compares it with the
   exact published file. If it is the published file the card says "Verified: this is the published model file." The
-  answer is remembered next to the file and is not asked again until the file changes. A model you download in this
-  version is verified while it downloads, so it shows "Verified" at once.
+  answer is remembered next to the file together with its size and modified time, and is not asked again while both stay
+  the same. It is a label for your information, not a guarantee: it tells what the file was when it was read, so a file
+  copied in with its modified time kept, or damage inside the file that keeps its size and time, is not noticed until
+  the size or time changes. A model you download in this version is verified while it downloads, so it shows "Verified"
+  at once.
 - If the file is **not** the published one (damaged, cut off, or another version), nothing is deleted and the model
   keeps working for notes. The card says "This model file is not the published one. It may be damaged." and offers
   **Download again** (the new file replaces the old one only when it is complete and verified; if it fails, the old one
   stays) or **Keep using it**, which is remembered.
-- A model file you pick yourself (**Use my own model file**) is shown as "Your own file, not verified": Reel Shelf does
-  not claim it is the published one, and never checks it. Picking a file no longer replaces a model that is already there:
+- A model file you pick yourself (**Use my own model file**) is always shown as "Your own file, not verified". It is
+  never hashed or claimed verified, even when it is the published file (this differs from the design's rule 12, which
+  would have called a matching picked file verified). Picking a file no longer replaces a model that is already there:
   when the name is taken (or is the name of a model Reel Shelf downloads) the copy is kept as `name (own).litertlm`, and a
-  model download you paused is no longer disturbed by picking a file with the same name.
-- The check runs only while the app is on screen, never in the nightly run, never beside a download or a notes run, and
-  not on a battery under 15% that is not charging. It gives way at once to anything you start (a download, a notes run,
-  saving a file, picking a file, leaving the app) and can be stopped; a stopped check records nothing and the model is
-  never touched. "Ready" still only means the file exists, so nothing that worked before stops working.
+  model download you paused is no longer disturbed by picking a file with the same name. A file name with hidden
+  control characters is cleaned up and the file is kept. A copy that was cut off because the app was closed in the middle
+  is removed the next time you pick a file or tap Delete the model.
+- The check runs only while the app is on screen, never in the nightly run, never beside a download, not while a notes
+  job is writing (it can start between two reels and stops when the next one starts), and not on a battery under 15%
+  that is not charging. It gives way to anything you start (a download, a notes run, saving a file, picking a file,
+  leaving the app) and can be stopped; a stopped check records nothing and the model is never touched. "Ready" still
+  only means the file exists, so nothing that worked before stops working.
 - Checked with automatic tests on a computer (the check, its remembered answer, stopping, the rules for when it may start,
   picked files, and the Settings screen). Not tried on a phone.
 

@@ -46,9 +46,11 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
     allowWork: () => {},
     stopModel: () => { st.stopped++; keep(); },
     // st.model.verified is what Java reports for the file ("yes", "no", "unknown", "checking", "own"); st.model.kept: "Keep using it" was chosen
-    modelInfo: (name) => JSON.stringify({ file: name, ready: st.model.ready, bytes: st.model.ready ? 1.6e9 : 0, partial: st.model.partial,
-      downloading: !!st.model.downloading, backend: st.model.ready ? "gpu" : "", installed: st.model.installed,
-      verified: st.model.verified || "yes", kept: !!st.model.kept }),
+    // st.model.byFile: what differs for one model file (for example {"x.litertlm": {ready: true}}); "downloading" is one flag for the whole phone, as in Java
+    modelInfo: (name) => { const m = Object.assign({}, st.model, (st.model.byFile || {})[name] || {});
+      return JSON.stringify({ file: name, ready: m.ready, bytes: m.ready ? 1.6e9 : 0, partial: m.partial,
+      downloading: !!st.model.downloading, backend: m.ready ? "gpu" : "", installed: m.installed,
+      verified: m.verified || "yes", kept: !!m.kept }); },
     deleteModel: (name) => { st.calls.push(["deleteModel", name]); st.model.ready = false; keep(); return true; },
     // the one-time check of a model already on the phone: it starts only for "unknown" and only when Java would allow it (st.checkRefused),
     // and it ends by itself with st.model.checkResult unless st.checkHold keeps it running (the test calls window.__finishCheck())
@@ -354,6 +356,24 @@ def test_download_again_keeps_the_old_file_until_the_new_one_is_done_and_ends_ve
     assert not calls_named(phone, "deleteModel")
 
 
+def test_another_models_card_is_not_marked_downloading_again_while_a_different_model_downloads(phone):
+    """The phone has one download flag. A model that is ready must not look as if it were downloading again, with a Pause button,
+    only because another model (chosen in "Model to use") is the one downloading."""
+    gemma = "gemma-4-E4B-it.litertlm"
+    phone.open_with({"model": {"ready": False, "partial": 0, "installed": [], "byFile": {QWEN_FILE: {"ready": True, "verified": "yes"}}},
+                     "settings": json.dumps({"modelFile": gemma}), "holdDownload": True}, "#/settings")
+    phone.get_by_role("button", name="Download model").click()
+    phone.wait_for_function("() => document.getElementById('mstate').innerText === 'Downloading'")
+    assert phone.get_by_role("button", name="Pause download").count() == 1  # the model that downloads says so
+    phone.locator("#pickm").select_option(QWEN_FILE)  # now the card of a model that is ready and is not the one downloading
+    phone.wait_for_function("() => document.getElementById('mstate').innerText === 'Ready'")
+    assert phone.get_by_role("button", name="Pause download").count() == 0 and phone.get_by_text("Downloading again").count() == 0
+    phone.get_by_text("Verified: this is the published model file.").wait_for()
+    phone.locator("#pickm").select_option(gemma)  # and back: its own card still shows the download
+    phone.wait_for_function("() => document.getElementById('mstate').innerText === 'Downloading'")
+    assert phone.get_by_role("button", name="Pause download").count() == 1
+
+
 def test_a_model_file_you_picked_is_called_your_own_and_is_never_checked_or_called_verified(phone):
     phone.open_with({"model": {**ON_PHONE, "installed": ["mine.litertlm"], "verified": "own"},
                      "settings": json.dumps({"modelFile": "mine.litertlm"})}, "#/settings")
@@ -443,12 +463,20 @@ def test_java_keeps_the_model_check_out_of_the_way():
     check = body(bridge, "public String checkModel", "public void stopCheck")
     assert "ModelCheck.refuse(onScreen, act.isNight(), downloading, jobs.get() > 0," in check
     assert bridge.count("checks.start(") == 1 and bridge.index("checks.start(") > bridge.index("public String checkModel")
-    assert bridge.count("work.execute(") == 1 and "model.checks.cancel()" in body(bridge, "private void runWork", "work.execute(")
+    assert "() -> onScreen && jobs.get() == 0" in check  # asked again when the worker gets to the check: not off screen, not behind a job
+    assert bridge.count("work.execute(") == 1
+    run = body(bridge, "private void runWork", "work.execute(")
+    assert "model.checks.cancel()" in run and run.index("jobs.incrementAndGet()") < run.index("model.checks.cancel()")  # the job is counted first
     for sig in ("public void downloadModel", "public void downloadSpeech", "public void pickModel"):
         assert "model.checks.cancel()" in body(bridge, sig, "@JavascriptInterface"), sig
-    pick = body(bridge, "public void pickModel", "@JavascriptInterface")
+    pick = body(bridge, "public void pickModel", "@JavascriptInterface")  # the lambda and savePicked
     assert "ModelCheck.keepPicked(" in pick and "dest.delete()" not in pick and "renameTo(" not in pick
-    assert 'new File(model.dir(), "picked-model.tmp")' in pick  # never <name>.part: that is a paused catalog download
+    assert "ModelCheck.pickTemp(model.dir())" in pick and '"picked-model.tmp"' not in bridge  # never <name>.part: that is a paused catalog download
+    assert "catch (IOException | RuntimeException e)" in body(pick, "ModelCheck.keepPicked(", "done(id, true")  # an odd name never ends the app
+    # a copy that a killed app left behind is removed before the next copy starts, and by Delete only while no copy is running
+    assert pick.index("picking = true") < pick.index("ModelCheck.clearPickTemp(model.dir())") < pick.index("savePicked(id, uri, name)")
+    assert "picking = false" in pick[pick.index("savePicked(id, uri, name)"):]
+    assert "if (!picking) ModelCheck.clearPickTemp(model.dir())" in body(bridge, "public boolean deleteModel", "@JavascriptInterface")
     stop = body(activity, "protected void onStop()", "super.onStop()")
     assert stop.index("local.screen(false)") < stop.index("if (!working)")
 

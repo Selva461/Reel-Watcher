@@ -51,6 +51,9 @@ final class LocalBridge {
     private volatile boolean downloading;
     /** True while the app is on screen (MainActivity says so): a model check runs only then, and never at night. */
     private volatile boolean onScreen;
+    /** True from the start of a picked file's copy to its end; guarded with pickLock so deleteModel never removes a copy in progress. */
+    private volatile boolean picking;
+    private final Object pickLock = new Object();
     /** Jobs queued or running on the worker thread (generate, saving files): a model check gives way to them. */
     private final java.util.concurrent.atomic.AtomicInteger jobs = new java.util.concurrent.atomic.AtomicInteger();
     /** The revision of each library file this page has loaded or last saved (see LibraryFile): a save is refused when the file has moved on. */
@@ -81,8 +84,8 @@ final class LocalBridge {
 
     /** The one worker thread for jobs. A model check on it gives way: it is stopped first, so a job never waits behind it. */
     private void runWork(Runnable r) {
+        jobs.incrementAndGet();  // first: a check that is about to start sees the job and does not start
         model.checks.cancel();
-        jobs.incrementAndGet();
         work.execute(() -> {
             try {
                 r.run();
@@ -674,7 +677,7 @@ final class LocalBridge {
             // unknown battery does not stop a check
         }
         if (ModelCheck.refuse(onScreen, act.isNight(), downloading, jobs.get() > 0, level, charging) != null) return v;
-        boolean started = model.checks.start(work, row, f, () -> jobs.get() == 0, r -> progress("check", 0, 0));
+        boolean started = model.checks.start(work, row, f, () -> onScreen && jobs.get() == 0, r -> progress("check", 0, 0));  // asked again when the worker gets to it
         return started ? ModelCheck.CHECKING : v;
     }
 
@@ -701,6 +704,9 @@ final class LocalBridge {
         boolean a = !f.exists() || f.delete();
         boolean b = !part.exists() || part.delete();
         if (a) ModelCheck.forget(f);  // its own bookkeeping goes with it
+        synchronized (pickLock) {
+            if (!picking) ModelCheck.clearPickTemp(model.dir());  // a pick that was cut off left a copy of up to several GB; not while a pick is copying
+        }
         return a && b;
     }
 
@@ -724,39 +730,52 @@ final class LocalBridge {
                 return;
             }
             model.checks.cancel();  // a copy you started wins over a model check
-            File part = new File(model.dir(), "picked-model.tmp");
-            try (InputStream in = act.ctx().getContentResolver().openInputStream(uri); OutputStream out = new FileOutputStream(part)) {
-                if (in == null) throw new IOException("Could not open the file");
-                byte[] buf = new byte[1 << 16];
-                long total = act.sizeOf(uri);
-                long d = 0;
-                long last = 0;
-                int n;
-                while ((n = in.read(buf)) > 0) {
-                    out.write(buf, 0, n);
-                    d += n;
-                    if (d - last > 8L * 1024 * 1024) {
-                        last = d;
-                        progress("import", d, total);
-                    }
-                }
-            } catch (Exception e) {
-                //noinspection ResultOfMethodCallIgnored
-                part.delete();
-                done(id, false, "Could not copy the model: " + e.getMessage());
-                return;
+            synchronized (pickLock) {
+                picking = true;  // deleteModel leaves the temporary copy alone from here to the end of this pick
+                ModelCheck.clearPickTemp(model.dir());  // what an earlier pick that was cut off (the app was killed) left behind
             }
-            File dest;
             try {
-                dest = ModelCheck.keepPicked(part, model.dir(), name);
-            } catch (IOException e) {
-                //noinspection ResultOfMethodCallIgnored
-                part.delete();  // our own temporary copy; the file you picked is untouched
-                done(id, false, "Could not save the model file");
-                return;
+                savePicked(id, uri, name);
+            } finally {
+                picking = false;
             }
-            done(id, true, dest.getName());
         })));
+    }
+
+    /** Copies the picked file to a temporary file of its own, then keeps it as an own model (ModelCheck.keepPicked). Always ends with done(). */
+    private void savePicked(int id, Uri uri, String name) {
+        File part = ModelCheck.pickTemp(model.dir());
+        try (InputStream in = act.ctx().getContentResolver().openInputStream(uri); OutputStream out = new FileOutputStream(part)) {
+            if (in == null) throw new IOException("Could not open the file");
+            byte[] buf = new byte[1 << 16];
+            long total = act.sizeOf(uri);
+            long d = 0;
+            long last = 0;
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                d += n;
+                if (d - last > 8L * 1024 * 1024) {
+                    last = d;
+                    progress("import", d, total);
+                }
+            }
+        } catch (Exception e) {
+            //noinspection ResultOfMethodCallIgnored
+            part.delete();
+            done(id, false, "Could not copy the model: " + e.getMessage());
+            return;
+        }
+        File dest;
+        try {
+            dest = ModelCheck.keepPicked(part, model.dir(), name);
+        } catch (IOException | RuntimeException e) {  // an odd name must never end the app or leave the page waiting
+            //noinspection ResultOfMethodCallIgnored
+            part.delete();  // our own temporary copy; the file you picked is untouched
+            done(id, false, "Could not save the model file");
+            return;
+        }
+        done(id, true, dest.getName());
     }
 
     /** Runs the model once. opts: {"file", "gpu", "system", "maxTokens", "temperature"}. */

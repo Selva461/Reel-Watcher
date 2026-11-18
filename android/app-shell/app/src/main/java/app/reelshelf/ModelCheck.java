@@ -287,18 +287,53 @@ final class ModelCheck {
 
     // ------------------------------------------------------------------ a file you picked
 
+    /** The one temporary copy of a file being picked: it is moved to its final name only when it is complete. */
+    static File pickTemp(File dir) {
+        return new File(dir, "picked-model.tmp");
+    }
+
+    /** Removes what a pick that was cut off (the app was killed during the copy) left behind. Call it only while no pick is running. Never throws. */
+    static void clearPickTemp(File dir) {
+        try {
+            //noinspection ResultOfMethodCallIgnored
+            pickTemp(dir).delete();
+        } catch (RuntimeException ignored) {
+            // nothing to clean
+        }
+    }
+
+    /**
+     * The name a picked file is kept under, without ".litertlm": only the last part of the name, every control character
+     * (a NUL makes Java refuse the path) and every lone surrogate made "_", and "model" when nothing is left.
+     */
+    static String safeBase(String name) {
+        String last = new File(name == null ? "" : name).getName();
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < last.length(); i++) {
+            char c = last.charAt(i);
+            if (Character.isHighSurrogate(c) && i + 1 < last.length() && Character.isLowSurrogate(last.charAt(i + 1))) {
+                b.append(c).append(last.charAt(++i));
+            } else {
+                b.append(c < 0x20 || c == 0x7f || Character.isSurrogate(c) ? '_' : c);
+            }
+        }
+        String s = b.toString();
+        if (s.endsWith(EXT)) s = s.substring(0, s.length() - EXT.length());
+        return s.trim().isEmpty() ? "model" : s;
+    }
+
     /**
      * Moves the copy of a file the user picked (tmp) into the models folder and returns where it went. It never takes a
      * name the catalog uses (so it cannot pass as the published model) and never replaces a file that is already there:
-     * it keeps its own name when that is free, else "name (own).litertlm", "name (own 2).litertlm" and so on. Marked
-     * "own" with its size. The user's file stays exactly as it is wherever they picked it from.
+     * it keeps its own name when that is free, else "name (own).litertlm", "name (own 2).litertlm" and so on. An odd name
+     * (a control character, nothing left of it) is made safe (safeBase) and the file is kept. Marked "own" with its size.
+     * The user's file stays exactly as it is wherever they picked it from.
      */
     static File keepPicked(File tmp, File dir, String name) throws IOException {
-        String file = new File(name).getName();
-        String base = file.endsWith(EXT) ? file.substring(0, file.length() - EXT.length()) : file;
+        String base = safeBase(name);
         for (int i = 0; i < 100; i++) {
-            String candidate = i == 0 ? file : base + (i == 1 ? " (own)" : " (own " + i + ")") + EXT;
-            if (ModelCatalog.lookup(candidate) != null && !candidate.isEmpty()) continue;
+            String candidate = base + (i == 0 ? "" : i == 1 ? " (own)" : " (own " + i + ")") + EXT;
+            if (ModelCatalog.lookup(candidate) != null) continue;
             File dest = new File(dir, candidate);
             try {
                 Files.move(tmp.toPath(), dest.toPath());  // no REPLACE_EXISTING: an existing file is never overwritten

@@ -533,6 +533,72 @@ public class ModelCheckTest {
         assertArrayEquals(new byte[]{2}, Files.readAllBytes(new File(dir, "x (own).litertlm").toPath()));
     }
 
+    @Test
+    public void anOddNameNeverThrowsOutOfTheKeepStep_theFileIsKeptUnderASafeName() throws Exception {
+        String[][] cases = {
+                {"bad\u0000name.litertlm", "bad_name.litertlm"},  // a NUL makes Java refuse the path (InvalidPathException)
+                {"\u0000.litertlm", "_.litertlm"},
+                {"a\nb\tc.litertlm", "a_b_c.litertlm"},
+                {"x\uD800y.litertlm", "x_y.litertlm"},  // a lone surrogate
+                {".litertlm", "model.litertlm"},  // nothing left of the name
+                {"   .litertlm", "model.litertlm"},
+                {"", "model.litertlm"},
+                {"noextension", "noextension.litertlm"},
+                {"../../up.litertlm", "up.litertlm"},
+        };
+        for (String[] c : cases) {
+            byte[] mine = data(300, 21);
+            File kept = place(mine, c[0]);
+            assertEquals("name " + c[0].replace('\u0000', '0'), c[1], kept.getName());
+            assertEquals(dir, kept.getParentFile());
+            assertArrayEquals(mine, Files.readAllBytes(kept.toPath()));
+            assertEquals(ModelCheck.OWN, ModelCheck.read(kept).result);
+            Files.delete(kept.toPath());
+            ModelCheck.forget(kept);
+        }
+        File kept = place(data(10, 22), null);  // no name at all
+        assertEquals("model.litertlm", kept.getName());
+        assertEquals("a pair of surrogates (one character) is kept", "😀", ModelCheck.safeBase("😀.litertlm"));
+    }
+
+    @Test
+    public void anOddNameThatLooksLikeACatalogNameStillNeverTakesIt() throws Exception {
+        String catalogName = ModelCatalog.GEMMA4.file;
+        File kept = place(data(50, 23), "\u0000" + catalogName);  // not the catalog's name once made safe: a name of its own
+        assertEquals("_" + catalogName, kept.getName());
+        assertNull(ModelCatalog.lookup(kept.getName()));
+        File second = place(data(50, 24), catalogName.replace(".litertlm", "\u0000.litertlm"));
+        assertEquals(catalogName.replace(".litertlm", "_.litertlm"), second.getName());
+    }
+
+    // ------------------------------------------------------------------ what a cut-off pick leaves behind
+
+    @Test
+    public void aTemporaryCopyLeftByAKilledPickIsRemoved_andNothingElseIs() throws Exception {
+        File left = ModelCheck.pickTemp(dir);
+        assertEquals(new File(dir, "picked-model.tmp"), left);
+        Files.write(left.toPath(), data(4000, 25));
+        File paused = new File(dir, "tiny.litertlm.part");  // a paused download is not ours to remove here
+        Files.write(paused.toPath(), new byte[]{1, 2, 3});
+        ModelCheck.check(row, model, () -> false);
+        ModelCheck.clearPickTemp(dir);
+        assertFalse(left.exists());
+        assertTrue(paused.isFile());
+        assertTrue(model.isFile());
+        assertTrue(sidecar().isFile());
+        ModelCheck.clearPickTemp(dir);  // nothing there: no error
+        ModelCheck.clearPickTemp(new File(dir, "no-such-folder"));
+    }
+
+    @Test
+    public void clearingTheTemporaryCopyNeverThrowsEvenWhenItCannotBeRemoved() throws Exception {
+        File left = ModelCheck.pickTemp(dir);
+        assertTrue(left.mkdir());  // a folder with something in it: delete() says no
+        Files.write(new File(left, "x").toPath(), new byte[]{1});
+        ModelCheck.clearPickTemp(dir);
+        assertTrue(left.isDirectory());
+    }
+
     private File place(byte[] content, String name) throws IOException {
         File copy = new File(dir, "picked-model.tmp");
         Files.write(copy.toPath(), content);
