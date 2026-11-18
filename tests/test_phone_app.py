@@ -360,7 +360,7 @@ def test_big_zip64_export_is_read(phone, tmp_path):
 def test_overnight_run_does_everything_then_ends_the_notification(phone):
     phone.open_with({"shared": ["https://www.instagram.com/reel/NIG001/"], "pages": {"NIG001/embed": EMBED}, "answers": [ANSWER]}, "#/run")
     phone.get_by_role("button", name="Run everything overnight").click()
-    phone.get_by_text("Backup saved to Downloads/ReelShelf/").wait_for()
+    phone.get_by_text("Notes exported to Downloads/ReelShelf/").wait_for()
     st = phone.rn()
     assert any(c[0] == "download" for c in st["calls"]) and any(c[0] == "generate" for c in st["calls"])
     assert db_of(phone)["reels"][0]["status"] == "done" and st["saved"][-1]["name"].startswith("reel-notes-")
@@ -410,7 +410,7 @@ def test_waiting_for_instagram_export_reminder(phone):
 def test_exports_and_leaving_the_app_stops_work(phone):
     phone.open_with({"shared": ["https://www.instagram.com/reel/DDD444/", ANSWER + "\nhttps://www.instagram.com/reel/DDD444/"]})
     phone.goto(phone.url.split("#")[0] + "#/settings")
-    phone.get_by_role("button", name="Save JSON").click()
+    phone.get_by_role("button", name="Export notes (JSON, cannot be restored)").click()
     phone.get_by_text("Saved to Downloads/ReelShelf/").wait_for()
     saved = phone.rn()["saved"][0]
     data = json.loads(saved["text"])

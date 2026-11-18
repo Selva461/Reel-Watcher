@@ -179,6 +179,12 @@ const Shots = (() => {
     return n;
   }
 
+  /** How many pictures have been read so far (what a backup says it holds). Loads the list when it is not loaded yet, like opening the screen. */
+  function total() {
+    load();
+    return counts().all;
+  }
+
   function screen() {
     load();
     if (blocked) {
@@ -273,5 +279,5 @@ const Shots = (() => {
 
   function pause() { if (job && !job.finished) { job.paused = true; stop(); } }
 
-  return { screen, review, process, stop, pause, keep, reload, get job() { return job; } };
+  return { screen, review, process, stop, pause, keep, reload, total, get job() { return job; } };
 })();
