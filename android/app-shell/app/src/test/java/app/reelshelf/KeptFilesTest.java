@@ -126,14 +126,21 @@ public class KeptFilesTest {
         final KeptFiles.Confirm confirm = new KeptFiles.Confirm(() -> "tok-" + issued.incrementAndGet(), () -> clock[0]);
         java.util.function.BooleanSupplier workingNow = working::get;
 
+        /** The phone after the page has opened the library and Screenshots: both library files have been read in this process. */
         Rig() throws IOException {
-            this(tmp.newFolder());
+            this(true);
         }
 
-        Rig(File dir) {
+        /** read false: the library files have not been read in this process (a delete then cannot know their state). */
+        Rig(boolean read) throws IOException {
+            this(tmp.newFolder(), read);
+        }
+
+        Rig(File dir, boolean read) {
             this.dir = dir;
             this.reels = LibraryFile.reels(dir);
             this.shots = LibraryFile.shots(dir);
+            if (read) readLibraries();
         }
 
         KeptFiles.Env env() {
@@ -696,20 +703,80 @@ public class KeptFilesTest {
     }
 
     @Test
-    public void askingNeverReadsTheLibraryAndSoNeverRecoversOrSetsAnythingAside() throws Exception {
-        Rig r = new Rig();
-        String name = "reels.json.bad-" + S1;
-        kept(r, name, "x");
+    public void askingAndDeletingNeverReadTheLibraryAndSoNeverRecoverOrSetAnythingAside() throws Exception {
+        Rig r = new Rig(false);
         put(new File(r.dir, "reels.json"), GARBAGE);  // damaged, with a good backup: reading it would set it aside and restore the backup
         put(new File(r.dir, "reels.json.bak"), V1);
         put(new File(r.dir, "shots.json"), GARBAGE);
         put(new File(r.dir, "shots.json.bak"), SHOTS1);
+        for (String name : new String[]{"reels.json.bad-" + S1, "shots.json.before-restore-" + S2, "reels.json.bak.bad-" + S3}) kept(r, name, "x");
         String before = fingerprint(r.dir);
-        JSONObject a = r.ask(name);
-        assertTrue(a.toString(), a.getBoolean("ok"));
-        assertEquals("not read, so not recovered and nothing set aside", before, fingerprint(r.dir));
-        assertTrue(r.delete(name, a.getString("token")).ok);
-        assertEquals(before.replace(name + "=x\n", ""), fingerprint(r.dir));
+        for (String name : new String[]{"reels.json.bad-" + S1, "shots.json.before-restore-" + S2, "reels.json.bak.bad-" + S3}) {
+            String forced = r.confirm.put(KeptFiles.find(r.dir, name, UTC));  // as if it was asked: the delete must refuse by itself
+            JSONObject a = r.ask(name);
+            assertFalse(name, a.getBoolean("ok"));
+            assertEquals(name, name.startsWith("shots") ? KeptFiles.NOT_LOADED_SHOTS : KeptFiles.NOT_LOADED_REELS, a.getString("text"));
+            assertEquals(name, a.getString("text"), r.delete(name, forced).text);
+        }
+        assertEquals("not read, so not recovered, nothing set aside and nothing deleted", before, fingerprint(r.dir));
+        assertFalse("and still not read", r.reels.loaded() || r.shots.loaded());
+    }
+
+    @Test
+    public void aSetAsideFileOfAShotsListFromANewerReelShelfIsNotDeletedEvenIfScreenshotsWasNeverOpened() throws Exception {
+        Rig r = new Rig(false);
+        r.reels.read();  // the page read reels.json when it started; shots.json is read only when Screenshots is opened
+        String name = "shots.json.before-restore-" + S1;
+        kept(r, name, "the list before a restore");
+        put(new File(r.dir, "shots.json"), "{\"v\":99,\"seen\":{},\"reels\":{}}");  // saved by a newer Reel Shelf after a downgrade
+        String before = fingerprint(r.dir);
+        String forced = r.confirm.put(KeptFiles.find(r.dir, name, UTC));
+        assertEquals(KeptFiles.NOT_LOADED_SHOTS, r.ask(name).getString("text"));
+        assertEquals(KeptFiles.NOT_LOADED_SHOTS, r.delete(name, forced).text);
+        assertFalse("nothing read it to find out", r.shots.loaded());
+        assertEquals(before, fingerprint(r.dir));
+        r.shots.read();  // Screenshots is opened: the newer list locks it
+        assertTrue(r.shots.locked());
+        String again = r.confirm.put(KeptFiles.find(r.dir, name, UTC));
+        assertEquals(KeptFiles.LOCKED, r.ask(name).getString("text"));
+        assertEquals(KeptFiles.LOCKED, r.delete(name, again).text);
+        assertEquals(before, fingerprint(r.dir));
+    }
+
+    @Test
+    public void aKeptFileCanBeDeletedOnceItsOwnLibraryFileHasBeenReadAndIsFine() throws Exception {
+        Rig r = new Rig(false);
+        put(new File(r.dir, "shots.json"), SHOTS1);
+        String shotsKept = "shots.json.bad-" + S1, reelsKept = "reels.json.bad-" + S2;
+        kept(r, shotsKept, "a");
+        kept(r, reelsKept, "b");
+        assertEquals(KeptFiles.NOT_LOADED_SHOTS, r.ask(shotsKept).getString("text"));
+        assertEquals(KeptFiles.NOT_LOADED_REELS, r.ask(reelsKept).getString("text"));
+        r.shots.read();
+        assertEquals(LibraryFile.State.OK, r.shots.state());
+        assertTrue("it is the file's own library that counts", r.delete(shotsKept, r.token(shotsKept)).ok);
+        assertFalse(new File(r.dir, shotsKept).exists());
+        assertEquals("the other library was not read: its kept file is still refused", KeptFiles.NOT_LOADED_REELS, r.ask(reelsKept).getString("text"));
+        assertTrue(new File(r.dir, reelsKept).exists());
+        r.reels.read();  // no reels.json yet: a new library is fine
+        assertTrue(r.delete(reelsKept, r.token(reelsKept)).ok);
+    }
+
+    @Test
+    public void theTemporaryFilesAreNotAskedAboutTheLibraryFiles() throws Exception {
+        Rig r = new Rig(false);
+        kept(r, "restore-staging/reels.json", "staged");
+        assertTrue(r.delete(KeptFiles.TEMP_NAME, r.token(KeptFiles.TEMP_NAME)).ok);
+        assertFalse(r.reels.loaded() || r.shots.loaded());
+    }
+
+    @Test
+    public void theDeletePathNeverCallsAnythingThatReadsOrChangesALibrary() throws Exception {
+        String src = get(repoFile("android/app-shell/app/src/main/java/app/reelshelf/KeptFiles.java")).replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("//[^\\n]*", "");  // the code, not the comments
+        for (String forbidden : new String[]{".read()", ".load()", "savedByNewer", "ensureRead", "replaceWith", "startNew", "dropBackup", "snapshotTo"}) {
+            assertFalse("KeptFiles must not call " + forbidden, src.contains(forbidden));
+        }
+        assertTrue("it asks only what the library already knows", src.contains(".loaded()") && src.contains(".locked()"));
     }
 
     @Test

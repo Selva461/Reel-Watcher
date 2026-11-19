@@ -82,6 +82,8 @@ final class KeptFiles {
     static final String BUSY = "Another backup, restore or file action is already running. Wait for it to finish, then try again. Nothing was deleted.";
     static final String WORK = "Reel Shelf is busy with a job (writing notes, reading screenshots, an online check, a download or the nightly run). Stop it, or wait until it is done, then try again. Nothing was deleted.";
     static final String LOCKED = "Your library (or your screenshot list) could not be read, or was saved by a newer Reel Shelf. The files kept for safety may then be the only copy of something you need, so none is deleted now. Nothing was deleted.";
+    static final String NOT_LOADED_REELS = "Your library has not been opened since Reel Shelf started, so it is not known to be readable. Open your library once, then try again. Nothing was deleted.";
+    static final String NOT_LOADED_SHOTS = "Your list of read screenshots has not been checked since Reel Shelf started, so it is not known to be readable. Open Screenshots once, then try again. Nothing was deleted.";
     static final String WAITING = "A backup is waiting to be restored from these files. Finish or cancel that restore first. Nothing was deleted.";
     static final String NOT_DELETED = "The file could not be deleted. Nothing else was changed.";
     static final String TEMP_PARTLY = "Some of the temporary restore files could not be deleted. Look at the list again.";
@@ -378,16 +380,21 @@ final class KeptFiles {
     }
 
     /**
-     * The reasons a delete is refused that do not depend on the file. Listing and saving never ask this. A library that is locked
-     * (unreadable, or from a newer Reel Shelf) is read from the state this process already knows (it is never read here, so asking
-     * cannot recover or set aside anything): the files kept may then be the only copy of the user's data, and a newer library's
-     * set-aside files are not ours to remove (the same rule LibraryFile.dropBackup has for the backup of a newer library).
+     * The reasons a delete is refused that depend on the state of the phone, not on the file. Listing and saving never ask this. A library
+     * that is locked (unreadable, or from a newer Reel Shelf) is read from the state this process already knows (it is never read here, so
+     * asking cannot recover or set aside anything): the files kept may then be the only copy of the user's data, and a newer library's
+     * set-aside files are not ours to remove (the same rule LibraryFile.dropBackup has for the backup of a newer library). That state means
+     * something only once the library file has been read in this process (the page reads reels.json when it starts, shots.json only when
+     * Screenshots is opened): a reels.* or shots.* kept file is therefore not deleted while its own library file has not been read, and
+     * the answer says what to open. This code never reads it itself ({@link LibraryFile#loaded()} only tells). The temporary files are not
+     * a library's and are not asked.
      */
     private static String refusal(Env e, String name) {
         if (e.working.getAsBoolean()) return WORK;
         if (e.reels.locked() || e.shots.locked()) return LOCKED;
-        if (TEMP_NAME.equals(name) && e.stage.staged()) return WAITING;
-        return null;
+        if (TEMP_NAME.equals(name)) return e.stage.staged() ? WAITING : null;
+        if (name.startsWith("shots.")) return e.shots.loaded() ? null : NOT_LOADED_SHOTS;
+        return e.reels.loaded() ? null : NOT_LOADED_REELS;
     }
 
     /**
