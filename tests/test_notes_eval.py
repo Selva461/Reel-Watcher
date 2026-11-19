@@ -597,3 +597,107 @@ def test_a_prompt_with_pictures_and_sound_is_sent_as_before_until_their_size_is_
     assert phone.evaluate("(t) => Notes.estTokens(t)", prompt) > budget   # over what a text-only prompt may be, and sent whole
     assert phone.evaluate("(r) => Notes.localPrompt(r, '', { media: true })", r) == prompt and "[shortened]" not in prompt
     assert "shortened" not in phone.locator('a.list-item[href="#/r/VID001"]').inner_text()
+
+
+# ---------------------------------------------------------------- A3-2 review follow-ups: cuts inside emoji, the marker once, the transcript's room
+
+# Half of an emoji is a lone surrogate. The browser bridge turns one into U+FFFD on its way to Python, so it is looked for in the page.
+LONE_JS = r"const lone = (s) => /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(s);"
+EMOJI, FLAG = "\U0001F600", "\U0001F1EE\U0001F1F3"   # one code point of two UTF-16 units; a flag is two code points (four units)
+
+
+def _marker_problems(prompt):
+    """What is wrong with the ' [shortened]' markers of a prompt: one twice in a row, or one not at the end of its section. (A
+    transcript that `condense` cut at its fixed 7,000 characters has its marker without being listed as shortened by the budget.)"""
+    bad = []
+    for m in re.finditer(r"\[shortened\]", prompt):
+        if prompt[m.end():m.end() + 2] not in ("\n\n", ""):
+            bad.append("a marker in the middle of a section: " + repr(prompt[max(0, m.start() - 20):m.end() + 20]))
+    if "[shortened] [shortened]" in prompt:
+        bad.append("the marker twice in a row")
+    return bad
+
+
+def test_condense_never_cuts_inside_an_emoji(phone):
+    phone.open_with()
+    texts = [EMOJI * 20, ("ab " + FLAG + " ") * 10, "hello world this is long text"]
+    got = phone.evaluate("(ts) => {" + LONE_JS + """
+      return ts.map((t) => Array.from({ length: 40 }, (_, i) => { const out = Notes.condense(t, i + 1); return { out, units: out.length, lone: lone(out) }; })); }""", texts)
+    for text, outs in zip(texts, got):
+        for limit, r in enumerate(outs, 1):
+            assert r["units"] <= limit and not r["lone"] and "\ufffd" not in r["out"], (text[:12], limit, r)
+            assert r["out"] or limit < 2, (text[:12], limit)   # only a limit under one emoji can give nothing
+    assert got[0][12]["out"] == EMOJI * 6   # a limit of 13 holds six emoji, not six and a half
+
+
+def _emoji_reel(code, **fields):
+    return {"code": code, "url": f"https://example.invalid/reel/{code}/", "author": "eval_creator_99", **fields}
+
+
+def test_a_budget_cut_never_leaves_half_an_emoji_and_the_marker_is_once_at_the_end_of_its_section(phone):
+    _need_budget_api(phone)
+    words = " ".join(f"ab{i}{EMOJI * (1 + i % 3)}{FLAG}" for i in range(260))   # about 1,500 units, with spaces
+    flat = " ".join(f"w{i}{EMOJI}{FLAG}" for i in range(900))                   # about 9,000 units, one line, no punctuation
+    reels = [
+        (_emoji_reel("EMJ001", caption="a" + EMOJI * 600), ""),                  # no spaces: cut where the limit falls, 1,000 units fall inside a pair
+        (_emoji_reel("EMJ002", caption=words), ""),
+        (_emoji_reel("EMJ003", transcript=flat), ""),
+        (_emoji_reel("EMJ004", extra=words, comments=words, onscreen=words), ""),
+        (_emoji_reel("EMJ005", title=EMOJI * 100, caption=words), EMOJI * 500),   # the always-kept part too
+    ]
+    cases = [{"reel": r, "localExtra": x} for r, x in reels]
+    rows = phone.evaluate("(cs) => {" + LONE_JS + """
+      const out = [];
+      for (const c of cs) for (let budget = 400; budget <= 2600; budget += 3) {
+        const i = Notes.localPromptInfo(c.reel, c.localExtra, { budget });
+        out.push({ code: c.reel.code, budget, prompt: i.prompt, shortened: i.shortened, lone: lone(i.prompt) });
+      }
+      return out; }""", cases)
+    cut = [r for r in rows if r["shortened"]]
+    assert len(rows) > 1400 and len(cut) > 1000
+    assert {r["code"] for r in cut} == {c["reel"]["code"] for c in cases}
+    for r in rows:
+        assert not r["lone"] and "\ufffd" not in r["prompt"], f"{r['code']} at budget {r['budget']}: half an emoji in the prompt"
+        assert not _marker_problems(r["prompt"]), (r["code"], r["budget"], _marker_problems(r["prompt"]))
+
+
+def test_every_fixture_reel_has_the_shortened_marker_at_most_once_per_section_at_every_budget(phone):
+    _need_budget_api(phone)
+    rows = phone.evaluate("""(cs) => {
+      const out = [];
+      for (const c of cs) for (let budget = 400; budget <= 3600; budget += 37) {
+        const i = Notes.localPromptInfo(c.reel, c.localExtra, { budget });
+        out.push({ code: c.reel.code, budget, prompt: i.prompt, shortened: i.shortened });
+      }
+      return out; }""", CASES)
+    cut = [r for r in rows if r["shortened"]]
+    assert len(cut) > 400 and {r["code"] for r in cut} >= {"EVAL004", "EVAL005", "EVAL006", "EVAL010", "EVAL011"}
+    for r in cut:
+        assert not _marker_problems(r["prompt"]), (r["code"], r["budget"], _marker_problems(r["prompt"]))
+        for key in LABELS:
+            if LABELS[key] in r["prompt"]:
+                assert body_of(r["prompt"], key).count("[shortened]") <= 1, (r["code"], r["budget"], key)
+
+
+def test_the_transcript_takes_what_is_left_after_the_typed_text_as_whole_sentences(phone):
+    """The typed text is filled first and kept whole; the transcript then gets the tokens left, not the tokens of the whole budget:
+    its sentences are chosen (condense) to fill exactly that room, and the last one is whole."""
+    _need_budget_api(phone)
+    r = BY_CODE["EVAL004"]["reel"]
+    reel = {"code": "EVALroom", "url": r["url"], "author": r["author"], "transcript": r["transcript"], "extra": r["extra"][:3000]}
+    for left in (500, 700, 900, 1100):
+        got = phone.evaluate("""([reel, left]) => {
+          const without = Notes.estTokens(Notes.localPrompt({ ...reel, transcript: "" }, "", {}));   // what the other parts take
+          const budget = without + Notes.estTokens("\\n\\nWhat is said (transcript):\\n") + left;
+          const info = Notes.localPromptInfo(reel, "", { budget });
+          return { budget, prompt: info.prompt, shortened: info.shortened, sentences: Notes.sentences(reel.transcript), tokens: Notes.estTokens(info.prompt) };
+        }""", [reel, left])
+        prompt = got["prompt"]
+        assert got["tokens"] <= got["budget"] and got["shortened"] == ["transcript"], (left, got["tokens"], got["budget"], got["shortened"])
+        assert reel["extra"] in prompt and "What the reel says (typed by me):\n" + reel["extra"] + "\n\n" in prompt   # the typed text is whole
+        body = body_of(prompt, "transcript")
+        assert body.endswith(" [shortened]") and body.count("[shortened]") == 1
+        used = phone.evaluate("(t) => Notes.estTokens(t)", body)
+        assert left - 100 <= used <= left + 2, f"room {left} tokens, the transcript section took {used}"
+        lines = body[: -len(" [shortened]")].split("\n")
+        assert len(lines) > 3 and set(lines) <= set(got["sentences"]), f"room {left}: the last sentence is cut: {lines[-1]!r}"

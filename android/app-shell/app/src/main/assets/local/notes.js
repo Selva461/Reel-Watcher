@@ -200,8 +200,17 @@ const Notes = (() => {
     return Math.max(0, ctx - answer - estTokens(o.system) - (o.media > 0 ? Math.ceil(o.media) : 0) - Math.ceil(ctx / 20));
   }
 
+  /** The first `max` UTF-16 units of a text, without half of an emoji (a surrogate pair) at the end. */
+  function plainStart(text, max) {
+    const t = String(text);
+    let end = Math.max(0, Math.min(max, t.length));
+    if (end > 0 && end < t.length && (t.charCodeAt(end - 1) & 0xFC00) === 0xD800) end--;
+    return t.slice(0, end);
+  }
+
   /** The start of a text that `ok(ASCII characters, other characters, UTF-16 length)` still allows (`ok` counts the marker too),
-   *  cut at the last space and followed by " [shortened]"; "" when not even one word fits. */
+   *  followed by " [shortened]": cut at the last space, or where the limit falls when no space comes before it (between code
+   *  points, never inside an emoji); "" when not even one character fits. */
   function cutStart(text, ok) {
     const t = String(text);
     let ascii = 0, other = 0, end = 0, space = -1;
@@ -489,7 +498,7 @@ const Notes = (() => {
       len += r.x.length + 1;
     }
     // no sentence short enough (a text with no sentence end or line break, or only tiny lines): its start, cut at a word
-    return ranked.filter((r) => keep.has(r.i)).map((r) => r.x).join("\n") || cutStart(s, (a, o, n) => n + SHORT.length <= max) || s.slice(0, Math.max(0, max)).trim();
+    return ranked.filter((r) => keep.has(r.i)).map((r) => r.x).join("\n") || cutStart(s, (a, o, n) => n + SHORT.length <= max) || plainStart(s, max).trim();
   }
 
   // ---------------------------------------------------------------- the library as a search engine
