@@ -143,3 +143,31 @@ What you can check yourself:
 
 Dependencies are scanned for known vulnerabilities on every push and weekly (GitHub Actions, `pip-audit`), and
 Dependabot proposes updates. GitHub Actions are pinned to exact commits.
+
+## 9. Evaluating the notes on a phone (A3-4)
+
+This checks, on a real phone, whether the on-phone AI writes notes in the right format. Twelve made-up reels (EVAL001 to EVAL012, no real reel data) go onto the phone as a backup, the phone writes notes for them, and the computer judges each answer. Nothing is graded for truth: only the shape of the notes. It is a procedure, not a row in the tables above.
+
+**Before you start**
+- Reel Shelf on the phone must have **Restore from a backup** (S4-3, pull request #67). It was not merged when this was written: without it the phone cannot read the file. Check that Settings has a **Backup and restore** section with both **Back up now** and **Restore from a backup**.
+- The on-phone AI model must be downloaded and chosen in Settings. Without it Start writes quick notes without AI, and `check` says so.
+- On the computer: this repository, `uv sync`, and Chromium for Playwright (`uv run playwright install chromium`, once). The computer sends nothing anywhere.
+- **Restoring replaces the library on the phone.** The app keeps the old one on the phone, set aside as `reels.json.before-restore-<time>` and never deleted, and the box **Save a backup of the current library first** is ticked by default: leave it ticked. Best is a spare phone, or a second Android user on your phone (the app and the AI model must be installed for that user). On your own phone with your real reels, tap **Back up now** first and copy that ZIP to the computer. To go back afterwards, restore that ZIP.
+
+**Steps**
+1. On the computer, in the repository folder: `uv run python tests/notes_eval.py make-backup --out eval.zip`. The same file comes out every time. It prints a few lines; the last two are about the extra instruction (step 4).
+2. Copy `eval.zip` to the phone (Files, Drive, or `adb push eval.zip /sdcard/Download/`).
+3. On the phone: Settings > Backup and restore > **Restore from a backup** > **Choose a backup file** > `eval.zip`. The next screen asks "Replace your library?" and shows 12 reels. Keep the box ticked, tap **Restore this backup**. The library now holds the twelve made-up reels, with no notes.
+4. Optional: two of the reels (EVAL004 and EVAL011) are meant to be written with an extra instruction of 2,000 characters. That is a phone setting, not part of a backup, and there is one for all reels. To use one, paste its text from `localExtra` in `tests/fixtures/notes_eval/reels.json` into Settings > **Extra instructions for the on-phone AI**. Leave the field empty to skip it (and empty it again afterwards).
+5. Inbox tab > **Start 11** (the tile shows the number; EVAL012 is only a link, so Start skips it). Leave the phone on the charger with the app open and wait until the run is done: Gemma takes about a minute per reel (the app's own note on the model). Do not tap Stop.
+6. Settings > Backup and restore > **Back up now**. It says where the file is saved (Downloads/ReelShelf/ReelShelf-backup-....zip).
+7. Copy that new ZIP to the computer and run: `uv run python tests/notes_eval.py check ReelShelf-backup-....zip`
+
+**What `check` prints.** One block per reel. The ZIP is only read, never unpacked, and a file that is not a Reel Shelf backup is refused.
+- **PASS**: the stored answer passes all six rules. **FAIL** names the rules it broke: `parses` (not in the notes format at all), `sections` (TOPIC, a point, TAKEAWAY or a tag missing), `complete` (does not end with TAGS: usually cut off by the answer length setting), `order` (sections out of order or written twice), `no_echo` (it repeated the instructions instead of filling them in), `limits` (topic over 200 characters, 1 to 40 points, 1 to 12 tags).
+- **no answer text**: the app does not keep the text of an answer that failed, only the reason, so there is no verdict. The block shows the status, who wrote the notes, the number of tries (newer versions) and the reason, for example "The AI model failed: ..." or "The on-phone AI's answer was not in the notes format". A reel that failed on the phone counts as a failure in the result. EVAL012 is expected to have no answer text (status new).
+- The last line is the result. Exit code **0**: every stored answer passes and no reel failed. **1**: an answer broke a rule, a reel failed, or no reel had an answer to judge. **2**: the file is not a usable backup. **3**: Chromium could not be started, nothing was judged.
+
+**What this does not evaluate.** Gemma's picture and sound path: the made-up reels have no videos, so only the text prompt is tested. It does not measure tokens or speed, and it does not judge whether the notes are true. Keep the ZIPs of each run: a run before the prompt budget (A3-2) is the baseline for a run after it.
+
+**Afterwards.** Restoring leaves your settings, API keys and AI models alone. If Start found reel videos saved on the phone, they were read too (codes starting with `v`) and are in the ZIP from step 6, so do not pass that ZIP around. To get your own library back, use **Restore from a backup** with the ZIP you made first.
