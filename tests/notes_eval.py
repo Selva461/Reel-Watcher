@@ -8,19 +8,30 @@ Two things, both usable without a phone and without any model:
   committed file is exactly what the generator makes. Rewrite it with:  python tests/notes_eval.py generate
 * `check_answer(text, parse, template)`, a deterministic checker for an answer in the notes format.
 
-`make-backup` and `check` (the phone procedure, A3-4) are not here yet; they will be added to `main` below.
+The phone procedure (A3-4), written up for the owner in TESTING.md ("Evaluating the notes on a phone"):
+
+* `make-backup [--out PATH]` writes the fixture as a Reel Shelf backup ZIP that the app's Restore (S4-3) accepts;
+* `check ZIP` reads the backup the app makes afterwards and prints, per reel, the checker's verdicts for the stored answer.
 
 The checker needs the page's own reader of the format, so it is handed the page's `Notes.parse` (as `parse`) and
 `Notes.FORMAT` (as `template`) instead of keeping a copy of them here that could drift. The tests get both from the page
-the same way the other phone tests do; `check` (A3-4) can drive Chromium the way tests/fixtures/make_library_fixtures.py does.
+the same way the other phone tests do; `check` loads the page's notes.js into Chromium (Playwright, a dev dependency).
 """
 import argparse
+import hashlib
+import io
 import json
+import os
 import re
+import sys
+import zipfile
+import zlib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
 FIXTURE = HERE / "fixtures" / "notes_eval" / "reels.json"
+NOTES_JS = ROOT / "android" / "app-shell" / "app" / "src" / "main" / "assets" / "local" / "notes.js"
 
 SEED = 20261119
 START = 1767225600000  # 2026-01-01 00:00 UTC; the reels' added_at counts up from here
@@ -219,9 +230,21 @@ RULES = ("parses", "sections", "complete", "order", "no_echo", "limits")
 TOPIC_MAX, POINTS_MIN, POINTS_MAX, TAGS_MIN, TAGS_MAX = 200, 1, 40, 1, 12
 
 # A heading starts a line, like the page's own (markdown # > * _ allowed, a list dash is not), but only the names FORMAT uses.
+# The first form of the tail, `\s*[*_]*\s*`, could split a long run of blanks between its two `\s*` in thousands of ways when the
+# rest then failed to match (quadratic); `\s*(?:[*_]+\s*)?` accepts exactly the same lines and can be matched only one way.
 _HEAD = re.compile(r"^[\s>#*_]*(" + "|".join(s.replace(" ", r"\s+") for s in sorted(SECTIONS, key=len, reverse=True)) +
-                   r")\s*[*_]*\s*(?:[:：–-]\s*[*_]*\s*(.*)|$)", re.I)
-_PLACEHOLDER = re.compile(r"^\s*\d{1,3}[.)]\s*(?:\.{3}|…)\s*$", re.M)
+                   r")\s*(?:[*_]+\s*)?(?:[:：–-]\s*(?:[*_]+\s*)?(.*)|$)", re.I)
+# One line only ([^\S\n] is blank space without the line break): with \s the search was quadratic on a long run of blank
+# lines, and `check` (A3-4) now judges answers from a file that is not ours.
+_PLACEHOLDER = re.compile(r"^[^\S\n]*\d{1,3}[.)][^\S\n]*(?:\.{3}|…)[^\S\n]*$", re.M)
+# Every character of the class [\s*_"'] (\s is every Unicode space, and all of them are below U+3001), for str.rstrip: a regex that
+# ends in [\s*_"']+$ is quadratic on a long run of these characters in the middle of the text, rstrip is not.
+_TRIM = "".join(chr(i) for i in range(0x3001) if chr(i).isspace()) + "*_\"'"
+
+
+def _clean_topic(topic):
+    """The topic as written, without markdown stars, back-ticks, quotes and the blanks around it, in one line (its length is the `limits` rule)."""
+    return re.sub(r"\s+", " ", re.sub(r"\*\*|`|^[\s*_\"']+", "", topic.rstrip(_TRIM))).strip()
 
 
 def _squash(s):
@@ -278,7 +301,7 @@ def check_answer(text, parse, template):
     names = [n for n, _ in found]
     order = [SECTIONS.index(n) for n in names]
     topic = " ".join(" ".join(lines) for n, lines in found if n == "TOPIC")
-    topic = re.sub(r"\s+", " ", re.sub(r"\*\*|`|^[\s*_\"']+|[\s*_\"']+$", "", topic)).strip()
+    topic = _clean_topic(topic)
     tags = set().union(*(_tags(lines) for n, lines in found if n == "TAGS"))
     v = {
         "parses": notes is not None,
@@ -297,17 +320,283 @@ def failed(verdicts):
     return [r for r in RULES if not verdicts[r]]
 
 
+# ---------------------------------------------------------------- the phone procedure (A3-4): make-backup and check
+
+# What the app's backup reader accepts (LibraryBackup.java; restore is S4-3, PR #67). Read there, not from the design text, because
+# the real manifest differs from the design's: the app's version sits under "app" and each file's schema under "files".
+BACKUP_FORMAT, BACKUP_FORMAT_VERSION = "reelshelf-backup", 1  # LibraryBackup.FORMAT, FORMAT_VERSION
+REELS_SCHEMA = 1                                             # LibraryFile.REELS_SCHEMA and SCHEMA in local.js
+BACKUP_ENTRIES = ("manifest.json", "reels.json", "shots.json")  # the only entry names the app accepts (nothing else, no folders)
+BACKUP_CREATED_AT = "2026-01-01T00:00:00Z"                   # fixed, so the same bytes come out on every run
+BACKUP_APP = {"version_name": "notes-eval", "version_code": 0}
+BACKUP_CONTAINS = "synthetic notes-evaluation library: placeholder reels only; no settings, no API keys, no screenshots list, no pictures or videos"
+ZIP_DATE = (2026, 1, 1, 0, 0, 0)
+RAW_MAX = 20000                                              # setNotes (local.js) keeps r.raw at most this long
+EXTRA_SETTING = "Extra instructions for the on-phone AI"     # the Settings field that `localExtra` is typed in
+
+# What `check` will read from a ZIP. The evaluation library is a few hundred KB; these only stop a hostile file from filling memory.
+MAX_ZIP_BYTES = MAX_JSON_BYTES = 64 << 20
+MAX_MANIFEST_BYTES = 1 << 20                                 # the app's own limit for manifest.json
+
+RULE_HELP = {
+    "parses": "the page's own reader does not accept it as notes (not in the notes format)",
+    "sections": "TOPIC, at least one point, TAKEAWAY or at least one tag is missing",
+    "complete": "it does not end with TAGS: it was probably cut off by the answer length (Settings)",
+    "order": "sections out of order or written twice (an answer that starts over or loops)",
+    "no_echo": "it repeats the instructions of the format (\"one short line\", \"2. ...\") instead of filling them in",
+    "limits": "topic over 200 characters, no points or more than 40, or no tags or more than 12",
+}
+
+
+def backup_library(fixture=None):
+    """The fixture as the library the page stores (the reels.json of a backup): the reels as generated (status new, no notes, so
+    Start has work to do) and the stored library's other lists, empty. `localExtra` is a phone setting, not part of a library."""
+    fx = fixture or load_fixture()
+    return {"reels": fx["reels"], "inbox": fx.get("inbox") or [], "media": [], "mediaTypes": [], "schema_version": REELS_SCHEMA}
+
+
+def backup_bytes(library=None):
+    """A backup ZIP for `library` (default: the fixture's): reels.json, then manifest.json last, as the app writes them. The
+    same bytes every time: fixed entry dates, fixed order, no compression (so no zlib version can change them)."""
+    lib = backup_library() if library is None else library
+    reels = json.dumps(lib, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    manifest = {
+        "format": BACKUP_FORMAT, "format_version": BACKUP_FORMAT_VERSION, "created_at": BACKUP_CREATED_AT, "app": dict(BACKUP_APP),
+        "files": {"reels.json": {"bytes": len(reels), "sha256": hashlib.sha256(reels).hexdigest(), "schema_version": REELS_SCHEMA}},
+        "counts": {"reels": len(lib["reels"]), "titles": len(lib.get("media") or []), "screenshots": 0},
+        "contains": BACKUP_CONTAINS,
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, data in (("reels.json", reels), ("manifest.json", json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode("utf-8"))):
+            info = zipfile.ZipInfo(name, ZIP_DATE)
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 3          # not the platform's default, which would change the bytes on Windows
+            info.external_attr = 0o644 << 16
+            z.writestr(info, data)
+    return buf.getvalue()
+
+
+def make_backup(out):
+    data = backup_bytes()
+    Path(out).write_bytes(data)
+    fx = load_fixture()
+    extras = ", ".join(f"{code}: {len(text):,} characters" for code, text in fx["localExtra"].items())
+    print(f"wrote {out}: {len(fx['reels'])} made-up reels ({fx['reels'][0]['code']} to {fx['reels'][-1]['code']}), {len(data):,} bytes, no notes yet")
+    print("On the phone (needs Reel Shelf with Restore, S4-3): Settings > Backup and restore > Restore from a backup. This replaces the library there;")
+    print("the app keeps the old one on the phone, and its box 'Save a backup of the current library first' is ticked by default: leave it ticked.")
+    print(f"Two reels have an 'Also:' text ({extras}). It is the phone setting '{EXTRA_SETTING}': one text for all reels, and not part of a backup.")
+    print(f"To use one, paste it from \"localExtra\" in {FIXTURE.relative_to(ROOT).as_posix()} into that field in Settings before Start; to skip it, leave the field empty.")
+    return 0
+
+
+class BadBackup(Exception):
+    """The file is not a backup `check` can read; the message says why, in plain words."""
+
+
+def _safe(value, n=200):
+    """One printable line from anything a ZIP can hold: control and direction characters become ?, long text is cut."""
+    s = value if isinstance(value, str) else repr(value) if isinstance(value, (int, float, bool)) else ""
+    s = "".join(c if c.isprintable() else "?" for c in s[: n + 1])
+    return s if len(s) <= n else s[:n] + "..."
+
+
+def _member(z, info, limit):
+    """The entry's bytes, read in memory and never more than `limit` of them: the size it declares is not trusted."""
+    with z.open(info) as f:
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        raise BadBackup(f"\"{info.orig_filename}\" is bigger than {limit:,} bytes")
+    return data
+
+
+def _json_object(data, what):
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise BadBackup(f"{what} is not readable JSON") from None
+    if not isinstance(value, dict):
+        raise BadBackup(f"{what} is not a JSON object")
+    return value
+
+
+def read_backup(path):
+    """(manifest, library) from a backup ZIP made by the app, or BadBackup. The ZIP is read in memory: no entry is ever extracted
+    to a file, so a name such as ../x cannot write anywhere. The rules are the app's own (LibraryBackup.check): only the names
+    manifest.json, reels.json and shots.json, each once, no folders; the manifest says format reelshelf-backup, version 1, and lists
+    reels.json with its bytes and sha256, which must match. shots.json is allowed and never read. One rule of the app is NOT applied:
+    a backup whose schema_version is newer than the app's is refused by the app (NEWER_SCHEMA) but read and judged here."""
+    path = Path(path)
+    try:
+        size = path.stat().st_size if path.is_file() else -1
+    except OSError:
+        size = -1
+    if size < 0:
+        raise BadBackup("it is not a readable file")
+    if size > MAX_ZIP_BYTES:
+        raise BadBackup(f"it is bigger than {MAX_ZIP_BYTES:,} bytes")
+    try:
+        with zipfile.ZipFile(path) as z:
+            infos = z.infolist()
+            if not infos:
+                raise BadBackup("the ZIP is empty")
+            names = [i.orig_filename for i in infos]   # as written in the file: ZipInfo.filename is cut at a NUL
+            for info, name in zip(infos, names):
+                if name not in BACKUP_ENTRIES or info.is_dir():
+                    raise BadBackup(f"it contains something else (\"{_safe(name, 40)}\"): a Reel Shelf backup has only manifest.json, reels.json and shots.json")
+                if info.flag_bits & 0x1 or info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                    raise BadBackup(f"\"{name}\" is encrypted or compressed in a way the app does not write")
+            if len(set(names)) != len(names):
+                raise BadBackup("an entry is in it twice")
+            by_name = dict(zip(names, infos))
+            if "manifest.json" not in by_name:
+                raise BadBackup("it has no manifest.json (a plain reels.json or a notes export cannot be restored either)")
+            if "reels.json" not in by_name:
+                raise BadBackup("it has no reels.json")
+            manifest = _json_object(_member(z, by_name["manifest.json"], MAX_MANIFEST_BYTES), "manifest.json")
+            reels_raw = _member(z, by_name["reels.json"], MAX_JSON_BYTES)
+    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError, OverflowError, OSError):
+        raise BadBackup("it is not a ZIP, or it is damaged or incomplete") from None
+    if manifest.get("format") != BACKUP_FORMAT:
+        raise BadBackup("its manifest does not say it is a Reel Shelf backup")
+    version = manifest.get("format_version")
+    if isinstance(version, bool) or not isinstance(version, (int, float)) or version != version:
+        raise BadBackup("its manifest has no usable format_version")
+    if version > BACKUP_FORMAT_VERSION:
+        raise BadBackup("it was made by a newer Reel Shelf than this script knows")
+    if version != BACKUP_FORMAT_VERSION:
+        raise BadBackup("its manifest version is wrong")
+    files = manifest.get("files")
+    listed = files.get("reels.json") if isinstance(files, dict) else None
+    if not isinstance(listed, dict):
+        raise BadBackup("its manifest does not list reels.json")
+    if listed.get("bytes") != len(reels_raw) or str(listed.get("sha256", "")).lower() != hashlib.sha256(reels_raw).hexdigest():
+        raise BadBackup("reels.json is not what its manifest says was saved (a copy that stopped early, or a changed file)")
+    library = _json_object(reels_raw, "reels.json")
+    if not isinstance(library.get("reels"), list):
+        raise BadBackup("reels.json has no list of reels")
+    return manifest, library
+
+
+def _chromium():
+    """The Chromium the tests use (tests/test_app.py finds it), or None: Playwright then uses the browser it installed itself."""
+    try:
+        from test_app import CHROME
+        return CHROME
+    except Exception:  # noqa: BLE001  any trouble importing the test module means "use Playwright's own"
+        return None
+
+
+def parse_with_page(texts):
+    """(template, [notes or None for each text]): the page's own Notes.FORMAT and Notes.parse, run in Chromium. Only notes.js is
+    loaded (pure helpers, no screen code); it is the same Notes the whole page has."""
+    from playwright.sync_api import sync_playwright
+    source = NOTES_JS.read_text(encoding="utf-8")
+    args = ["--no-sandbox"] if getattr(os, "geteuid", lambda: 1)() == 0 else []   # a root container has no sandbox to use
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=_chromium(), args=args)
+        try:
+            page = browser.new_page()
+            page.goto("about:blank")
+            page.add_script_tag(content=source)
+            return page.evaluate("() => Notes.FORMAT"), page.evaluate("(ts) => ts.map((t) => Notes.parse(t))", texts)
+        finally:
+            browser.close()
+
+
+def _how_it_ended(r):
+    parts = [f"status {_safe(r.get('status') or '-', 30)}", f"notes by {_safe(r.get('notes_by') or '-', 30)}"]
+    tries = r.get("tries")
+    if isinstance(tries, int) and not isinstance(tries, bool) and tries > 0:
+        parts.append(f"{tries} {'try' if tries == 1 else 'tries'}")
+    return ", ".join(parts)
+
+
+def check(path):
+    """Prints, for each reel of a backup the app made after the run, the checker's verdicts for the stored answer (r.raw), or why
+    there is no answer text. Returns the exit code: 0 when every answer passes every rule and no reel failed; 1 when an answer breaks
+    a rule, a reel failed on the phone, or there was no answer to judge at all; 2 for a file that is not a usable backup; 3 when
+    Chromium cannot be started (nothing was judged). Note: a backup whose schema_version is newer than the app's is judged like
+    any other here, whereas the app's own restore refuses it (see read_backup)."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")   # a console with a legacy code page must not stop the report
+    try:
+        manifest, library = read_backup(path)
+    except BadBackup as e:
+        print(f"check: {_safe(Path(path).name, 80)} cannot be used: {e}.", file=sys.stderr)
+        return 2
+    rows = []
+    for r in library["reels"]:
+        if isinstance(r, dict):
+            raw = r.get("raw")
+            rows.append((r, raw[:RAW_MAX] if isinstance(raw, str) and raw.strip() else ""))   # the app keeps at most 20,000 characters
+    texts = [text for _, text in rows if text]
+    verdicts = {}
+    if texts:
+        try:
+            template, parsed = parse_with_page(texts)
+        except Exception as e:  # noqa: BLE001  Playwright, Chromium or its install: say what to do, judge nothing
+            why = str(e).splitlines()[0] if str(e) else ""
+            print(f"check: Chromium could not be started ({type(e).__name__}: {_safe(why, 160)}). Run  uv run playwright install chromium  once, then try again.",
+                  file=sys.stderr)
+            return 3
+        verdicts = {text: check_answer(text, lambda _t, notes=notes: notes, template) for text, notes in zip(texts, parsed)}
+    app = manifest.get("app") if isinstance(manifest.get("app"), dict) else {}
+    print(f"Reel Shelf backup {_safe(Path(path).name, 80)}: made {_safe(manifest.get('created_at'), 40) or '?'} by Reel Shelf {_safe(app.get('version_name'), 30) or '?'}, "
+          f"{len(rows)} reels")
+    passed = broke = none = failed_reels = 0
+    broken_rules = []
+    for r, text in rows:
+        code = _safe(r.get("code") or "?", 40)
+        if text:
+            v = verdicts[text]
+            names = failed(v)
+            passed, broke = passed + (not names), broke + bool(names)
+            broken_rules += [n for n in names if n not in broken_rules]
+            print(f"{code:<16} {'PASS' if v['ok'] else 'FAIL'}  " + ", ".join(f"{rule} {'ok' if v[rule] else 'FAIL'}" for rule in RULES))
+            print(f"{'':<16} {_how_it_ended(r)}")
+            continue
+        none += 1
+        failed_reels += r.get("status") == "failed"
+        print(f"{code:<16} no answer text")
+        print(f"{'':<16} {_how_it_ended(r)}")
+        why = r.get("last_fail") or r.get("error")
+        if why:
+            print(f"{'':<16} reason: {_safe(why, 300)}")
+        elif r.get("notes_by") == "auto":
+            print(f"{'':<16} these are quick notes written without the AI: was the on-phone AI model installed and chosen?")
+    if none:
+        print("  no answer text: the app does not keep the text of an answer that failed, only the reason (when it has one), so there is no verdict")
+    for rule in broken_rules:
+        print(f"  {rule}: {RULE_HELP[rule]}")
+    print(f"{len(rows)} reels: {passed} PASS, {broke} FAIL, {none} without answer text ({failed_reels} of them failed on the phone)")
+    if not texts:
+        print("RESULT: nothing to judge: no reel has an answer text. Did Start run with the on-phone AI model installed and chosen?")
+        return 1
+    ok = not broke and not failed_reels
+    print("RESULT: " + ("PASS: every stored answer passes every rule" if ok else "FAIL: see the lines above"))
+    return 0 if ok else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Notes evaluation data for the on-phone AI (synthetic placeholders only).")
     sub = ap.add_subparsers(dest="cmd", required=True)
     gen = sub.add_parser("generate", help="write the synthetic fixture (the same bytes every run)")
     gen.add_argument("--out", type=Path, default=FIXTURE, help="where to write it (default: tests/fixtures/notes_eval/reels.json)")
+    mk = sub.add_parser("make-backup", help="write the fixture as a Reel Shelf backup ZIP for Restore on a phone (the same bytes every run)")
+    mk.add_argument("--out", type=Path, default=Path("notes-eval-backup.zip"), help="where to write it (default: notes-eval-backup.zip here)")
+    ck = sub.add_parser("check", help="judge the answers in a backup the app made after the run (exit 0 pass, 1 fail, 2 not a usable backup, 3 no Chromium)")
+    ck.add_argument("zip", type=Path, help="the backup ZIP copied back from the phone")
     args = ap.parse_args(argv)
     if args.cmd == "generate":
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_bytes(fixture_bytes())
         print(f"wrote {args.out}")
+        return 0
+    if args.cmd == "make-backup":
+        return make_backup(args.out)
+    return check(args.zip)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
