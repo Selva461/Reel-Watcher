@@ -18,6 +18,8 @@ import json
 import math
 import re
 
+from urllib.parse import quote
+
 import pytest
 
 import notes_eval as ne
@@ -479,6 +481,9 @@ def test_a_missing_options_object_and_empty_lists_do_not_throw(phone):
 
 # ---------------------------------------------------------------- the Ask screen with the fake bridge
 
+NOTHING_FITS = ("None of your best notes fit the phone AI's window, so nothing was asked. "
+                'Choose Answer length "Short" in Settings (it leaves more room) or use "Ask any AI with these notes".')
+QUESTION_TOO_LONG = "Your question is too long for the phone AI. Shorten it and try again."
 MODEL_READY = {"ready": True, "partial": 0, "installed": []}
 KEY = "zorbelix"   # every library note holds this word, so the question "zorbelix" finds them all
 QWEN_CTX = 4096
@@ -623,6 +628,8 @@ def test_when_not_even_the_best_note_fits_nothing_is_sent_and_the_page_says_so(p
     before = open_ask(phone, lib)
     phone.locator("#aiAns").click()
     phone.get_by_text("None of your best notes fit the phone AI's window").wait_for()
+    # the refusal says what to do: a shorter answer leaves more room, or the copy for another AI takes all the notes
+    assert phone.locator("#toast").inner_text() == NOTHING_FITS
     assert generates(phone) == [] and phone.locator("#askLeft").count() == 0 and phone.locator(".pre").count() == 0
     stored_unchanged(phone, before)
     # the web answer still has its web results to answer from: the notes are all left out and the page says so
@@ -642,6 +649,84 @@ def test_web_results_too_long_for_the_window_and_no_notes_send_nothing_and_say_s
     phone.get_by_text("The web results are too long for the phone AI's window").wait_for()
     assert est("\n\n".join(w["text"] for w in long_web[:1])) > budget_for(QWEN_CTX, 1500, WEB_ASK_SYSTEM) - est(web_text(KEY, [], []))
     assert generates(phone) == [] and phone.locator("#askLeft").count() == 0
+
+
+LONG_QUESTION = " ".join([KEY] * 330)   # 2,969 characters, about 990 tokens
+
+
+def found_of(web):
+    return [f"[W{i + 1}] {w['title']} ({w['source']}): {w['text']}" for i, w in enumerate(web)]
+
+
+def test_a_question_that_takes_the_whole_window_is_refused_with_its_own_message_plain_and_web(phone):
+    """Answer length 3000 leaves 865 tokens for the whole prompt. The cut question uses them all, so no note and no web result fits
+    beside it: nothing is sent, and the message blames the question, not the notes."""
+    lib = ask_library(5, "small", seed=27)
+    for kind, button in (("ask", "#aiAns"), ("web", "#webAsk")):
+        web = kind == "web"
+        before = open_ask(phone, lib, {"maxTokens": 3000, **({"webLookup": True} if web else {})}, {"web": WEB_RESULTS[:2]} if web else None,
+                          hash_="#/ask?q=" + quote(LONG_QUESTION))
+        _, texts = results_texts(phone, 4 if web else 5)
+        _, used, web_used, cut = fill(kind, LONG_QUESTION, texts, found_of(WEB_RESULTS[:2]) if web else [], budget_for(QWEN_CTX, 3000, SYSTEM[kind]))
+        assert cut and used == 0 and web_used == 0, "the setup is the case: the question was cut and nothing else fits"
+        phone.locator(button).click()
+        phone.get_by_text(QUESTION_TOO_LONG).wait_for()
+        assert phone.locator("#toast").inner_text() == QUESTION_TOO_LONG
+        assert generates(phone) == [] and phone.locator("#askLeft").count() == 0 and phone.locator(".pre").count() == 0, kind
+        stored_unchanged(phone, before)
+
+
+def test_a_cut_question_that_still_reaches_the_model_because_a_web_result_fits_is_named_in_the_line(phone):
+    """The cut falls inside a long last word, which leaves a few tokens: a tiny web result goes in beside the cut question. Only then does
+    the line say the question was shortened (when nothing reaches the model, the page refuses instead)."""
+    web = [{"title": "T", "url": "https://example.invalid/t", "source": "Wikipedia", "text": "x"}]
+    budget = budget_for(QWEN_CTX, 3000, WEB_ASK_SYSTEM)
+    q = next(q for q in ("ab " * k + "z" * 120 + " tail" for k in range(400, 900)) if (lambda r: r[3] and r[2] == 1)(fill("web", q, [], found_of(web), budget)))
+    phone.open_with({"db": json.dumps({"reels": [], "inbox": []}), "model": MODEL_READY, "settings": json.dumps({"webLookup": True, "maxTokens": 3000}),
+                     "web": web, "answers": ["It says x [W1]."]}, "#/ask?q=" + quote(q))
+    phone.locator("#askLeft").wait_for()
+    (gen,) = generates(phone)
+    assert gen[1] == fill("web", q, [], found_of(web), budget)[0] and est(gen[1]) <= budget and "[shortened]" in gen[1] and "[W1] T (Wikipedia): x" in gen[1]
+    assert phone.locator("#askLeft").inner_text() == "Your question was long and was shortened."
+
+
+def test_the_left_out_line_in_its_every_form(phone):
+    phone.open_with()
+    got = phone.evaluate("""() => [
+      leftOut({ used: 5, total: 5, webUsed: 0, webTotal: 0, questionCut: false }),
+      leftOut({ used: 4, total: 5, webUsed: 0, webTotal: 0, questionCut: false }),
+      leftOut({ used: 2, total: 5, webUsed: 3, webTotal: 4, questionCut: false }),
+      leftOut({ used: 0, total: 3, webUsed: 1, webTotal: 2, questionCut: true }),
+      leftOut({ used: 3, total: 3, webUsed: 2, webTotal: 2, questionCut: true })]""")
+    assert got == ["",
+                   "1 of 5 notes did not fit and was left out (the best matches go in first).",
+                   "3 of 5 notes did not fit and were left out (the best matches go in first). 1 of 4 web results did not fit and was left out.",
+                   "3 of 3 notes did not fit and were left out (the best matches go in first). 1 of 2 web results did not fit and was left out. Your question was long and was shortened.",
+                   "Your question was long and was shortened."]
+
+
+def test_the_left_out_line_is_escaped_when_it_is_drawn(phone):
+    """The line is built from numbers and fixed words, so no input reaches it. The page's own state is set directly to prove the card
+    escapes it like every other text in the answer (a break that dropped esc() there was not caught before)."""
+    open_ask(phone, ask_library(3, "small", seed=28))
+    phone.evaluate("""() => { lastAsk.answer = { text: "x", by: "on-phone AI", left: '<img src=x onerror="window.__pwned=1">&amp;' }; askScreen(); }""")
+    phone.locator("#askLeft").wait_for()
+    assert phone.locator("#askLeft img").count() == 0
+    assert phone.locator("#askLeft").inner_text() == '<img src=x onerror="window.__pwned=1">&amp;'   # shown as text, once escaped
+    assert phone.evaluate("() => window.__pwned") is None
+
+
+def test_a_model_whose_window_is_infinity_has_no_budget_the_owners_switch_for_it(phone):
+    """`ctx: Infinity` in MODELS gives a budget that is not a number, and a budget that is not a number means no limit."""
+    lib = ask_library(8, "large")
+    open_ask(phone, lib)
+    phone.evaluate("() => { MODELS[0].ctx = Infinity; }")
+    assert phone.evaluate("() => Number.isNaN(promptBudget(Notes.ASK_SYSTEM)) && Number.isNaN(promptBudget())")
+    phone.locator("#aiAns").click()
+    phone.locator(".pre").wait_for()
+    (gen,) = generates(phone)
+    old = phone.evaluate("() => {" + OLD_JS + " return oldAnswer(lastAsk.q, lastAsk.results.slice(0, 5)); }")
+    assert gen[1] == old and est(old) > budget_for(QWEN_CTX, 800, ASK_SYSTEM) * 2 and phone.locator("#askLeft").count() == 0
 
 
 def test_ask_any_ai_with_these_notes_is_not_shortened_it_goes_to_your_own_chat_app(phone):

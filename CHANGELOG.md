@@ -16,11 +16,14 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
   your question stay, and the notes go in whole, in the order of the match, as many as fit. A note that does not fit is
   left out completely (never cut in the middle), and so are the ones after it, so [1], [2] in the answer are still the
   notes with those numbers on the screen. With "Look it up online", the web results come after the notes, in what
-  is left, each whole or left out. A question so long that it alone does not fit is cut at a word and ends with
-  "[shortened]".
+  is left, each whole or left out.
 - Under the answer, a line says plainly what was left out, for example "2 of 5 notes did not fit and were left out
-  (the best matches go in first)." Nothing about it is saved in your library. If not even your best note fits whole,
-  nothing is sent and the page tells you so (with "Look it up online", the web results alone still go).
+  (the best matches go in first)." Nothing about it is saved in your library.
+- When nothing fits, nothing is sent, and the page says why and what to do. If not even your best note fits whole, it
+  says so and suggests Answer length "Short" (more room) or "Ask any AI with these notes" (with "Look it up online",
+  the web results alone still go). A question so long that it takes the whole window leaves no room for any note: the
+  page says "Your question is too long for the phone AI. Shorten it and try again." (If a few tokens are left, so that
+  a small web result still fits beside it, the question goes cut at a word with "[shortened]" and the line says so.)
 - Not changed: "Ask any AI with these notes" still copies everything (it goes to a chat app of your own, not to
   the phone's model), the Meta AI prompt, the prompt for writing notes (1.3.26), the models and the permissions.
   The window is still a cautious 4,096 tokens for each model, and a model you pick by hand gets the smallest window.

@@ -935,7 +935,8 @@ function topicScreen(key) {
 
 let lastAsk = { q: "", answer: null, results: [] };
 
-const NOTHING_FITS = "None of your best notes fit the phone AI's window, so nothing was asked. Try \"Ask any AI with these notes\".";
+const NOTHING_FITS = "None of your best notes fit the phone AI's window, so nothing was asked. Choose Answer length \"Short\" in Settings (it leaves more room) or use \"Ask any AI with these notes\".";
+const QUESTION_TOO_LONG = "Your question is too long for the phone AI. Shorten it and try again.";  // the question took the whole window: no note fits beside it
 
 /** The line under an Ask answer when notes, web results or the question did not fit the model's window (nothing when all went in).
  *  Only shown: nothing about it is stored on a reel or in the library. */
@@ -990,7 +991,7 @@ function askScreen() {
     sync("allowWork");
     try {
       const info = Notes.answerPromptInfo(q, results.slice(0, 5), { budget: promptBudget(Notes.ASK_SYSTEM) });
-      if (!info.used) throw new Error(NOTHING_FITS);  // not even the best note fits whole: nothing is sent
+      if (!info.used) throw new Error(info.questionCut ? QUESTION_TOO_LONG : NOTHING_FITS);  // no note fits whole: nothing is sent
       const out = JSON.parse(await phone("generate", info.prompt,
         JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.ASK_SYSTEM, maxTokens: settings.maxTokens, temperature: 0.1 })));
       lastAsk.answer = { text: out.text, by: "on-phone AI", left: leftOut(info) };
@@ -1019,7 +1020,7 @@ async function webAsk(q, results, b) {
     sync("allowWork");
     try {
       const info = Notes.webAnswerPromptInfo(q, results.slice(0, 4), lastAsk.web, { budget: promptBudget(Notes.WEB_ASK_SYSTEM) });
-      if (!info.used && !info.webUsed) throw new Error(results.length ? NOTHING_FITS : "The web results are too long for the phone AI's window, so nothing was asked.");
+      if (!info.used && !info.webUsed) throw new Error(info.questionCut ? QUESTION_TOO_LONG : results.length ? NOTHING_FITS : "The web results are too long for the phone AI's window, so nothing was asked.");
       const out = JSON.parse(await phone("generate", info.prompt,
         JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.WEB_ASK_SYSTEM, maxTokens: settings.maxTokens, temperature: 0.1 })));
       lastAsk.answer = { text: Notes.markOneSource(out.text, lastAsk.web), by: "on-phone AI, with web results", left: leftOut(info) };
