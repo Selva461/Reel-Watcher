@@ -48,9 +48,9 @@ All app PRs publish a release when merged (unless #40 is merged first) and are *
 
 | PR | What | Merge commit | Merged (UTC) |
 |---|---|---|---|
-| #71 | A3-1: notes evaluation harness for the AI prompt and answer (tests only: a synthetic fixture, the answer checker, 20 passing tests and 11 expected-fail tests for the A3-2 budget) (independent review: SAFE TO MERGE) | `e2be560` | 2026-11-19 01:30 |
-| #69 | Docs: designs for P4 (memory) and A3 (prompt budget and evaluation) (independent review, three rounds: SAFE TO MERGE) | `b6304ce` | 2026-11-19 00:40 |
-| #65 | Docs: continuation record update 5 (independent fact-check: SAFE TO MERGE) | `4de00d1` | 2026-11-18 20:00 |
+| #71 | A3-1: notes evaluation harness for the AI prompt and answer (tests only: a synthetic fixture, the answer checker, 20 passing tests and 11 expected-fail tests for the A3-2 budget) (independent review: SAFE TO MERGE) | `e2be560` | 2026-11-19 01:28 |
+| #69 | Docs: designs for P4 (memory) and A3 (prompt budget and evaluation) (independent review, three rounds: SAFE TO MERGE) | `b6304ce` | 2026-11-19 00:38 |
+| #65 | Docs: continuation record update 5 (independent fact-check: SAFE TO MERGE) | `4de00d1` | 2026-11-18 19:55 |
 | #45 | R4-1b: review follow-ups for the upgrade tests (hand-made library for the Verify.migrate downgrade, reset and delete rules at rules 0, 2 and 3; pinned page clock; stricter shots check) (independent review: SAFE TO MERGE, 4 Low) | `19bbd58` | 2026-11-16 04:40 |
 | #43 | R4-1: upgrade fixtures for 14 released versions made by each tag's own page code, plus 47 round-trip tests (independent review: SAFE TO MERGE; 1 Medium and 5 Low, resolved in #45 except L2) | `d7935b6` | 2026-11-16 04:12 |
 | #42 | Docs: continuation record update | `fa3ac7b` | 2026-11-16 04:04 |
