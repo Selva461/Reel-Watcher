@@ -49,6 +49,9 @@ All app PRs publish a release when merged (unless #40 is merged first) and are *
 
 | PR | What | Merge commit | Merged (UTC) |
 |---|---|---|---|
+| #74 | Docs: design for K1, user-editable notes with preserved edits (four independent review rounds: SAFE TO MERGE; K2 to K5 left undefined) | `6a82ba4` | 2026-11-19 05:57 |
+| #73 | CI: the ffmpeg install step of `tests.yml` is bounded and retried (each apt command under `timeout`, three attempts, step capped at 10 minutes) (independent review: SAFE TO MERGE; its own run used the step on a real runner and passed) | `6d34b25` | 2026-11-19 05:28 |
+| #72 | Docs: continuation record update 6 (independent fact-check: SAFE TO MERGE) | `2d568c6` | 2026-11-19 05:28 |
 | #71 | A3-1: notes evaluation harness for the AI prompt and answer (tests only: a synthetic fixture, the answer checker, 20 passing tests and 11 expected-fail tests for the A3-2 budget) (independent review: SAFE TO MERGE) | `e2be560` | 2026-11-19 01:28 |
 | #69 | Docs: designs for P4 (memory) and A3 (prompt budget and evaluation) (independent review, three rounds: SAFE TO MERGE) | `b6304ce` | 2026-11-19 00:38 |
 | #65 | Docs: continuation record update 5 (independent fact-check: SAFE TO MERGE) | `4de00d1` | 2026-11-18 19:55 |
