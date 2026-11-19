@@ -385,7 +385,27 @@ def test_check_never_reads_more_than_its_limits_from_a_file(tmp_path, monkeypatc
     path = raw_zip(tmp_path / "bomb.zip", [("reels.json", bomb), ("manifest.json", manifest_for(bomb))])
     assert path.stat().st_size < 20000
     monkeypatch.setattr(ne, "MAX_JSON_BYTES", 100000)
+    served, real_open = [], zipfile.ZipFile.open
+
+    class Spy:   # how many bytes of an entry the reader asks for and gets: never the whole 2 MB, only one more than the limit
+        def __init__(self, f):
+            self.f = f
+
+        def read(self, n=-1):
+            data = self.f.read(n)
+            served.append(len(data))
+            return data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.f.close()
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", lambda self, *a, **k: Spy(real_open(self, *a, **k)))
     assert ne.main(["check", str(path)]) == 2 and "reels.json\" is bigger than 100,000 bytes" in capsys.readouterr().err
+    assert max(served) == 100001   # the limit and one byte more, to see that it is over
+    monkeypatch.setattr(zipfile.ZipFile, "open", real_open)
     fat = raw_zip(tmp_path / "fat.zip", [("reels.json", good["reels.json"]), ("manifest.json", b'{"pad":"' + b" " * 3000 + b'"}')])
     monkeypatch.setattr(ne, "MAX_MANIFEST_BYTES", 1000)
     assert ne.main(["check", str(fat)]) == 2 and "manifest.json\" is bigger than 1,000 bytes" in capsys.readouterr().err
