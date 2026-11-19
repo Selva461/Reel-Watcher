@@ -584,6 +584,29 @@ def test_the_web_answer_is_budgeted_too_and_the_line_names_notes_and_web_results
     stored_unchanged(phone, before)
 
 
+@pytest.mark.parametrize("kind", ["ask", "web"])
+def test_the_ask_budget_counts_the_calls_own_system_text_to_the_token(phone, kind):
+    """The edge is put exactly where two notes fit with the Ask's own system text and would not with the notes' one (131 tokens more):
+    the answer length is chosen so the budget is 5 tokens above what the first two notes need."""
+    lib = ask_library(6, "medium", seed=26)
+    state = {"webLookup": True} if kind == "web" else {}
+    extra = {"web": WEB_RESULTS[:1]} if kind == "web" else None
+    open_ask(phone, lib, state, extra)
+    _, texts = results_texts(phone, 4 if kind == "web" else 5)
+    need = est(TEXT[kind](KEY, texts[:2], []))
+    system = SYSTEM[kind]
+    answer = QWEN_CTX - est(system) - math.ceil(QWEN_CTX / 20) - (need + 5)   # budget_for(...) is need + 5
+    assert 64 <= answer <= 3000 and budget_for(QWEN_CTX, answer, system) == need + 5
+    open_ask(phone, lib, {**state, "maxTokens": answer}, extra)
+    phone.locator("#webAsk" if kind == "web" else "#aiAns").click()
+    phone.locator(".pre").wait_for()
+    (gen,) = generates(phone)
+    assert gen[2]["maxTokens"] == answer and gen[2]["system"] == system
+    assert "[2] " in gen[1] and "[3] " not in gen[1], "two notes fit with the call's own system text"
+    found = [f"[W1] {WEB_RESULTS[0]['title']} ({WEB_RESULTS[0]['source']}): {WEB_RESULTS[0]['text']}"] if kind == "web" else []
+    assert est(gen[1]) <= need + 5 and gen[1] == fill(kind, KEY, texts, found, need + 5)[0]
+
+
 def test_a_web_answer_that_fits_is_the_old_prompt_and_has_no_line(phone):
     lib = ask_library(3, "small", seed=24)
     before = open_ask(phone, lib, {"webLookup": True}, {"web": WEB_RESULTS[:2]})
@@ -609,6 +632,16 @@ def test_when_not_even_the_best_note_fits_nothing_is_sent_and_the_page_says_so(p
     (gen,) = generates(phone)
     assert "My notes:" not in gen[1] and "[W1] " in gen[1]
     assert phone.locator("#askLeft").inner_text() == "3 of 3 notes did not fit and were left out (the best matches go in first)."
+
+
+def test_web_results_too_long_for_the_window_and_no_notes_send_nothing_and_say_so(phone):
+    """Web results in another script cost 2 tokens a character: four of 1,400 characters are more than the window holds."""
+    long_web = [{**w, "text": ne.Writer(ne.Rng(60 + i), ne.CYRILLIC).prose(1400)} for i, w in enumerate(WEB_RESULTS)]
+    state = json.dumps({"webLookup": True, "maxTokens": 1500})
+    phone.open_with({"db": json.dumps({"reels": [], "inbox": []}), "model": MODEL_READY, "settings": state, "web": long_web, "answers": ["x"]}, f"#/ask?q={KEY}")
+    phone.get_by_text("The web results are too long for the phone AI's window").wait_for()
+    assert est("\n\n".join(w["text"] for w in long_web[:1])) > budget_for(QWEN_CTX, 1500, WEB_ASK_SYSTEM) - est(web_text(KEY, [], []))
+    assert generates(phone) == [] and phone.locator("#askLeft").count() == 0
 
 
 def test_ask_any_ai_with_these_notes_is_not_shortened_it_goes_to_your_own_chat_app(phone):

@@ -1019,7 +1019,7 @@ async function webAsk(q, results, b) {
     sync("allowWork");
     try {
       const info = Notes.webAnswerPromptInfo(q, results.slice(0, 4), lastAsk.web, { budget: promptBudget(Notes.WEB_ASK_SYSTEM) });
-      if (!info.used && !info.webUsed) throw new Error(NOTHING_FITS);
+      if (!info.used && !info.webUsed) throw new Error(results.length ? NOTHING_FITS : "The web results are too long for the phone AI's window, so nothing was asked.");
       const out = JSON.parse(await phone("generate", info.prompt,
         JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.WEB_ASK_SYSTEM, maxTokens: settings.maxTokens, temperature: 0.1 })));
       lastAsk.answer = { text: Notes.markOneSource(out.text, lastAsk.web), by: "on-phone AI, with web results", left: leftOut(info) };
