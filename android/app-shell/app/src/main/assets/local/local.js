@@ -1429,14 +1429,16 @@ function keptTitle(it) {
   const what = it.library === "shots" ? "screenshot list" : "library";
   if (it.kind === "temp") return "Temporary restore files";
   if (it.kind === "before_restore") return `Your ${what} before a restore`;
-  if (it.kind === "bad_backup") return `Damaged earlier copy of your ${what}`;
-  if (it.kind === "bad") return `Your ${what} that could not be read`;
+  if (it.kind === "bad_backup") return `Earlier copy of your ${what}, set aside`;
+  if (it.kind === "bad") return `Your ${what}, set aside`;
   return "A file kept for safety";
 }
+// A set-aside file is not known to be damaged (a good copy can be set aside when restoring it failed, and a file nobody had checked yet is set aside before a save): never say it is.
 function keptWhy(it) {
+  const what = it.library === "shots" ? "screenshot list" : "library";
   if (it.kind === "temp") return "Left over from checking a backup file. Your library is not affected.";
   if (it.kind === "before_restore") return "Kept when a backup replaced it.";
-  if (it.kind === "bad" || it.kind === "bad_backup") return "Set aside, not deleted, when it could not be read.";
+  if (it.kind === "bad" || it.kind === "bad_backup") return `Earlier copy set aside when your ${what} could not be read. It may still hold your data.`;
   return "";
 }
 function keptCard(it) {

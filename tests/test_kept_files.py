@@ -80,6 +80,8 @@ KEPT_RN = r"""
       const a = st.ask || {};
       if (a.raw !== undefined) { keep(); return a.raw; }
       if (a.fail !== undefined) { keep(); return JSON.stringify({ ok: false, text: a.fail }); }
+      const lib = name.startsWith("shots.") ? "shots" : "reels";
+      if (st.notLoaded && st.notLoaded[lib]) { keep(); return JSON.stringify({ ok: false, text: lib === "shots" ? window.__notLoadedShots : window.__notLoadedReels }); }
       const it = find(name);
       if (!it) { keep(); return JSON.stringify({ ok: false, text: window.__gone }); }
       st.pending = { name, token: "ktok-" + st.askCalls.length };
@@ -109,8 +111,10 @@ KEPT_RN = r"""
   });
   window.__gone = "%GONE%";
   window.__notConfirmed = "%NOT_CONFIRMED%";
+  window.__notLoadedShots = "%NOT_LOADED_SHOTS%";
+  window.__notLoadedReels = "%NOT_LOADED_REELS%";
 })();
-""".replace("%GONE%", SENT["GONE"]).replace("%NOT_CONFIRMED%", SENT["NOT_CONFIRMED"])
+""".replace("%GONE%", SENT["GONE"]).replace("%NOT_CONFIRMED%", SENT["NOT_CONFIRMED"]).replace("%NOT_LOADED_SHOTS%", SENT["NOT_LOADED_SHOTS"]).replace("%NOT_LOADED_REELS%", SENT["NOT_LOADED_REELS"])
 
 
 def open_kept(pg, hash_="#/kept", kept=None, scripts=(), with_lib=False, **state):
@@ -196,13 +200,30 @@ def test_the_list_shows_every_file_in_the_order_the_phone_gave_with_what_it_is_w
     assert len(got) == 5
     assert got[0] == (f"Your library before a restore Kept since {date_of(phone, AT_RESTORE)} · {size_of(phone, 4404019)} Kept when a backup replaced it. {NAME_RESTORE} "
                       "Save to Downloads Delete")
-    assert got[1] == f"Your screenshot list that could not be read Kept since {date_of(phone, AT_BAD_SHOTS)} · 51 KB Set aside, not deleted, when it could not be read. {NAME_BAD_SHOTS} Save to Downloads Delete"
-    assert got[2].startswith("Damaged earlier copy of your library Kept since") and "700 bytes" in got[2] and NAME_BAD_BAK in got[2]
-    assert got[3].startswith("Your library that could not be read Kept since") and "· 0 bytes" in got[3] and NAME_BAD in got[3]
+    assert got[1] == (f"Your screenshot list, set aside Kept since {date_of(phone, AT_BAD_SHOTS)} · 51 KB "
+                      f"Earlier copy set aside when your screenshot list could not be read. It may still hold your data. {NAME_BAD_SHOTS} Save to Downloads Delete")
+    assert got[2].startswith("Earlier copy of your library, set aside Kept since") and "700 bytes" in got[2] and NAME_BAD_BAK in got[2]
+    assert got[3].startswith("Your library, set aside Kept since") and "· 0 bytes" in got[3] and NAME_BAD in got[3]
     assert got[4] == f"Temporary restore files 3 files, changed {date_of(phone, AT_BAD)} · 15 KB Left over from checking a backup file. Your library is not affected. Delete"
     assert phone.get_by_role("button", name="Save to Downloads").count() == 4, "not for the temporary files"
     assert phone.get_by_role("button", name="Delete").count() == 5
     assert "keptFiles" == order(phone)[0] and phone.rn()["listCalls"] == 1
+
+
+def test_a_set_aside_file_is_never_called_damaged_because_it_may_still_hold_the_data(phone):
+    # a good copy is set aside too (restoring it failed, or nobody had checked the file yet): the page does not know it is broken, and says so
+    open_kept(phone)
+    listed(phone)
+    text = card(phone)
+    assert "amaged" not in text and "Set aside, not deleted" not in text and "that could not be read" not in text
+    got = cards(phone)
+    for i, what in ((1, "screenshot list"), (2, "library"), (3, "library")):
+        assert f"Earlier copy set aside when your {what} could not be read. It may still hold your data." in got[i], i
+    assert "It may still hold your data." not in got[0] and "It may still hold your data." not in got[4], "a library before a restore and the temporary files are not that"
+    to_confirm(phone, NAME_BAD_BAK)
+    assert phone.locator("#kquestion").inner_text().startswith('Delete "Earlier copy of your library, set aside", the file ' + NAME_BAD_BAK)
+    assert "Your current library is not touched. If you might need this file, cancel and save it to Downloads first." in card(phone)
+    assert "amaged" not in card(phone)
 
 
 def test_an_empty_list_says_nothing_is_kept_and_has_no_buttons(phone):
@@ -411,7 +432,7 @@ def test_confirming_deletes_that_file_with_the_token_the_phone_gave_once_and_rea
     assert rn["deleted"] == [NAME_BAD_SHOTS]
     assert [x["name"] for x in rn["kept"]] == [NAME_RESTORE, NAME_BAD_BAK, NAME_BAD, TEMP], "only that file is gone"
     text = card(phone)
-    assert "Deleted: Your screenshot list that could not be read (51 KB). It cannot be brought back." in text
+    assert "Deleted: Your screenshot list, set aside (51 KB). It cannot be brought back." in text
     assert NAME_BAD_SHOTS not in text and len(cards(phone)) == 4
     assert phone.locator("#kquestion").count() == 0, "back on the list"
 
@@ -490,7 +511,7 @@ def test_delete_is_refused_while_the_nightly_run_is_going_or_a_backup_or_restore
     assert "askDeleteKept" not in order(phone) and not phone.rn().get("deleteCalls")
 
 
-@pytest.mark.parametrize("key", ["WORK", "LOCKED", "BUSY", "WAITING", "NOT_KEPT"])
+@pytest.mark.parametrize("key", ["WORK", "LOCKED", "BUSY", "WAITING", "NOT_KEPT", "NOT_LOADED_REELS", "NOT_LOADED_SHOTS"])
 def test_the_phones_refusal_at_the_ask_is_shown_as_it_is_and_no_confirm_screen_opens(phone, key):
     sentence = SENT[key]
     open_kept(phone, ask={"fail": sentence})
@@ -522,6 +543,25 @@ def test_a_file_that_is_gone_when_asked_says_so_and_the_list_is_read_again_witho
     assert alert(phone) == SENT["GONE"]
     phone.wait_for_function("(n) => !document.body.innerText.includes(n)", arg=NAME_BAD)
     assert len(cards(phone)) == 4
+
+
+@pytest.mark.parametrize("which,name,other", [("shots", NAME_BAD_SHOTS, NAME_RESTORE), ("reels", NAME_BAD, NAME_BAD_SHOTS)])
+def test_a_kept_file_of_a_library_file_that_was_never_read_says_what_to_open_and_works_once_it_was(phone, which, name, other):
+    sentence = SENT["NOT_LOADED_SHOTS" if which == "shots" else "NOT_LOADED_REELS"]
+    assert ("Open Screenshots once" if which == "shots" else "Open your library once") in sentence
+    open_kept(phone, notLoaded={which: True})
+    listed(phone)
+    delete_button(phone, name).click()
+    phone.locator("#app [role=alert]").wait_for()
+    assert alert(phone) == sentence
+    assert phone.locator("#kquestion").count() == 0 and not phone.rn().get("deleteCalls") and phone.rn()["kept"] == LIST
+    to_confirm(phone, other)  # the other library's file is not affected, and the page is not stuck
+    phone.get_by_role("button", name="Cancel").click()
+    phone.evaluate("() => { window.__rn.notLoaded = {}; }")  # the library (or Screenshots) was opened meanwhile
+    to_confirm(phone, name)
+    confirm_button(phone).click()
+    phone.locator("#app [role=status]").wait_for()
+    assert phone.rn()["deleted"] == [name]
 
 
 def test_the_phones_refusal_at_the_delete_is_shown_and_the_file_stays(phone):
@@ -693,6 +733,6 @@ def test_keptfiles_removes_files_in_exactly_one_place_and_never_a_folder():
 
 
 def test_the_java_sentences_were_found_so_the_refusal_tests_above_are_not_empty():
-    assert {"NOT_KEPT", "GONE", "CHANGED", "NOT_CONFIRMED", "BUSY", "WORK", "LOCKED", "WAITING", "NOT_DELETED", "LIST_FAILED", "TEMP_SAVE", "READ_BACK", "GENERIC_SAVE", "DISK_FULL"} <= set(SENT)
+    assert {"NOT_KEPT", "GONE", "CHANGED", "NOT_CONFIRMED", "BUSY", "WORK", "LOCKED", "NOT_LOADED_REELS", "NOT_LOADED_SHOTS", "WAITING", "NOT_DELETED", "LIST_FAILED", "TEMP_SAVE", "READ_BACK", "GENERIC_SAVE", "DISK_FULL"} <= set(SENT)
     assert all(s.endswith(".") for k, s in SENT.items() if k not in ("TEMP_NAME", "STAMP_FORMAT", "EMPTY", "TAIL"))
     assert ASIDE.startswith("reels.json.before-restore-"), "the name the restore screen shows is one the list would show"

@@ -10,9 +10,11 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 - New: Settings > Backup and restore > **Files kept for safety**. Reel Shelf never deletes a library file it could not
   read, or the library a restore replaced: it sets them aside in its private storage. Until now they were invisible and
   took space for ever. The new screen lists them, newest first, with what each one is, the date it was set aside and its
-  size: your library or screenshot list **that could not be read**, a **damaged earlier copy** of one, and **your library
-  (or screenshot list) before a restore**. Leftover files from checking a backup (`restore-staging`, `backup-check`) are
-  one row, **Temporary restore files**, with their total size.
+  size: your library or screenshot list **set aside**, an **earlier copy** of one set aside, and **your library (or
+  screenshot list) before a restore**. A set-aside file is never called damaged: it was set aside when the library could not
+  be read, but it can be a good copy (for example when restoring it failed), so the screen says "It may still hold your
+  data". Leftover files from checking a backup (`restore-staging`, `backup-check`) are one row, **Temporary restore
+  files**, with their total size.
 - **Save to Downloads** puts a copy of one of them in Downloads/ReelShelf as a `.txt` file (named like
   `reels-before-restore-<date>-<time>.txt`), the same way Back up now does: it only appears in Downloads once it has been
   read back and found complete, and it is deleted again if anything goes wrong. The screen says that the copy is private
@@ -24,9 +26,11 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
   from the phone." Only **Delete this file** on that screen deletes it (one file; never a folder; the confirmation works
   once and runs out after two minutes). Delete is refused, with a plain sentence and nothing deleted, while a job you
   started or the nightly run is going, while a backup or restore is running, when the library or the screenshot list cannot
-  be read or was saved by a newer Reel Shelf (the files kept may then be the only copy of something you need), when a
-  restore is waiting for the temporary files, and when the file changed after you looked at it. Listing and saving are never
-  refused.
+  be read or was saved by a newer Reel Shelf (the files kept may then be the only copy of something you need), when the
+  library file a kept file belongs to has not been opened yet since Reel Shelf started (the sentence says what to open:
+  your library, or Screenshots; the library is opened by the app at start, the screenshot list only when you open
+  Screenshots, and Delete never opens either itself), when a restore is waiting for the temporary files, and when the file
+  changed after you looked at it. Listing and saving are never refused.
 - Only these files are ever listed or touched: `reels.json` / `shots.json` followed by `.bad-<date>-<time>`,
   `.bak.bad-<date>-<time>` or `.before-restore-<date>-<time>` (with `-2`, `-3` ... when two were set aside in the same
   second), and the plain files directly inside `restore-staging` and `backup-check`. Never your current library, its previous
