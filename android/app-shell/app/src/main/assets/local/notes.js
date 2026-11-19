@@ -175,22 +175,128 @@ const Notes = (() => {
     return `${head}\n\n${FORMAT}\n\nThe reels:\n${reels.map((r, i) => `${i + 1}. ${r.url}`).join("\n")}`;
   }
 
-  function localPrompt(reel, extra, opts = {}) {
-    const yt = isYoutube(reel);
-    const parts = [yt ? "Here is a YouTube video (title, description and what is said in it)." : "Here is what could be read from an Instagram reel."];
-    if (reel.url) parts.push(`Link: ${reel.url}`);
-    if (reel.title) parts.push(`Title: ${reel.title}`);
-    if (reel.author) parts.push(`Creator: ${yt ? "" : "@"}${reel.author}`);
-    if (reel.caption) parts.push(`${yt ? "Description" : "Caption"}:\n${reel.caption.slice(0, 3000)}`);
-    if (reel.transcript) parts.push(`What is said (transcript):\n${condense(reel.transcript, 7000)}`);
-    if (reel.onscreen) parts.push(`Text shown on screen in the reel:\n${reel.onscreen.slice(0, 2000)}`);
-    if (reel.comments) parts.push(`Top comments from viewers:\n${reel.comments.slice(0, 2500)}`);
-    if (opts.media) parts.splice(1, 0, "You also get pictures from the reel (key frames) and its first 30 seconds of sound: use them.");
-    if (reel.extra) parts.push(`What the reel says (typed by me):\n${reel.extra.slice(0, 6000)}`);
-    parts.push(`Write notes in exactly this format:\n\n${FORMAT}`);
-    if (extra && extra.trim()) parts.push(`Also: ${extra.trim()}`);
-    return parts.join("\n\n");
+  // ---------------------------------------------------------------- the prompt for the on-phone AI, and its budget
+  // The model has a window (prompt and answer together). A prompt that fits it is sent as it is; a longer one is shortened in a
+  // fixed order, by an estimate of its size in tokens (design: docs/design/A3-prompt-budget.md).
+
+  const SHORT = " [shortened]";  // how a text that was cut to fit ends
+
+  const tokensOf = (ascii, other) => Math.ceil(ascii / 3) + 2 * other;
+  /** [ASCII characters, other characters (code points)] of a text. */
+  function counts(text) {
+    let ascii = 0, other = 0;
+    for (const ch of String(text == null ? "" : text)) { if (ch.charCodeAt(0) < 128) ascii++; else other++; }
+    return [ascii, other];
   }
+  /** A deliberately pessimistic size in tokens (no tokenizer is available): ASCII characters / 3, plus 2 for every other character. */
+  function estTokens(text) { return tokensOf(...counts(text)); }
+
+  /** Tokens left for the whole prompt: the window less the answer (clamped as LocalModel.java clamps it), the system text, the
+   *  reserve for pictures and sound, and 5% of the window for the chat template. An unknown window counts as 4096. */
+  function promptBudget(o = {}) {
+    const ctx = o.ctx > 0 ? Math.floor(o.ctx) : 4096;
+    const asked = Math.trunc(+o.answer);
+    const answer = Math.max(64, Math.min(Number.isFinite(asked) ? asked : 800, 3000));
+    return Math.max(0, ctx - answer - estTokens(o.system) - (o.media > 0 ? Math.ceil(o.media) : 0) - Math.ceil(ctx / 20));
+  }
+
+  /** The start of a text that `ok(ASCII characters, other characters, UTF-16 length)` still allows (`ok` counts the marker too),
+   *  cut at the last space and followed by " [shortened]"; "" when not even one word fits. */
+  function cutStart(text, ok) {
+    const t = String(text);
+    let ascii = 0, other = 0, end = 0, space = -1;
+    for (const ch of t) {
+      const a = ch.charCodeAt(0) < 128;
+      if (!ok(ascii + (a ? 1 : 0), other + (a ? 0 : 1), end + ch.length)) break;
+      if (a) ascii++; else other++;
+      if (/\s/.test(ch)) space = end;
+      end += ch.length;
+    }
+    if (end < t.length && /\s/.test(t[end])) space = end;
+    const body = t.slice(0, space > 0 ? space : end).trimEnd();
+    return body ? body + SHORT : "";
+  }
+
+  /** The prompt for the phone's AI and the names of the texts that were shortened or left out to fit `opts.budget` (tokens; no
+   *  budget: no limit). A prompt that already fits is exactly the prompt built without a budget. Otherwise the part that is always
+   *  kept (the first lines, link, creator, the format with its line, the picture sentence) is counted first; if it is over the
+   *  budget, your 'Also:' text is cut, then the title. Then each text takes the tokens that are left, in this order: typed
+   *  text, transcript, the first 1,000 characters of the caption, text on screen, the rest of the caption, comments. */
+  function localPromptInfo(reel, extra, opts = {}) {
+    const yt = isYoutube(reel);
+    const budget = Number.isFinite(opts.budget) ? opts.budget : Infinity;
+    const label = { title: "Title: ", caption: yt ? "Description:\n" : "Caption:\n", transcript: "What is said (transcript):\n",
+      onscreen: "Text shown on screen in the reel:\n", comments: "Top comments from viewers:\n", typed: "What the reel says (typed by me):\n", also: "Also: " };
+    const build = (v) => {  // a part whose text is undefined is left out
+      const parts = [yt ? "Here is a YouTube video (title, description and what is said in it)." : "Here is what could be read from an Instagram reel."];
+      if (opts.media) parts.push("You also get pictures from the reel (key frames) and its first 30 seconds of sound: use them.");
+      if (reel.url) parts.push(`Link: ${reel.url}`);
+      if (v.title !== undefined) parts.push(label.title + v.title);
+      if (reel.author) parts.push(`Creator: ${yt ? "" : "@"}${reel.author}`);
+      for (const k of ["caption", "transcript", "onscreen", "comments", "typed"]) if (v[k] !== undefined) parts.push(label[k] + v[k]);
+      parts.push(`Write notes in exactly this format:\n\n${FORMAT}`);
+      if (v.also !== undefined) parts.push(label.also + v.also);
+      return parts.join("\n\n");
+    };
+    const want = {  // every text as it goes in when there is room: the fixed caps of each source
+      title: reel.title || undefined,
+      caption: reel.caption ? reel.caption.slice(0, 3000) : undefined,
+      transcript: reel.transcript ? condense(reel.transcript, 7000) : undefined,
+      onscreen: reel.onscreen ? reel.onscreen.slice(0, 2000) : undefined,
+      comments: reel.comments ? reel.comments.slice(0, 2500) : undefined,
+      typed: reel.extra ? reel.extra.slice(0, 6000) : undefined,
+      also: extra && extra.trim() ? extra.trim() : undefined,
+    };
+    const full = build(want);
+    if (!(estTokens(full) > budget)) return { prompt: full, shortened: [] };
+
+    const got = { title: want.title, also: want.also };
+    // what is in the prompt now, plus the label and separator of the part `k` that comes next ([ASCII, other] counts)
+    const baseFor = (k) => { const [a, o] = counts(build(got)), [la, lo] = counts("\n\n" + label[k]); return [a + la, o + lo]; };
+    const cost = (b, text) => { const [a, o] = counts(text); return tokensOf(b[0] + a, b[1] + o); };
+    // a text that goes after `b`: whole, or its start cut at a word (with the marker), or "" when not even a word of it fits
+    const place = (text, b, limit = budget) => {
+      if (cost(b, text) <= limit) return text;
+      const [ma, mo] = counts(SHORT);
+      return cutStart(text, (a, o) => tokensOf(b[0] + ma + a, b[1] + mo + o) <= limit);
+    };
+    // the transcript in what is left: its most informative sentences (condense), narrowed until they fit
+    const placeTranscript = (b) => {
+      if (cost(b, want.transcript) <= budget) return want.transcript;
+      const room = budget - tokensOf(b[0], b[1]);
+      let max = Math.min(7000, Math.max(0, room * 3));
+      for (let i = 0; i < 10 && max > SHORT.length; i++) {
+        let out = condense(reel.transcript, max);
+        if (!out) break;
+        if (!out.endsWith(SHORT)) out += SHORT;
+        if (cost(b, out) <= budget) return out;
+        max = Math.floor(max * Math.min(0.95, room / estTokens(out)));
+      }
+      return place(want.transcript, b);
+    };
+    const put = (k, text, reserve = 0) => {
+      const b = baseFor(k);
+      got[k] = (k === "transcript" ? placeTranscript(b) : place(text, b, budget - reserve)) || undefined;
+    };
+
+    // 1. the part that is always kept: when it is over the budget, your 'Also:' text is cut first, then the title
+    if (estTokens(build(got)) > budget) {
+      if (got.also !== undefined) { got.also = undefined; got.also = place(want.also, baseFor("also")) || undefined; }
+      if (got.title !== undefined && estTokens(build(got)) > budget) { got.title = undefined; got.title = place(want.title, baseFor("title")) || undefined; }
+    }
+    // 2. the texts, each in what is left of the budget
+    if (want.typed !== undefined) put("typed", want.typed);
+    if (want.transcript !== undefined) put("transcript");
+    const first = want.caption === undefined ? "" : want.caption.slice(0, 1000);
+    if (want.caption !== undefined) put("caption", first);
+    const more = want.caption !== undefined && got.caption === first && want.caption.length > 1000;  // the rest of the caption is still to come
+    if (want.onscreen !== undefined) put("onscreen", want.onscreen, more ? estTokens(SHORT) : 0);  // keeps room to mark a cut caption
+    if (more) { got.caption = undefined; put("caption", want.caption); }
+    if (want.comments !== undefined) put("comments", want.comments);
+    return { prompt: build(got), shortened: Object.keys(want).filter((k) => want[k] !== undefined && got[k] !== want[k]) };
+  }
+
+  function localPrompt(reel, extra, opts = {}) { return localPromptInfo(reel, extra, opts).prompt; }
 
   /** How much there is to write notes from (the phone's AI cannot watch the video). */
   function material(reel) {
@@ -382,7 +488,8 @@ const Notes = (() => {
       keep.add(r.i);
       len += r.x.length + 1;
     }
-    return ranked.filter((r) => keep.has(r.i)).map((r) => r.x).join("\n");
+    // no sentence short enough (a text with no sentence end or line break, or only tiny lines): its start, cut at a word
+    return ranked.filter((r) => keep.has(r.i)).map((r) => r.x).join("\n") || cutStart(s, (a, o, n) => n + SHORT.length <= max) || s.slice(0, Math.max(0, max)).trim();
   }
 
   // ---------------------------------------------------------------- the library as a search engine
@@ -889,7 +996,7 @@ const Notes = (() => {
     return lines.map((l) => String(l).trim()).filter((l) => l.length > 2 && !COMMENT_NOISE.test(l) && !/^\d+[smhdw]\b/.test(l) && !/^@?[a-z0-9_.]{3,30}$/i.test(l));
   }
 
-  return { keepBacked, username, reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, material, embedUrl, readPage,
+  return { keepBacked, username, reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, localPromptInfo, estTokens, promptBudget, material, embedUrl, readPage,
     ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
     YT_CLIENTS, condense, search, answerPrompt, webAnswerPrompt, markOneSource, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
     exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS };

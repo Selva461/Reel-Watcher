@@ -1,16 +1,15 @@
-"""Notes evaluation harness for the on-phone AI (A3-1; design: docs/design/A3-prompt-budget.md).
+"""Notes evaluation harness for the on-phone AI (A3-1; design: docs/design/A3-prompt-budget.md; the budget itself is A3-2).
 
 It checks, without a phone and without a model, what the page sends the AI and how an answer can be judged:
 
 * the synthetic fixture (tests/fixtures/notes_eval/reels.json, made by tests/notes_eval.py) and its generator;
-* the prompt the page's own `Notes.localPrompt` builds for every fixture reel, as it is TODAY (sizes, caps, `condense`);
+* the prompt the page's own `Notes.localPrompt` builds for every fixture reel without a budget (sizes, caps, `condense`);
 * `check_answer`, the deterministic answer checker, on good and bad synthetic answers;
-* the designed prompt budget (`Notes.promptBudget`, `Notes.estTokens`, `ctx` in MODELS, the fill order, the `condense` fix),
-  which does not exist yet. Those tests are `xfail(strict=True, reason="A3-2")`: they fail today, and when A3-2 builds the
-  budget they pass, strict makes pytest fail on the unexpected pass, so A3-2 has to remove the marks.
+* the prompt budget (`Notes.promptBudget`, `Notes.estTokens`, `ctx` in MODELS, the fill order, the `condense` fix, the run log line).
 
 Everything is generated placeholder text; no real reel data. The page is loaded the same way the other phone tests load it."""
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -18,18 +17,18 @@ import sys
 import pytest
 
 import notes_eval as ne
-from test_phone_app import phone, site  # noqa: F401  (pytest fixtures)
+from test_phone_app import ANSWER, LOCAL, VIDEO_EMBED, db_of, phone, site, to_inbox  # noqa: F401  (phone, site: pytest fixtures)
 
 CASES = ne.cases()
 BY_CODE = {c["reel"]["code"]: c for c in CASES}
-A3_2 = pytest.mark.xfail(strict=True, reason="A3-2")
 
 NON_LATIN = ("EVAL010", "EVAL011")
 
-# The size, in characters, of the prompt `Notes.localPrompt(reel, localExtra)` builds for each fixture reel TODAY (UTF-16 units,
-# as JavaScript counts them). The largest, EVAL004, has every field at the most the app stores. When A3-2 changes what
-# localPrompt builds, a number here changes on purpose and is updated in the same commit.
-PROMPT_CHARS_TODAY = {"EVAL001": 1492, "EVAL002": 5355, "EVAL003": 4192, "EVAL004": 24143, "EVAL005": 1421, "EVAL006": 1757,
+# The size, in characters, of the prompt `Notes.localPrompt(reel, localExtra)` builds for each fixture reel with no budget, which is
+# also what a reel that fits its budget gets (UTF-16 units, as JavaScript counts them). The largest, EVAL004, has every field at
+# the most the app stores. A3-2 changed only EVAL005 and EVAL006 (were 1421 and 1757: their unpunctuated transcript came out empty;
+# the `condense` fix gives them its start). When localPrompt changes what it builds, a number here changes on purpose.
+PROMPT_CHARS_TODAY = {"EVAL001": 1492, "EVAL002": 5355, "EVAL003": 4192, "EVAL004": 24143, "EVAL005": 8421, "EVAL006": 8757,
                       "EVAL007": 8375, "yt-EVALyt00008": 5237, "EVAL009": 2586, "EVAL010": 8111, "EVAL011": 3909, "EVAL012": 1154}
 
 LABELS = {"caption": "Caption:\n", "transcript": "What is said (transcript):\n", "onscreen": "Text shown on screen in the reel:\n",
@@ -180,7 +179,7 @@ def test_the_prompt_cuts_each_source_at_its_fixed_cap_today(phone):
     assert media == expected.replace("\n\nLink:", "\n\nYou also get pictures from the reel (key frames) and its first 30 seconds of sound: use them.\n\nLink:", 1)
 
 
-# ---------------------------------------------------------------- condense, today and as it should be
+# ---------------------------------------------------------------- condense
 
 def _condense(pg, items):
     pg.open_with()
@@ -199,33 +198,36 @@ def test_a_punctuated_long_transcript_is_cut_to_about_7000_in_its_original_order
     assert 6300 <= len(broken) <= 7000
 
 
-def test_condense_today_returns_nothing_for_a_long_text_with_no_separator(phone):
-    """TODAY'S VALUE OF A BUG, pinned on purpose. A text with no sentence end and no line break is one 'sentence'; condense skips
-    any sentence longer than the limit, so 7,001 characters and more give an empty string and the prompt's transcript section is
-    empty. A3-2 fixes condense (designed: fall back to a cut at a word boundary). When it does, THIS TEST FAILS and must be
-    deleted; the xfail test below, test_condense_gives_text_when_there_is_no_separator, then passes and loses its mark."""
+def test_condense_never_gives_nothing_for_a_text_that_does_not_fit_and_keeps_one_that_does(phone):
+    """The old bug: a text with no sentence end and no line break is one 'sentence', and condense skipped any sentence longer than
+    the limit, so 7,001 characters and more gave an empty string (the prompt's transcript section was empty). Now it gives the start of
+    the text, cut at a word and ending ' [shortened]'. The same for a text of nothing but tiny lines or numbers. A text that fits
+    is returned as it is."""
     flat = _field("EVAL005", "transcript")
-    sizes = [len(x) for x in _condense(phone, [[flat[:7000], 7000], [flat, 7000], [_field("EVAL006", "transcript"), 7000]])]
-    assert sizes == [7000, 0, 0]   # 7,000 stays 7,000, 7,001 gives 0, 20,000 gives 0
-    prompt = prompts_today(phone)["EVAL006"]
-    assert "What is said (transcript):\n" in prompt and body_of(prompt, "transcript") == ""   # the header stays, its body is empty
+    tiny_lines, numbers = "\n".join(["ok"] * 6000), " ".join(["1234567"] * 2000)
+    items = [[flat[:7000], 7000], [flat, 7000], [_field("EVAL006", "transcript"), 7000], [flat, 100], [flat, 13], [flat, 5], [tiny_lines, 500], [numbers, 500]]
+    got = _condense(phone, items)
+    assert got[0] == flat[:7000]   # 7,000 characters with a limit of 7,000: unchanged
+    for (text, limit), out in list(zip(items, got))[1:]:
+        body = re.sub(r" \[shortened\]$", "", out)
+        assert 0 < len(out) <= limit and text.startswith(body), f"{len(text)} characters with a limit of {limit} gave {len(out)}"
+    assert got[1].endswith(" [shortened]") and got[3].endswith(" [shortened]")
 
 
-# The outputs of condense for transcripts of the fixture at several limits, all of which give text today. A3-2 may only add text
-# where today's answer is empty; every answer that is non-empty today must stay exactly as it is (design: "Tests and deliberate breaks").
+# The outputs of condense for transcripts of the fixture at several limits, all of which gave text before A3-2. The condense fix only adds
+# text where the answer was empty; every answer that was not empty stays exactly as it was (design: "Tests and deliberate breaks").
 CONDENSE_PINNED = [("EVAL002", 1000), ("EVAL002", 3000), ("EVAL004", 1000), ("EVAL004", 3000), ("EVAL004", 7000), ("EVAL007", 1000),
                    ("EVAL007", 3000), ("EVAL007", 7000), ("yt-EVALyt00008", 1000), ("yt-EVALyt00008", 3000), ("EVAL010", 1000),
                    ("EVAL010", 3000), ("EVAL010", 7000)]
 CONDENSE_PINNED_SHA256 = "3bc036ee5cc2b4114baf1a8ea9ae3a00184e1ae209430fe56d07112726900d65"
 
 
-def test_condense_output_that_is_not_empty_today_is_pinned(phone):
+def test_condense_output_that_was_not_empty_before_the_fix_is_pinned(phone):
     outs = _condense(phone, [[_field(code, "transcript"), m] for code, m in CONDENSE_PINNED])
     assert all(outs) and all(len(o) <= m for o, (_, m) in zip(outs, CONDENSE_PINNED))
     assert hashlib.sha256("\x00".join(outs).encode("utf-8")).hexdigest() == CONDENSE_PINNED_SHA256
 
 
-@A3_2
 def test_condense_gives_text_when_there_is_no_separator(phone):
     flat = _field("EVAL005", "transcript")
     got = _condense(phone, [[flat, 7000], [_field("EVAL006", "transcript"), 7000]])
@@ -234,7 +236,6 @@ def test_condense_gives_text_when_there_is_no_separator(phone):
         assert 0 < len(out) <= 7000 and text.startswith(body), f"condense gave {len(out)} characters for {len(text)}"
 
 
-@A3_2
 def test_a_long_unpunctuated_transcript_still_reaches_the_prompt(phone):
     prompts = prompts_today(phone)
     for code in ("EVAL005", "EVAL006"):
@@ -383,14 +384,12 @@ def _fit(pg, codes):
         f"{r['code']} on {r['model']} with answer {r['answer']}: {r['tokens']} tokens, budget {r['budget']}" for r in rows[:4])
 
 
-@A3_2
 def test_every_model_states_its_context_window_and_the_budget_functions_exist(phone):
     _need_budget_api(phone)
     ctx = phone.evaluate("() => MODELS.map((m) => m.ctx)")
     assert len(ctx) == 3 and all(isinstance(x, int) and x > 0 for x in ctx), f"ctx per model: {ctx}"
 
 
-@A3_2
 def test_est_tokens_counts_ascii_by_three_and_every_other_letter_by_two(phone):
     _need_budget_api(phone)
     got = phone.evaluate("(ts) => ts.map((t) => Notes.estTokens(t))", ["", "a" * 300, "я" * 100, "abc" + "яя", "a" * 471])
@@ -398,7 +397,6 @@ def test_est_tokens_counts_ascii_by_three_and_every_other_letter_by_two(phone):
     assert phone.evaluate("() => Notes.estTokens(Notes.LOCAL_SYSTEM)") == 157   # the design's example: 471 characters, 157 tokens
 
 
-@A3_2
 def test_the_budget_is_the_window_less_the_answer_the_system_text_and_the_margin(phone):
     _need_budget_api(phone)
     # the design's own examples for Qwen (window 4,096): 4096 - 800 - 157 - 205 = 2,934 at Normal, 2,234 at Long
@@ -407,17 +405,14 @@ def test_the_budget_is_the_window_less_the_answer_the_system_text_and_the_margin
     assert got == [3334, 2934, 2234, 2834]
 
 
-@A3_2
 def test_every_latin_fixture_prompt_fits_the_budget_of_every_model_at_every_answer_length(phone):
     _fit(phone, [c for c in PROMPT_CHARS_TODAY if c not in NON_LATIN])
 
 
-@A3_2
 def test_every_non_latin_fixture_prompt_fits_the_budget_too(phone):
     _fit(phone, NON_LATIN)
 
 
-@A3_2
 def test_a_non_latin_extra_too_long_for_the_budget_is_shortened_and_marked(phone):
     _need_budget_api(phone)
     got = phone.evaluate(ONE_PROMPT_JS, [BY_CODE["EVAL011"], 4096, 1500])
@@ -427,7 +422,6 @@ def test_a_non_latin_extra_too_long_for_the_budget_is_shortened_and_marked(phone
     assert "Also: " + extra[:60] in prompt and extra not in prompt
 
 
-@A3_2
 def test_format_and_the_start_of_the_prompt_stay_whole_when_the_budget_is_tight(phone):
     _need_budget_api(phone)
     for code in PROMPT_CHARS_TODAY:
@@ -437,13 +431,14 @@ def test_format_and_the_start_of_the_prompt_stay_whole_when_the_budget_is_tight(
         assert r["url"] in got["prompt"] and (not r["author"] or r["author"] in got["prompt"]), code
 
 
-@A3_2
 def test_comments_are_cut_first_and_your_typed_text_last(phone):
     """Sweep the budget down on the reel that has every source. A source is full, cut, or absent. Comments are cut before any
     other source is touched; typed text is cut only when nothing else is left."""
     _need_budget_api(phone)
     c = BY_CODE["EVAL004"]
-    budgets = [10 ** 6, *range(9000, 1249, -50)]
+    # from just above what the whole prompt takes (its fixed caps stay as before A3-2) down to a little over the always-kept part
+    top = phone.evaluate("(c) => Notes.estTokens(Notes.localPrompt(c.reel, c.localExtra, {}))", c)
+    budgets = [10 ** 6, *range(top + 50, 1249, -50)]
     prompts = phone.evaluate(SWEEP_JS, [c, budgets])
     full = sources_of(prompts[0])
     assert all(full.values()), full
@@ -462,7 +457,6 @@ def test_comments_are_cut_first_and_your_typed_text_last(phone):
     assert cut_comments_first and typed_cut_alone, "the sweep never reached both ends of the order"
 
 
-@A3_2
 def test_a_cut_text_ends_with_shortened_at_a_word_boundary(phone):
     _need_budget_api(phone)
     c = BY_CODE["EVAL003"]
@@ -472,3 +466,134 @@ def test_a_cut_text_ends_with_shortened_at_a_word_boundary(phone):
     cut = body[: -len(" [shortened]")]
     caption = c["reel"]["caption"]
     assert 0 < len(cut) < len(caption) and caption.startswith(cut) and caption[len(cut)].isspace()
+
+
+# ---------------------------------------------------------------- A3-2: more on the budget, and how the page uses it
+
+INFO_JS = "([c, budget, media]) => { const i = Notes.localPromptInfo(c.reel, c.localExtra, { budget, media }); return { prompt: i.prompt, shortened: i.shortened, tokens: Notes.estTokens(i.prompt) }; }"
+
+
+def test_a_prompt_that_already_fits_is_exactly_the_one_built_without_a_budget(phone):
+    _need_budget_api(phone)
+    rows = phone.evaluate("(cs) => {" + SEAM_JS + r"""
+      const out = [];
+      for (const c of cs) {
+        const plain = Notes.localPrompt(c.reel, c.localExtra, {});
+        for (const m of MODELS) for (const answer of [400, 800, 1500]) {
+          const budget = Notes.promptBudget({ ctx: m.ctx, answer, system: Notes.LOCAL_SYSTEM });
+          out.push({ code: c.reel.code, fits: Notes.estTokens(plain) <= budget, same: promptWith(c, budget) === plain,
+                     cut: Notes.localPromptInfo(c.reel, c.localExtra, { budget }).shortened });
+        }
+      }
+      return out; }""", CASES)
+    fits, over = [r for r in rows if r["fits"]], [r for r in rows if not r["fits"]]
+    assert all(r["same"] and r["cut"] == [] for r in fits), "a prompt that fits was changed"
+    assert over and all(r["cut"] for r in over), "a prompt that does not fit says what was shortened"
+    assert {r["code"] for r in over} >= {"EVAL004", "EVAL010", "EVAL011"}   # the biggest reels never fit
+    small = {"EVAL001", "EVAL009", "EVAL012", "yt-EVALyt00008"}
+    assert small <= {r["code"] for r in fits} and not small & {r["code"] for r in over}   # the small ones always do
+
+
+def test_when_the_always_kept_part_is_over_budget_the_extra_goes_first_then_the_title_and_the_rest_stays(phone):
+    _need_budget_api(phone)
+    c = BY_CODE["EVAL011"]
+    r, extra = c["reel"], c["localExtra"]
+    budgets = [3500, 2234, 1000, 900, 300]
+    rows = [phone.evaluate(INFO_JS, [c, b, False]) for b in budgets]
+    fmt = phone.evaluate("() => Notes.FORMAT")
+    title_whole = [("Title: " + r["title"]) in row["prompt"] for row in rows]
+    also_in = ["Also: " in row["prompt"] for row in rows]
+    for row, b in zip(rows, budgets):
+        p = row["prompt"]
+        assert p.count(fmt) == 1 and r["url"] in p and r["author"] in p and "Write notes in exactly this format:\n\n" + fmt in p
+        if b >= 900:
+            assert row["tokens"] <= b
+    assert title_whole == [True, True, True, False, False]   # the title is cut only after the extra text is
+    assert also_in == [True, True, True, False, False]       # ... and the extra text is left out before the title is cut
+    assert "also" in rows[1]["shortened"] and rows[1]["prompt"].endswith(" [shortened]") and "Also: " + extra[:60] in rows[1]["prompt"]
+    assert "title" not in rows[2]["shortened"] and "also" in rows[2]["shortened"]
+    assert "Title: " + r["title"][:20] in rows[3]["prompt"] and "Title: " + r["title"] not in rows[3]["prompt"] and "title" in rows[3]["shortened"]
+    assert "Title: " not in rows[4]["prompt"] and rows[4]["prompt"].endswith(fmt)   # nothing fits any more: only what is never cut stays
+    # the sentence about pictures and sound is never cut either
+    media = phone.evaluate(INFO_JS, [c, 800, True])["prompt"]
+    assert "You also get pictures from the reel (key frames) and its first 30 seconds of sound: use them." in media
+
+
+def test_est_tokens_and_the_budget_in_the_odd_cases(phone):
+    _need_budget_api(phone)
+    est = phone.evaluate("(ts) => ts.map((t) => Notes.estTokens(t))", ["a\U0001F600", "\U0001F600" * 10, " ", "ab", "é", "日本"])
+    assert est == [3, 20, 1, 1, 2, 4]    # a code point outside ASCII counts 2, an emoji too (not 4 for its two UTF-16 units)
+    assert phone.evaluate("() => [Notes.estTokens(undefined), Notes.estTokens(null), Notes.estTokens(123)]") == [0, 0, 1]
+    budget = phone.evaluate("""(sys) => [{ ctx: 4096, answer: 10 }, { ctx: 4096, answer: 5000 }, { ctx: 4096, answer: "1500" }, { ctx: 4096 }, { answer: 800 },
+        { ctx: 1000, answer: 3000, system: sys }, { ctx: 4096, answer: 800, media: 300.5 }].map((o) => Notes.promptBudget({ system: "", ...o }))""", "x" * 300)
+    # the answer is clamped to 64..3000 as LocalModel.java does; no window given counts as 4096; the result is never negative; media is a reserve
+    assert budget == [4096 - 64 - 205, 4096 - 3000 - 205, 4096 - 1500 - 205, 4096 - 800 - 205, 4096 - 800 - 205, 0, 4096 - 800 - 205 - 301]
+
+
+def test_every_model_in_the_page_table_has_its_window_with_a_note_that_it_is_not_confirmed():
+    """The table-honesty rule of the design: a `ctx` that no phone has confirmed says so beside the number."""
+    table = (LOCAL / "local.js").read_text(encoding="utf-8")
+    block = table[table.index("const MODELS = ["):table.index("const DEFAULTS")]
+    lines = [line for line in block.splitlines() if re.search(r"\bctx: \d+", line)]
+    assert len(lines) == 3 and all("//" in line and re.search(r"device check 1|from the file name", line) for line in lines), lines
+
+
+def _library_of(codes):
+    return {"reels": [c["reel"] for c in CASES if c["reel"]["code"] in codes], "inbox": []}
+
+
+@pytest.mark.parametrize("answer, shortened", [(800, False), (1500, True)])
+def test_the_real_run_sends_a_prompt_that_fits_the_model_and_the_log_says_when_it_was_shortened(phone, answer, shortened):
+    """EVAL005 (a 7,001-character transcript with no punctuation) fits Qwen's window at the Normal answer length and does not at Long."""
+    phone.open_with({"db": json.dumps(_library_of({"EVAL001", "EVAL005"})), "settings": json.dumps({"maxTokens": answer}),
+                     "model": {"ready": True, "partial": 0, "installed": []}, "answers": [ANSWER, ANSWER]}, "#/inbox")
+    phone.get_by_role("button", name="Start 2", exact=True).click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    gens = [c for c in phone.rn()["calls"] if c[0] == "generate"]
+    assert len(gens) == 2 and all(g[2]["maxTokens"] == answer and g[2]["media"] is False for g in gens)
+    budget = phone.evaluate("() => promptBudget()")
+    assert budget == (2934 if answer == 800 else 2234)
+    by = {code: next(g[1] for g in gens if f"/{code}/" in g[1]) for code in ("EVAL001", "EVAL005")}
+    toks = phone.evaluate("(ps) => ps.map((p) => Notes.estTokens(p))", list(by.values()))
+    assert all(t <= budget for t in toks), (toks, budget)
+    line = {code: phone.locator(f'a.list-item[href="#/r/{code}"]').inner_text() for code in by}
+    assert ("(prompt shortened to fit the model)" in line["EVAL005"]) == shortened
+    assert "shortened" not in line["EVAL001"] and "Hardcoded secrets" in line["EVAL001"]
+    if shortened:
+        assert "[shortened]" in by["EVAL005"]
+    else:   # not shortened: the prompt is the one built without a budget
+        assert phone.evaluate("(r) => Notes.localPrompt(r, '', {})", BY_CODE["EVAL005"]["reel"]) == by["EVAL005"]
+    for r in db_of(phone)["reels"]:   # nothing about it is stored on a reel
+        assert r["status"] == "done" and not any(re.search("short|cut|prompt|budget", key) for key in r) and "shortened" not in json.dumps(r)
+
+
+def test_the_budget_follows_the_model_table_and_a_model_picked_by_hand_gets_the_smallest_window(phone):
+    phone.open_with()
+    got = phone.evaluate("""() => {
+      const first = MODELS[0].file;
+      MODELS[0].ctx = 8192;
+      const a = (file, maxTokens) => { settings.modelFile = file; settings.maxTokens = maxTokens; return promptBudget(); };
+      return [a(first, 800), a("my-own-model.litertlm", 800), a(MODELS[1].file, 800), a(first, 1500), a(first, 100000)];
+    }""")
+    system = phone.evaluate("() => Notes.estTokens(Notes.LOCAL_SYSTEM)")
+    assert got == [8192 - 800 - system - 410, 4096 - 800 - system - 205, 4096 - 800 - system - 205, 8192 - 1500 - system - 410, 8192 - 3000 - system - 410]
+
+
+def test_a_prompt_with_pictures_and_sound_is_sent_as_before_until_their_size_is_known(phone):
+    """Design D-A3-4: no reserve for the key frames and the sound is known yet, so such a prompt has no budget."""
+    w = ne.Writer(ne.Rng(11), ne.LATIN)
+    speech, screen = w.prose(20000), w.lines(3000)
+    old = {"code": "VID001", "url": "https://www.instagram.com/reel/VID001/", "status": "new", "added_at": 1, "collections": []}
+    phone.open_with({"db": json.dumps({"reels": [old], "inbox": []}), "pages": {"VID001/embed": VIDEO_EMBED}, "speech": True,
+                     "model": {"ready": True, "partial": 0, "installed": []}, "answers": [ANSWER],
+                     "video": {"screen": screen, "seconds": 31, "speech": speech, "media": True}}, "#/inbox")
+    phone.get_by_role("button", name="Start 1", exact=True).click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    (gen,) = [c for c in phone.rn()["calls"] if c[0] == "generate"]
+    prompt, opts = gen[1], gen[2]
+    r = db_of(phone)["reels"][0]
+    budget = phone.evaluate("() => promptBudget()")
+    assert opts["media"] is True and "You also get pictures from the reel" in prompt
+    assert phone.evaluate("(t) => Notes.estTokens(t)", prompt) > budget   # over what a text-only prompt may be, and sent whole
+    assert phone.evaluate("(r) => Notes.localPrompt(r, '', { media: true })", r) == prompt and "[shortened]" not in prompt
+    assert "shortened" not in phone.locator('a.list-item[href="#/r/VID001"]').inner_text()
