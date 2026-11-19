@@ -238,7 +238,9 @@ def test_condense_gives_text_when_there_is_no_separator(phone):
 def test_a_long_unpunctuated_transcript_still_reaches_the_prompt(phone):
     prompts = prompts_today(phone)
     for code in ("EVAL005", "EVAL006"):
-        assert body_of(prompts[code], "transcript"), f"{code}: the transcript section of the prompt is empty"
+        body = re.sub(r" \[shortened\]$", "", body_of(prompts[code], "transcript"))
+        assert body, f"{code}: the transcript section of the prompt is empty"
+        assert _field(code, "transcript").startswith(body), f"{code}: the transcript section is not the start of the transcript"
 
 
 # ---------------------------------------------------------------- the answer checker
@@ -350,20 +352,22 @@ def test_the_template_is_found_as_an_echo_even_in_pieces():
 
 # The designed API, in one place. The design fixes promptBudget({ctx, answer, system, media}) (tokens) and estTokens(text), and says
 # the fill uses the budget; it does not fix how the budget reaches localPrompt. Assumed here: localPrompt(reel, extra, { budget }),
-# budget in tokens. If A3-2 passes it another way, change only BUDGETED_JS.
-BUDGETED_JS = r"""(cs) => {
+# budget in tokens. If A3-2 passes it another way, change only SEAM_JS: every test below builds its prompts through it.
+SEAM_JS = "const promptWith = (c, budget) => Notes.localPrompt(c.reel, c.localExtra, { budget });"
+BUDGETED_JS = "(cs) => {" + SEAM_JS + r"""
   const out = [];
   for (const c of cs) for (const m of MODELS) for (const answer of [400, 800, 1500]) {
     const budget = Notes.promptBudget({ ctx: m.ctx, answer, system: Notes.LOCAL_SYSTEM });
-    const prompt = Notes.localPrompt(c.reel, c.localExtra, { budget });
+    const prompt = promptWith(c, budget);
     out.push({ code: c.reel.code, model: m.id, ctx: m.ctx, answer, budget, tokens: Notes.estTokens(prompt), chars: prompt.length });
   }
   return out;
 }"""
-ONE_PROMPT_JS = r"""([c, ctx, answer]) => {
+ONE_PROMPT_JS = "([c, ctx, answer]) => {" + SEAM_JS + r"""
   const budget = Notes.promptBudget({ ctx, answer, system: Notes.LOCAL_SYSTEM });
-  return { budget, prompt: Notes.localPrompt(c.reel, c.localExtra, { budget }), format: Notes.FORMAT };
+  return { budget, prompt: promptWith(c, budget), format: Notes.FORMAT };
 }"""
+SWEEP_JS = "([c, budgets]) => {" + SEAM_JS + " return budgets.map((b) => promptWith(c, b)); }"
 
 
 def _need_budget_api(pg):
@@ -440,7 +444,7 @@ def test_comments_are_cut_first_and_your_typed_text_last(phone):
     _need_budget_api(phone)
     c = BY_CODE["EVAL004"]
     budgets = [10 ** 6, *range(9000, 1249, -50)]
-    prompts = phone.evaluate("([c, bs]) => bs.map((b) => Notes.localPrompt(c.reel, c.localExtra, { budget: b }))", [c, budgets])
+    prompts = phone.evaluate(SWEEP_JS, [c, budgets])
     full = sources_of(prompts[0])
     assert all(full.values()), full
     cut_comments_first = typed_cut_alone = False
@@ -462,7 +466,7 @@ def test_comments_are_cut_first_and_your_typed_text_last(phone):
 def test_a_cut_text_ends_with_shortened_at_a_word_boundary(phone):
     _need_budget_api(phone)
     c = BY_CODE["EVAL003"]
-    (prompt,) = phone.evaluate("([c, b]) => [Notes.localPrompt(c.reel, c.localExtra, { budget: b })]", [c, 900])
+    (prompt,) = phone.evaluate(SWEEP_JS, [c, [900]])
     body = body_of(prompt, "caption")
     assert body.endswith(" [shortened]")
     cut = body[: -len(" [shortened]")]

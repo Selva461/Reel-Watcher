@@ -12,7 +12,7 @@ Two things, both usable without a phone and without any model:
 
 The checker needs the page's own reader of the format, so it is handed the page's `Notes.parse` (as `parse`) and
 `Notes.FORMAT` (as `template`) instead of keeping a copy of them here that could drift. The tests get both from the page
-the same way the other phone tests do; `check` will drive Chromium the same way tests/fixtures/make_library_fixtures.py does.
+the same way the other phone tests do; `check` (A3-4) can drive Chromium the way tests/fixtures/make_library_fixtures.py does.
 """
 import argparse
 import json
