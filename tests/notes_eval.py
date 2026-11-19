@@ -230,11 +230,21 @@ RULES = ("parses", "sections", "complete", "order", "no_echo", "limits")
 TOPIC_MAX, POINTS_MIN, POINTS_MAX, TAGS_MIN, TAGS_MAX = 200, 1, 40, 1, 12
 
 # A heading starts a line, like the page's own (markdown # > * _ allowed, a list dash is not), but only the names FORMAT uses.
+# The first form of the tail, `\s*[*_]*\s*`, could split a long run of blanks between its two `\s*` in thousands of ways when the
+# rest then failed to match (quadratic); `\s*(?:[*_]+\s*)?` accepts exactly the same lines and can be matched only one way.
 _HEAD = re.compile(r"^[\s>#*_]*(" + "|".join(s.replace(" ", r"\s+") for s in sorted(SECTIONS, key=len, reverse=True)) +
-                   r")\s*[*_]*\s*(?:[:：–-]\s*[*_]*\s*(.*)|$)", re.I)
+                   r")\s*(?:[*_]+\s*)?(?:[:：–-]\s*(?:[*_]+\s*)?(.*)|$)", re.I)
 # One line only ([^\S\n] is blank space without the line break): with \s the search was quadratic on a long run of blank
 # lines, and `check` (A3-4) now judges answers from a file that is not ours.
 _PLACEHOLDER = re.compile(r"^[^\S\n]*\d{1,3}[.)][^\S\n]*(?:\.{3}|…)[^\S\n]*$", re.M)
+# Every character of the class [\s*_"'] (\s is every Unicode space, and all of them are below U+3001), for str.rstrip: a regex that
+# ends in [\s*_"']+$ is quadratic on a long run of these characters in the middle of the text, rstrip is not.
+_TRIM = "".join(chr(i) for i in range(0x3001) if chr(i).isspace()) + "*_\"'"
+
+
+def _clean_topic(topic):
+    """The topic as written, without markdown stars, back-ticks, quotes and the blanks around it, in one line (its length is the `limits` rule)."""
+    return re.sub(r"\s+", " ", re.sub(r"\*\*|`|^[\s*_\"']+", "", topic.rstrip(_TRIM))).strip()
 
 
 def _squash(s):
@@ -291,7 +301,7 @@ def check_answer(text, parse, template):
     names = [n for n, _ in found]
     order = [SECTIONS.index(n) for n in names]
     topic = " ".join(" ".join(lines) for n, lines in found if n == "TOPIC")
-    topic = re.sub(r"\s+", " ", re.sub(r"\*\*|`|^[\s*_\"']+|[\s*_\"']+$", "", topic)).strip()
+    topic = _clean_topic(topic)
     tags = set().union(*(_tags(lines) for n, lines in found if n == "TAGS"))
     v = {
         "parses": notes is not None,
@@ -414,7 +424,8 @@ def read_backup(path):
     """(manifest, library) from a backup ZIP made by the app, or BadBackup. The ZIP is read in memory: no entry is ever extracted
     to a file, so a name such as ../x cannot write anywhere. The rules are the app's own (LibraryBackup.check): only the names
     manifest.json, reels.json and shots.json, each once, no folders; the manifest says format reelshelf-backup, version 1, and lists
-    reels.json with its bytes and sha256, which must match. shots.json is allowed and never read."""
+    reels.json with its bytes and sha256, which must match. shots.json is allowed and never read. One rule of the app is NOT applied:
+    a backup whose schema_version is newer than the app's is refused by the app (NEWER_SCHEMA) but read and judged here."""
     path = Path(path)
     try:
         size = path.stat().st_size if path.is_file() else -1
@@ -505,7 +516,8 @@ def check(path):
     """Prints, for each reel of a backup the app made after the run, the checker's verdicts for the stored answer (r.raw), or why
     there is no answer text. Returns the exit code: 0 when every answer passes every rule and no reel failed; 1 when an answer breaks
     a rule, a reel failed on the phone, or there was no answer to judge at all; 2 for a file that is not a usable backup; 3 when
-    Chromium cannot be started (nothing was judged)."""
+    Chromium cannot be started (nothing was judged). Note: a backup whose schema_version is newer than the app's is judged like
+    any other here, whereas the app's own restore refuses it (see read_backup)."""
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")   # a console with a legacy code page must not stop the report
     try:

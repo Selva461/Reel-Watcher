@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -292,6 +293,16 @@ def test_check_judges_what_the_page_stores_after_a_run(phone, tmp_path):
     assert done_.returncode == 1 and "12 reels: 8 PASS, 1 FAIL, 3 without answer text (2 of them failed on the phone)" in done_.stdout
 
 
+def test_without_a_ready_model_there_is_nothing_to_start_for_these_reels(phone):
+    """What TESTING.md tells the owner: these reels are read already, so with no model ready Start has nothing to do (no quick notes
+    either), the tile has no number and `check` would have nothing to judge."""
+    phone.open_with({"db": json.dumps(ne.backup_library(), ensure_ascii=False)}, "#/inbox")
+    assert phone.locator("#start").count() == 0 and phone.locator("#goRun").inner_text().strip() == "Start"
+    phone.locator("#goRun").click()
+    phone.get_by_text("Nothing waiting").wait_for()
+    assert phone.locator("#start").count() == 0
+
+
 # ---------------------------------------------------------------- check: files that are not a backup (nothing is judged, exit 2)
 
 def _bad_files(tmp_path):
@@ -379,6 +390,17 @@ def test_check_still_accepts_a_backup_that_has_the_optional_shots_file_and_a_def
     assert ne.read_backup(path)[1]["reels"][0]["code"] == "EVAL001"
 
 
+def test_check_reads_a_backup_with_a_newer_schema_although_the_app_would_refuse_it(tmp_path):
+    """Said in the docstrings of read_backup and check: the app's NEWER_SCHEMA rule is not applied here."""
+    lib = library([done("G1", GOOD)])
+    lib["schema_version"] = 99
+    reels = json.dumps(lib).encode()
+    man = json.loads(manifest_for(reels))
+    man["files"]["reels.json"]["schema_version"] = 99
+    path = raw_zip(tmp_path / "newer.zip", [("reels.json", reels), ("manifest.json", json.dumps(man).encode())])
+    assert ne.read_backup(path)[1]["schema_version"] == 99
+
+
 def test_check_never_reads_more_than_its_limits_from_a_file(tmp_path, monkeypatch, capsys):
     good = parts_of(ne.backup_bytes())
     bomb = b'{"reels":[],"pad":"' + b"0" * 2_000_000 + b'"}'   # 2 MB that deflates to a few KB
@@ -449,3 +471,54 @@ def test_a_long_run_of_blank_lines_is_checked_in_linear_time_and_the_rule_still_
     assert time.time() - start < 3
     assert ne.echoes("TOPIC: x\nPOINTS:\n1. a\n2. ...\nTAGS: a, b", template) and ne.echoes("1. a\r\n2. ...\r\n3. b", template)
     assert not ne.echoes("1. a\n2.\n...\n3. b", template)   # "2." and "..." on two lines is not the template's "2. ..."
+
+
+# ---------------------------------------------------------------- the heading and the topic rules, on runs of blanks (review of A3-4)
+
+OLD_HEAD = re.compile(r"^[\s>#*_]*(" + "|".join(s.replace(" ", r"\s+") for s in sorted(ne.SECTIONS, key=len, reverse=True)) +
+                      r")\s*[*_]*\s*(?:[:：–-]\s*[*_]*\s*(.*)|$)", re.I)   # the form before: quadratic on a heading and thousands of blanks
+
+
+def old_topic(topic):   # the form before: its [..]+$ is quadratic on thousands of such characters in the middle of the text
+    return re.sub(r"\s+", " ", re.sub(r"\*\*|`|^[\s*_\"']+|[\s*_\"']+$", "", topic)).strip()
+
+
+SLOW_BEFORE = {   # each took seconds before: 3.1 s, 3.1 s, 1.3 s, 1.3 s (the app keeps 20,000 characters of an answer at most)
+    "a heading and blanks": "TOPIC" + " " * 19990 + "x",
+    "a heading and tabs": "TAGS" + "\t" * 19990 + "x",
+    "a topic with blanks in the middle": "TOPIC: a" + " " * 19990 + "x",
+    "a topic with blanks and stars in the middle": "TOPIC: a" + " *" * 9990 + "x",
+}
+
+
+def test_a_heading_or_a_topic_with_thousands_of_blanks_is_checked_in_linear_time():
+    template = "TOPIC: one short line\nPOINTS:\n1. every useful point in the order it comes\n2. ...\nTAGS: 5 to 8 short tags, separated by commas"
+    start = time.time()
+    for text in SLOW_BEFORE.values():
+        assert len(text) <= ne.RAW_MAX
+        ne.check_answer(text, lambda _t: None, template)
+    assert time.time() - start < 1.0, "the four answers took " + format(time.time() - start, ".1f") + " s (about 9 s before the fix)"
+
+
+def test_a_file_of_twenty_such_answers_is_judged_in_seconds(tmp_path):
+    reels = [done(f"H{i:02d}", list(SLOW_BEFORE.values())[i % 4]) for i in range(20)]   # 68 s before the fix
+    start = time.time()
+    done_ = cli("check", str(backup(tmp_path, reels)))
+    assert time.time() - start < 15, done_.stdout[-300:]
+    got = verdict_lines(done_.stdout)
+    assert done_.returncode == 1 and len(got) == 20 and all(v == "FAIL" for v, _ in got.values())
+
+
+def test_the_linear_heading_and_topic_rules_accept_exactly_what_the_old_ones_did():
+    assert set(re.findall(r"[\s*_\"']", "".join(map(chr, range(0x110000))))) == set(ne._TRIM)   # rstrip's characters are the regex class
+    rng = random.Random(7)
+    pieces = [" ", "  ", "\t", " ", "　", "*", "**", "_", ":", "：", "–", "-", "#", ">", "\"", "'", "`", "a", "b c", "1.", "...",
+              "TOPIC", "TAGS", "use  it   for", "USE IT FOR", "POINTS", "tone", "x", "TOPICS"]
+    lines = GOOD.splitlines() + GOOD.replace("TOPIC:", "**TOPIC:**").splitlines()   # real answers, then 150,000 odd lines
+    lines += ["".join(rng.choice(pieces) for _ in range(rng.randint(0, 9))) for _ in range(150000)]
+    different = []
+    for line in lines:
+        a, b = OLD_HEAD.match(line), ne._HEAD.match(line)
+        if (a and (a.group(1), a.group(2))) != (b and (b.group(1), b.group(2))) or old_topic(line) != ne._clean_topic(line):
+            different.append(line)
+    assert not different, f"{len(different)} lines read differently, for example {different[:3]!r}"
