@@ -1,0 +1,165 @@
+# K1: user-editable notes with preserved edits (design, not approved)
+
+Base: `origin/ccr-d0c0b070-bdpssy` at 6d34b25 (1.3.11, versionCode 18). A1 read from `origin/stabilize/a1-retry-cap` at 492e131 (PR #53, not merged; it also carries R4-2 `schema_version`). Planning only. K1 needs A1 and R4-2 merged first (roadmap row 7).
+K2 to K5 are not defined anywhere in the repo. They need the owner; this design does not guess them.
+
+## Problem
+A reel's notes are written by the phone AI, by Meta AI (paste or share) or without AI (quick notes). The user cannot correct them. If an edit existed, several writers would replace it without asking. K1 lets the user edit the notes and guarantees that no automatic or indirect path overwrites what they typed.
+
+## Verified in code (file:line on 6d34b25 unless marked A1)
+- **Shape.** `Notes.parse` (notes.js:85-120) gives `{topic, intent, tone, points[], meaning, use[], tools[], takeaway, tags[]}` plus optional `products`, `ingredients`, `steps`. `Notes.keepBacked` adds `unbacked` (notes.js:420-439). `Notes.autoNotes` gives the quick-notes shape (notes.js:614-633).
+- **Per reel:** `notes`, `notes_by` (`"meta"`, `"phone"`, `"auto"`), `notes_at`, `status = "done"`, `error = ""`, `raw` (the answer text, at most 20,000 characters). All of them are written only by `setNotes` (local.js:198-206), which also calls `Products.addFromReel`. I found no reader of `r.raw` in the page.
+- **Titles:** they are not stored on the reel. Watchlist entries point back to it by `source.ref` (watch.js:144-145).
+- **Limits in `parse`:** topic at most 200 characters (notes.js:112); tags at most 12, lowercased, only letters, digits, `_` and `-` (notes.js:109-110); products 12, ingredients and steps 40 (notes.js:116-118). **Points, takeaway and meaning have no cap.** The brief's "40 points" is the ingredients and steps cap. `autoNotes` cuts sentences to 300 characters (notes.js:626).
+- **Shown in:** the reel screen `notesHtml` with the `BY` label (local.js:790-807, 753-754); library rows, topic and 4 tags (local.js:780-788); tag counts (home.js:249); search lines (notes.js:534-538, library.js:73); Copy notes (local.js:845); exports (notes.js:713-738); Ask prompts (notes.js:636-651).
+- **No edit UI exists today.** The only text box on a reel is "What the reel says" (`extra`, local.js:838-847), and it is input for the AI. `BY.you = "Your notes"` already exists (local.js:753), and does so since v1.3.6 (checked with `git show v1.3.6`). But nothing writes `notes_by: "you"`.
+- **Writers and their guards today:**
+  1. **Start and the nightly run.** `needsWork` (local.js:277-284; A1 285) skips every reel with notes unless `notes_by === "auto"`. `startRun` writes with the phone AI only when there are no notes or the notes are `"auto"` (local.js:545), and clears `"auto"` notes when more text was read (local.js:541). The night picks through the same `needsWork` (local.js:622; A1 `nightQueue` 531).
+  2. **Explicit buttons.**
+     - "Read this reel properly" (local.js:860-865) and "Read from YouTube again" (local.js:867) clear only `"auto"` notes.
+     - By reading the code (not run), "Redo with phone AI" (local.js:848) writes nothing for a reel with `"meta"` or `"phone"` notes, because of line 545.
+  3. **Meta AI, with no guard at all.** All of these call `setNotes` and overwrite any notes:
+     - `pasteDialog` (local.js:1003-1013);
+     - the shared-item inbox (`fileShared` then `fileAnswer`, local.js:209-224, 170-196), which **the nightly run also calls** (`takeShared`, local.js:607);
+     - Add, "Paste links or answers" (local.js:1048);
+     - `fileScreen` "pick" (local.js:1097).
+     The "last asked" fallback (local.js:182) and the pick list (local.js:1089) exclude only `"meta"` notes.
+  4. **The video merge.** `readFileVideo` (local.js:412-421) merges a caption-only reel into a phone video by the same author, then **removes the old reel and its notes**. Its notes are not carried over. Today that loses any Meta notes it had, and it would lose an edit too.
+  5. **Not writers:** verify.js and catalog.js (no use of `notes`); comment screens (local.js:717-728, only reset `video_tried` for `"auto"`); the Instagram ZIP import (`addReels`, local.js:154-167, only adds collections). **Explicit deletes** ask first (local.js:868, 1270). **S4 restore** replaces the whole file (S4 design C); the page has no JSON import or merge.
+- **Indexes.** `Notes.fieldsOf` reads topic, tags, tools, points, meaning, use, takeaway (notes.js:467-472). `docOf` caches per reel object and rebuilds when a field text changes (`sig`, notes.js:477-488; `sameTexts` on A1 and P2), so an in-place edit re-indexes search, Related (notes.js:545) and topics (library.js:17-23) with no new code. `Lib.tagsOf` reads `notes.tags` (library.js:34). `Shots.fromReels` re-reads a reel for titles when `text.length + ":" + notes_at` changes (shots.js:106-108).
+- **A1:** a success deletes `tries`, `next_try_at`, `last_fail`, `last_fail_at` (A1 593); "Try again now" and the retry card show only for no or `"auto"` notes (A1 889); `failedScreen` lists `status === "failed"` (A1 862).
+- **R4 rule** (A1-R4 design, Rules): an optional field old code ignores and keeps needs no bump; test_library_upgrade.py:244-275 keeps unknown keys; A1 `SCHEMA = 1` (A1 73). `.btn` and `.input` are 48 px high (app.css:40, 62).
+
+## Options
+**A. Edit in place plus a marker (recommended).**
+- `r.notes` holds what the user sees, with their text in it.
+- `notes_by` becomes `"you"`.
+- A new `notes_edit` keeps which fields were edited and their AI text from before the edit.
+- Pros:
+  - Every reader (search, Related, topics, tags, Copy, exports, Ask prompts, Shots, Products) sees the edit with no change.
+  - `needsWork` already skips `"you"` in every released version, so even a rollback build never re-writes an edited reel automatically.
+- Con: every AI writer must divert its output instead of writing to `notes`. There is one choke point for that, `setNotes`, plus the video merge.
+
+**B. Overlay: `r.user = {topic, ...}` over unchanged AI `notes`.**
+- Pro: regeneration is trivial. Cons: about 12 readers need an "effective notes" helper (fieldsOf, notesHtml, reelRow, format, exports, tagsOf, tools, home tags, shots, search lines, Ask prompts), and one missed reader shows stale AI text. Older versions ignore the overlay, so after a rollback the edits seem gone, and they still re-write edited `"auto"` reels. Rejected.
+
+## The change (option A; all additive)
+**Data (per reel; missing means not edited):**
+- `notes_by: "you"`, set at the first edit. The existing field gets a value released versions already label and skip.
+- `notes_edit: { was_by: "phone", at: <ms>, fields: ["topic", "takeaway"], ai: { topic: "<AI text>", takeaway: "<AI text>" } }`.
+  - `ai[f]` is written once: at the first edit of field `f`, from the AI notes.
+  - For notes written from scratch, `was_by` is `""` and `ai` is `{}`.
+- `notes_next: { by: "meta", at: <ms>, notes: {...} }`: a newer AI version that arrived for an edited reel. Only one is kept; a newer arrival replaces it (it is AI text, never the user's). `raw` is not kept for it.
+- Editable in v1: `topic`, `points`, `takeaway`, `tags` (D-K2). The other fields stay as they are and are shown read-only.
+
+**Pure helpers in notes.js (exported, harness-testable):**
+- `Notes.cleanField(f, value)` applies the same normalisation as `parse`: `para` for topic and takeaway, one point per line, and the tag rule.
+- It returns `{value, error}` with these limits (D-K8):
+  - topic: at most 200 characters ("The topic can be at most 200 letters.");
+  - points: at most 40 lines of at most 500 characters ("Keep at most 40 points, each under 500 letters.");
+  - takeaway: at most 1,000 characters;
+  - tags: at most 12, the extra ones dropped with "Only the first 12 tags are kept."
+  - If the topic and all points are empty: "Write a topic or at least one point." (`parse` needs one of the two).
+- `Notes.applyEdit(r, f, value, now)`, `Notes.revertField(r, f)`, `Notes.isEdited(r)` (true when `notes_by === "you"`).
+- When the last field is reverted, `notes_by = was_by`, and `notes_edit` is deleted.
+
+**Guards in local.js (K1-1):**
+- `setNotes(r, notes, by, raw)`: if `Notes.isEdited(r)` and `by !== "you"`, set `r.notes_next = {by, at, notes}`, do not touch `notes`, `status`, `raw` or Products, and return `false`.
+- `fileAnswer` counts these separately, and the toast says: "1 answer kept aside: you edited that reel's notes. Open it to compare."
+- `readFileVideo`: a reel for which `Notes.isEdited` is true is never chosen as `old`, so it is never merged away (D-K10).
+- `applyEdit` also:
+  - sets `status = "done"` and `error = ""`;
+  - deletes A1's `tries`, `next_try_at`, `last_fail` and `last_fail_at`, as a success does at A1 593;
+  - bumps `notes_at`, so Shots re-reads the tags for titles.
+- `needsWork`, `nightQueue` and `startRun` are **unchanged**. `"you"` already returns false before any AI step (local.js:278).
+
+**Edit UI (K1-2), reel screen:**
+- An "Edit notes" button (`#editNotes`) next to Copy notes. For a reel without notes, the button is "Write my own notes" (D-K7).
+- It opens a `$dlg` form like `pasteDialog`, with:
+  - Topic: an `<input>`;
+  - Points: a `<textarea>`, one per line;
+  - Takeaway: a `<textarea>`;
+  - Tags: an `<input>`, separated by commas.
+- Each control has a visible `<label for>` and a hint linked by `aria-describedby`. An error shows under its field with `role="alert"`. Save and Cancel are 48 px buttons.
+- Each edited field has a "Use the AI text" button (only when `ai[f]` exists).
+- `notesHtml` shows a small "Edited by you" under each edited section label. The `BY` line reads "Your notes (edited from Notes by the on-phone AI)".
+- Save goes through `saveDb()` (revision protocol). If it returns false with `staleSave`, the page reloads as today, then reopens the editor with the typed draft kept in memory and says: "Your library changed elsewhere. Your text is still here: tap Save again." The draft is never applied without that tap.
+
+**Regeneration choice (K1-3):**
+- If `notes_next` exists, a card on the reel screen says: "A newer version from Meta AI (19 Nov) is waiting. Your edits are kept." It has 4 buttons:
+  1. **Show it**: renders `notesHtml(notes_next.notes)`.
+  2. **Keep my edits, update the rest** (primary, D-K5): takes the new AI text for the fields not edited, sets `ai[f]` to the new AI text for the edited ones, and keeps `notes_by: "you"`.
+  3. **Use the new AI version**: confirms with "Replace your edited topic and takeaway with the new AI text?", then calls `setNotes` with the force flag and deletes `notes_edit`.
+  4. **Dismiss**: deletes `notes_next`.
+- "Redo with phone AI" on an edited reel runs `writeWithPhoneAi` for that one code and lands in `notes_next` through the guard. This is the only `startRun` change, and only for a list passed explicitly.
+
+**Size** (scratch Node on the P4 generated reel: about 4.8 KB per reel, 4.6 MB per 1,000; its notes object is 898 bytes): `notes_edit` with all 4 fields edited is 775 bytes and `notes_next` 948 bytes. With 10 % of reels edited: about +0.08 MB per 1,000. Worst case, every reel edited and waiting: about +1.7 MB per 1,000 (+37 %). Long AI notes (15 points of 200 characters, 4.2 KB) can double that.
+
+**Schema:** no bump. All three keys are optional, and old code ignores and keeps them (R4 rule, test_library_upgrade.py:244). `"you"` is a value released pages already label and skip. **Export:** JSON and Markdown export what is shown, so they include the edits, and `notes_by` reads `"you"`. Nothing more is added. **Backup and restore:** S4 copies the whole file, so the new keys travel with it.
+
+**Privacy:** edits stay in reels.json on the phone. They leave it only when the user exports, copies or shares, or through the Ask prompts to the on-phone AI. `metaPrompt` sends the link and transcript, not the notes (notes.js:160-166). No network call is added.
+
+**Out of scope:**
+- editing intent, tone, meaning, use, tools, products, ingredients and steps;
+- an edit history beyond the one AI original;
+- merging two devices;
+- the pre-existing loss of `old.notes` in the video merge for reels that are not edited (flagged, D-K10);
+- K2 to K5.
+
+## Failure modes
+| Case | Result |
+|---|---|
+| Meta answer shared at night for an edited reel | `takeShared` files it into `notes_next`; the share is acked after the save as today; the edit is untouched |
+| Stale save while editing | refused, reloaded, editor reopened with the draft; nothing applied silently |
+| Rollback to 1.3.11 | `needsWork` skips `"you"`; an explicit Meta paste there overwrites `notes`, leaving a stale `notes_edit` (risk) |
+| Reverting the last field of edited quick notes | back to `"auto"`, so Start may rewrite it: correct, since no user text is left |
+| Invalid input | field error, Save blocked, nothing stored |
+
+## Tests (`tests/test_editable_notes.py`, phone harness with the fake RN from test_phone_app.py; no network, no model)
+1. `applyEdit` on topic sets `"you"`, `notes_edit.ai.topic`, `status` and `notes_at`, and clears A1 fields. `RN.store` receives it. Search finds the new word.
+2. An edited `"auto"` reel with a ready model: Start and `nightQueue` pick it 0 times, and a fake `generate` is called 0 times.
+3. Every Meta path (share inbox, `pasteDialog`, Add paste, `fileScreen` pick, the night's `takeShared`) leaves `notes` equal and sets `notes_next`.
+4. The video merge does not remove an edited reel.
+5. `revertField` per field; reverting the last field restores `was_by`.
+6. The three choice buttons and Dismiss.
+7. `cleanField` limits and messages.
+8. Stale refusal keeps the draft.
+9. The R4 upgrade test with `notes_edit` and `notes_next` added (keys survive).
+10. Labels and `role="alert"`; button height of at least 48 px.
+
+**Deliberate breaks** (each must fail a test):
+- remove the `setNotes` guard (3);
+- make `isEdited` false (2, 3);
+- let `"you"` pass `needsWork` (2);
+- drop the merge exclusion (4);
+- skip the 200 cap (7);
+- apply the draft after a reload (8);
+- drop `notes_edit` in `loadDb` (9).
+
+## PR split (stacked; each bumps versionCode and versionName and adds a CHANGELOG section, per AGENTS.md)
+1. **K1-1:** the data model, the helpers in notes.js, the `setNotes` guard, `notes_next`, the merge exclusion. Tests 1-5, 7 and 9 call the functions directly; there is no UI. Opus review of the guard.
+2. **K1-2:** the edit dialog, "Edited by you", "Use the AI text", "Write my own notes", the stale draft. Tests 5, 7, 8 and 10 through the screen.
+3. **K1-3:** the regeneration card, its buttons, and explicit "Redo with phone AI" into `notes_next`. Test 6, and test 3 through the screen.
+
+## Device checks (owner only)
+1. Edit a reel, close the app, run the nightly run with a Meta answer for it shared during the day. The edit is kept and the card shows.
+2. TalkBack reads each field label and error. Large font: the dialog scrolls and the buttons stay reachable.
+3. Install over the previous build. The counts are unchanged and an edited reel is still edited.
+
+## Owner decisions (recommended default)
+- **D-K1** Data shape: **in place, `notes_by: "you"` plus `notes_edit`**, not an overlay.
+- **D-K2** Editable fields in v1: **topic, points, takeaway, tags**.
+- **D-K3** Keep the AI original of each edited field: **yes** (about 0.8 KB per fully edited reel).
+- **D-K4** New AI text for an edited reel: **held in `notes_next`, the newest replaces the older one, the user chooses**.
+- **D-K5** Primary choice: **"Keep my edits, update the rest"**.
+- **D-K6** Editing quick notes stops automatic AI notes for that reel: **yes**.
+- **D-K7** "Write my own notes" for a reel without notes: **yes**, in K1-2.
+- **D-K8** Limits: **topic 200, points 40 x 500, takeaway 1,000, tags 12**.
+- **D-K9** K2 to K5: **owner to define**. Nothing is built for them.
+- **D-K10** Video merge: **never merge away an edited reel (K1-1)**. The loss of non-edited `old.notes` is a separate task.
+
+## Risks
+- **A missed writer.** Mitigated by the single choke point `setNotes`, a grep for `.notes =` in review, and test 3 covering every path found.
+- **Rollback overwrite** on an explicit paste in an old version (see Failure modes). Rare, and user-initiated.
+- **Library growth** if many reels hold `notes_next`. Dismiss clears it; P4 measures the cost.
+- **Not run:** the "Redo with phone AI" no-op and the dialog after `staleReload` were found by reading only. **NEEDS VERIFICATION** in the harness in K1-1 and K1-2.
