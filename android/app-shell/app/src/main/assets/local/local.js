@@ -503,11 +503,11 @@ function writeWithoutAi(r) {
   return true;
 }
 
-/** Tokens a prompt may take for the model in use: its window less the answer and the system text. A model picked by hand has an
- *  unknown window: the smallest known one counts. */
-function promptBudget() {
+/** Tokens a prompt may take for the model in use: its window less the answer and the system text (that of the call: the notes'
+ *  by default, or an Ask's). A model picked by hand has an unknown window: the smallest known one counts. */
+function promptBudget(system = Notes.LOCAL_SYSTEM) {
   const m = MODELS.find((x) => x.file === settings.modelFile);
-  return Notes.promptBudget({ ctx: m ? m.ctx : Math.min(...MODELS.map((x) => x.ctx)), answer: settings.maxTokens, system: Notes.LOCAL_SYSTEM });
+  return Notes.promptBudget({ ctx: m ? m.ctx : Math.min(...MODELS.map((x) => x.ctx)), answer: settings.maxTokens, system });
 }
 
 async function writeWithPhoneAi(r) {
@@ -935,6 +935,19 @@ function topicScreen(key) {
 
 let lastAsk = { q: "", answer: null, results: [] };
 
+const NOTHING_FITS = "None of your best notes fit the phone AI's window, so nothing was asked. Try \"Ask any AI with these notes\".";
+
+/** The line under an Ask answer when notes, web results or the question did not fit the model's window (nothing when all went in).
+ *  Only shown: nothing about it is stored on a reel or in the library. */
+function leftOut(info) {
+  const gone = (n, of, what) => `${n} of ${plural(of, what)} did not fit and ${n === 1 ? "was" : "were"} left out`;
+  const lines = [];
+  if (info.used < info.total) lines.push(gone(info.total - info.used, info.total, "note") + " (the best matches go in first).");
+  if (info.webUsed < info.webTotal) lines.push(gone(info.webTotal - info.webUsed, info.webTotal, "web result") + ".");
+  if (info.questionCut) lines.push("Your question was long and was shortened.");
+  return lines.join(" ");
+}
+
 function askScreen() {
   const fromUrl = (location.hash.match(/[?&]q=([^&]*)/) || [])[1];
   if (fromUrl !== undefined) { const q = decodeURIComponent(fromUrl); if (q !== lastAsk.q) lastAsk = { q, answer: null, results: [], web: null }; }
@@ -952,7 +965,7 @@ function askScreen() {
     ${q && settings.webLookup && !lastAsk.web ? `<button class="btn block" id="webAsk">${UI.globe} Look it up online</button>` : ""}
     ${q && !settings.webLookup && !results.length ? `<p class="hint">Switch on "Look things up online" in <a href="#/settings">Settings</a> to search Wikipedia and DuckDuckGo.</p>` : ""}
     ${lastAsk.answer ? `<div class="card stack"><span class="label">Answer from your notes${lastAsk.answer.by ? ` (${esc(lastAsk.answer.by)})` : ""}</span><p class="pre">${esc(lastAsk.answer.text).replace(/\[(\d{1,2})\]/g, (m, i) => results[i - 1] ? `<a href="#/r/${enc(results[i - 1].reel.code)}">[${i}]</a>` : m)
-      .replace(/\[W(\d)\]/g, (m, i) => lastAsk.web && lastAsk.web[i - 1] ? `<a href="#" data-url="${esc(lastAsk.web[i - 1].url)}">[W${i}]</a>` : m)}</p></div>` : ""}
+      .replace(/\[W(\d)\]/g, (m, i) => lastAsk.web && lastAsk.web[i - 1] ? `<a href="#" data-url="${esc(lastAsk.web[i - 1].url)}">[W${i}]</a>` : m)}</p>${lastAsk.answer.left ? `<p class="small muted" id="askLeft">${esc(lastAsk.answer.left)}</p>` : ""}</div>` : ""}
     ${lastAsk.web ? webHtml(lastAsk.web) : ""}
     ${results.length ? `<div class="grid2">${ready ? `<button class="btn primary" id="aiAns">Answer with phone AI</button>` : ""}<button class="btn" id="copyAsk">Ask any AI with these notes</button></div>` : ""}
     <div class="stack">${results.map((x, i) => {
@@ -976,9 +989,11 @@ function askScreen() {
     b.textContent = "Thinking... keep the app open";
     sync("allowWork");
     try {
-      const out = JSON.parse(await phone("generate", Notes.answerPrompt(q, results.slice(0, 5)),
-        JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: "You answer only from the notes you are given, briefly, citing them like [1].", maxTokens: settings.maxTokens, temperature: 0.1 })));
-      lastAsk.answer = { text: out.text, by: "on-phone AI" };
+      const info = Notes.answerPromptInfo(q, results.slice(0, 5), { budget: promptBudget(Notes.ASK_SYSTEM) });
+      if (!info.used) throw new Error(NOTHING_FITS);  // not even the best note fits whole: nothing is sent
+      const out = JSON.parse(await phone("generate", info.prompt,
+        JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.ASK_SYSTEM, maxTokens: settings.maxTokens, temperature: 0.1 })));
+      lastAsk.answer = { text: out.text, by: "on-phone AI", left: leftOut(info) };
     } catch (err) { toast(err.message === "stopped" ? "Stopped" : err.message); }
     sync("stopModel");
     if (location.hash.startsWith("#/ask")) askScreen();
@@ -1003,9 +1018,11 @@ async function webAsk(q, results, b) {
     if (location.hash.startsWith("#/ask")) askScreen();
     sync("allowWork");
     try {
-      const out = JSON.parse(await phone("generate", Notes.webAnswerPrompt(q, results.slice(0, 4), lastAsk.web),
-        JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: "You answer only from the notes and web results you are given, briefly, citing them like [1] or [W1].", maxTokens: settings.maxTokens, temperature: 0.1 })));
-      lastAsk.answer = { text: Notes.markOneSource(out.text, lastAsk.web), by: "on-phone AI, with web results" };
+      const info = Notes.webAnswerPromptInfo(q, results.slice(0, 4), lastAsk.web, { budget: promptBudget(Notes.WEB_ASK_SYSTEM) });
+      if (!info.used && !info.webUsed) throw new Error(NOTHING_FITS);
+      const out = JSON.parse(await phone("generate", info.prompt,
+        JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.WEB_ASK_SYSTEM, maxTokens: settings.maxTokens, temperature: 0.1 })));
+      lastAsk.answer = { text: Notes.markOneSource(out.text, lastAsk.web), by: "on-phone AI, with web results", left: leftOut(info) };
     } catch (err) { toast(err.message === "stopped" ? "Stopped" : err.message); }
     sync("stopModel");
   }
