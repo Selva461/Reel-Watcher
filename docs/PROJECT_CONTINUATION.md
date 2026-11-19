@@ -106,15 +106,15 @@ Status legend: DONE, PR (open), AGENT (a background agent is on it), DESIGNED (d
 |---|---|---|---|---|
 | 1 | Task 4 background media copy | PR #37 | owner device checks E13-E19 | yes (app) |
 | 1 | Task 2b nightly lifecycle | PR #33 | refreshed, reviewed, READY; device checks E9-E11 | yes (app) |
-| 2 | R3 CI runs once, flaky UI test fix | AGENT | none | no (CI and tests only) |
-| 2 | P2 search, index, related speed | AGENT | none | yes (app) |
-| 2 | P3 watchlist index | AGENT | none | yes (app) |
-| 3 | R4-1 upgrade fixtures and round-trip tests | DESIGNED (tests only) | none | no |
-| 3 | R4-2 newer-library rule (`State.NEWER`) | DESIGNED | R4-1; Opus review | yes |
-| 4 | 5a temp-file sweep (allowlist) | TODO | Task 4 merged | yes |
+| 2 | R3 CI runs once, flaky UI test fix | MERGED (#41) | none | no (CI and tests only) |
+| 2 | P2 search, index, related speed | PR #44 (READY, reviewed); device check E20 | none | yes (app) |
+| 2 | P3 watchlist index | PR #47 (READY, reviewed); device check E21 | none | yes (app) |
+| 3 | R4-1 upgrade fixtures and round-trip tests | MERGED (#43, #45; tests only) | none | no |
+| 3 | R4-2 newer-library rule (`State.NEWER`) | PR #48 (READY, reviewed); device checks E22-E24 | R4-1 | yes |
+| 4 | 5a temp-file sweep (allowlist) | 5a-1 built (PR #56, READY, reviewed); device checks E29-E30 | Task 4 | yes |
 | 4 | S4 backup and restore (S4-1 to S4-4) | S4-1 to S4-4 built (PRs #52, #58, #67, #70) | S4-3 is stacked on #33 (`NightGuard`); S4-4 Delete awaits the owner | yes |
 | 5 | 5b delete shared videos after success | TODO (owner decision D2 recorded) | 5a and S4 (irreversible: follow the backup) | yes |
-| 5 | A1 retry cap, backoff, visible failure reasons | DESIGNED (A1-1 to A1-3) | R4-1 | yes |
+| 5 | A1 retry cap, backoff, visible failure reasons | PR #53 (READY, reviewed); device checks E25-E28 | R4-1 | yes |
 | 6 | P4 memory: scan instead of tree parse | DESIGNED (`docs/design/P4-memory.md`, merged) | owner's device heap check first; Opus review of every `LibraryFile` change | yes |
 | 6 | A2 model hash verification | A2-1 (#57), A2-2 (#66) and A2-3 (#68) built | real hashes measured by real downloads | yes |
 | 6 | A3 prompt budget and evaluation | DESIGNED (merged); A3-1 harness MERGED (#71); A3-4 phone procedure MERGED (#77, tests and TESTING.md only); A3-2 notes budget built (#75, READY); A3-3 Ask budget built (#78, READY, stacked on #75) | A3-2 fixes the long-transcript-vanishes bug | yes (A3-2, A3-3) |
@@ -186,7 +186,7 @@ Decisions recorded by the owner in the sessions (verbatim in spirit):
 
 ## 12b. Where the project stands (estimate, 2026-11-19 16:00 UTC)
 
-By task count with partial credit (merged 100%, built and independently reviewed but unmerged 85%, a design or an early start 5 to 30%, not started 0%): **about 74% of the roadmap is built, about 29% is merged to the default branch, and none has been checked on a real phone.** This is an estimate, not a measurement: the roadmap is not a fixed scope and can grow. Built and waiting for the owner: Task 4, P2, P3, R4-2, A1, S4-1, 5a-1, A2-1, S4-2, Task 2b, S4-3, A2-2, A2-3 and S4-4 (all independently reviewed); merged: the A3-1 harness. A3-2 and A3-3 (the prompt budgets for notes and for Ask) are built and ready (#75, #78). Designed only: P4 (after your device heap check), K1, 5b (needs the owner's approval of the exact deletion rules). Not started: K1-1 to K1-3 (K1 is designed, not built), U1-U4 storage and accessibility screens, R1 docs reconciliation.
+By task count with partial credit (merged 100%, built and independently reviewed but unmerged 85%, a design or an early start 5 to 30%, not started 0%): **about 74% of the roadmap is built, about 29% is merged to the default branch, and none has been checked on a real phone.** This is an estimate, not a measurement: the roadmap is not a fixed scope and can grow. Built and waiting for the owner: Task 4, P2, P3, R4-2, A1, S4-1, 5a-1, A2-1, S4-2, Task 2b, S4-3, A2-2, A2-3 and S4-4 (all independently reviewed); merged: the A3-1 harness and the A3-4 phone procedure (#71, #77). A3-2 and A3-3 (the prompt budgets for notes and for Ask) are built and ready (#75, #78). Designed only: P4 (after your device heap check), K1, 5b (needs the owner's approval of the exact deletion rules). Not started: K1-1 to K1-3 (K1 is designed, not built), U1-U4 storage and accessibility screens, R1 docs reconciliation.
 
 Open owner decisions: **A1** a "not in the notes format" error counts toward the circuit breaker as the design says, so a model that gets the format wrong often could end a night after about 14 reels (alternative: only count model failures); **5b** deleting shared videos after success is a destructive user-data operation, the exact rules D-5b-1..6 in `docs/design/5a-5b-temp-files.md` need approval; **A2** D1-D5 (what to do with an existing unverified model, a failed check, redirect hosts); **S4-4** the Delete button in "Files kept for safety" (#70) removes data that cannot be brought back: approve it or say no (the screen still lists and saves; the removal is described in the PR); **A2-3** a picked model file is always shown as "own" (never hashed or called verified) and never replaces a file (#68); **P4** D-P4-1..3 and **A3** D-A3-1..5 in the two design documents (recommended defaults recorded there; P4 waits for the device heap check); **A3-2** the model window used by the prompt budget is assumed to be 4,096 tokens for all three models (only Qwen's file name says so): keep it, or budget only Qwen until you measure the Gemma windows (one line per model); the budgets only ever shorten a prompt and never refuse (when nothing fits, Ask sends what 1.3.26 sent and says so); **K1** D-K1..D-K10 in the design, and K2 to K5 are not defined anywhere: say what they are; **S4/R4-2** a newer library has no way out of the newer screen except installing the newest build (D-R3), `VerifyJob` still reads a newer `reels.json` (harmless); whether to merge #40 so publishing becomes manual. Optional CI hardening: add `tests/fixtures/library/**` to the `android-ci.yml` paths so a fixtures-only change runs `LibraryFileTest`. Test-speed ideas not done: split the 65 s PC UI test `test_ui_every_screen_and_button_survives` (about 20% of the run), parallel runs (care: timing-budget tests).
 
