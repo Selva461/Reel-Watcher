@@ -6,6 +6,26 @@ section here. A merge builds and tests the APK (kept as the workflow artifact); 
 notes and points `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.26
+- Long reels no longer overflow the on-phone AI. The prompt sent to the AI used to be cut by fixed limits that did not
+  look at the model's memory (its "window", which holds the prompt and the answer together). A reel with a lot of
+  text, a long transcript above all, could send far more than a small model can read, and the reel failed. The app now
+  works out how much the model can take (its window, less the answer length you chose and some room for the chat
+  format) and fills the prompt in a fixed order: the first lines, the title, the format and your "Extra instructions",
+  then what you typed, the transcript, the start of the caption, the text on screen, the rest of the caption and
+  the comments last. A text that does not fit is cut at a word and ends with "[shortened]".
+- A reel whose text already fits gets exactly the same prompt as before. When something was cut, the run log says
+  "(prompt shortened to fit the model)" after that reel (nothing new is saved on the reel). If your own "Extra
+  instructions" had to be shortened, it says so too.
+- A long transcript with no full stops or line breaks (a speech result, or a library imported from elsewhere) used to
+  vanish from the prompt completely above 7,000 characters, so the AI wrote notes without what was said. Now its start
+  is used.
+- The size of each model's window is a cautious 4,096 tokens for now (only Qwen's file name says so). A longer
+  window is not used until a phone confirms it. Prompts that come with the reel's pictures and sound are not shortened
+  yet (their size is not known). Nothing about the notes, the models or the permissions changes.
+- For checking later: the app asks the engine how many tokens the last prompt and answer took, and gives that number
+  to the page (nothing stores or shows it yet).
+
 ## 1.3.25
 <!-- Written as S4-4 on top of 1.3.22; the number is provisional (merge order). -->
 - New: Settings > Backup and restore > **Files kept for safety**. Reel Shelf never deletes a library file it could not
@@ -270,26 +290,6 @@ notes and points `apk-latest` at it. Builds signed with the stable key (GitHub s
   that the other app cut short (it stopped sending half way) is not saved: it says so, and Try again can fetch it.
 - Choosing pictures inside Reel Shelf is safe in the same way, and now says when some could not be saved, and why.
   Pictures and videos saved by earlier versions stay as they are.
-## 1.3.26
-- Long reels no longer overflow the on-phone AI. The prompt sent to the AI used to be cut by fixed limits that did not
-  look at the model's memory (its "window", which holds the prompt and the answer together). A reel with a lot of
-  text, a long transcript above all, could send far more than a small model can read, and the reel failed. The app now
-  works out how much the model can take (its window, less the answer length you chose and some room for the chat
-  format) and fills the prompt in a fixed order: the first lines, the title, the format and your "Extra instructions",
-  then what you typed, the transcript, the start of the caption, the text on screen, the rest of the caption and
-  the comments last. A text that does not fit is cut at a word and ends with "[shortened]".
-- A reel whose text already fits gets exactly the same prompt as before. When something was cut, the run log says
-  "(prompt shortened to fit the model)" after that reel (nothing new is saved on the reel). If your own "Extra
-  instructions" had to be shortened, it says so too.
-- A long transcript with no full stops or line breaks (a speech result, or a library imported from elsewhere) used to
-  vanish from the prompt completely above 7,000 characters, so the AI wrote notes without what was said. Now its start
-  is used.
-- The size of each model's window is a cautious 4,096 tokens for now (only Qwen's file name says so). A longer
-  window is not used until a phone confirms it. Prompts that come with the reel's pictures and sound are not shortened
-  yet (their size is not known). Nothing about the notes, the models or the permissions changes.
-- For checking later: the app asks the engine how many tokens the last prompt and answer took, and gives that number
-  to the page (nothing stores or shows it yet).
-
 ## 1.3.11
 - A reel's "Topic: ..." link now always opens the group it counted. In a library of more than 500 reels, one subject
   could be cut into a big group and a small piece with the same words, and the link of a reel in the small piece
