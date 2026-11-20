@@ -39,7 +39,7 @@ final class LibraryBackup {
     static final String MANIFEST = "manifest.json";
     static final String REELS = "reels.json";
     static final String SHOTS = "shots.json";
-    static final String CONTAINS = "reels, notes, watchlist, quotes, products; no settings, no API keys, no pictures or videos";
+    static final String CONTAINS = "reels, notes, watchlist, quotes, products, and the screenshot list (a short part of the text read from each screenshot, and file names); no settings, no API keys, no pictures or videos";
     /** The manifest is a few hundred bytes; this much is plenty and keeps a bogus one from filling memory. */
     static final long MANIFEST_MAX_BYTES = 1L << 20;
 

@@ -23,6 +23,30 @@ notes and points `apk-latest` at it. Builds signed with the stable key (GitHub s
 - Checked with automatic tests on a computer, including a local test server that sends damaged, cut-off, wrong-size and
   redirected files. The three published files were also downloaded once on a computer: their size and fingerprint match
   the list. Not tried on a phone.
+## 1.3.20
+- A **Back up now** button in Settings (under "Backup and restore") saves one file with your whole library to
+  Downloads/ReelShelf, named `ReelShelf-backup-<date>-<time>.zip`. It holds your reels, notes, watchlist, quotes and
+  products, and the list of screenshots already read. It checks that there is enough free space first, and after
+  saving it reads the file back and checks it, so a backup that could not be read back is deleted and reported as
+  failed instead of being kept. While it is being made and checked, the file is hidden (Android 10 or newer) or has
+  the ending `.part` (Android 8 and 9), and only gets its real name once the check has passed, so a half-finished file
+  is never mistaken for a backup. If Reel Shelf is stopped in the middle, a half-finished file may remain (Android 10
+  or newer removes the hidden one by itself after about a week; on Android 8 and 9 delete the `.part` file): it is not
+  a backup. The message tells you where it saved (with the name Android really gave the file), how many
+  reels and titles it holds and how big it is. Your library is not changed by a backup, and a backup is refused while
+  the library cannot be opened (then the "Save the unreadable file to Downloads" or "Save a copy to Downloads" button
+  is what you have, as before).
+- Privacy: the backup file has all your notes in it and can be read by any app with access to your files, so keep it
+  somewhere safe or delete it. It does not contain your settings, API keys, AI models, pictures or videos. It also
+  holds a short part of the text read from each of your screenshots, and their file names. Reel Shelf
+  never deletes old backups for you. On Android 8 and 9 the file is saved in the app's own folder, which Android
+  deletes when you uninstall Reel Shelf, and the screen says so: copy it somewhere else.
+- There is no restore button yet: this version only makes backups. A later version adds restoring.
+- The old **Save JSON** button is now called **Export notes (JSON, cannot be restored)**, because it keeps only some
+  of your notes and cannot be read back. The last step of the manual overnight run, which saves that JSON file, no
+  longer calls it a backup and points to Back up now.
+- Checked with automatic tests on a computer (the page, and the parts of the backup that need no phone). The part that
+  talks to Android (saving into Downloads, the free-space check, the read-back) is not tried on a phone yet.
 
 ## 1.3.18
 - Reel Shelf now cleans up its own leftover temporary files after a crash or a force-stop. It does this once each time
