@@ -217,7 +217,7 @@ public class TempSweepTest {
             "verify-results.json.tmp", "shot-inbox", "video-inbox", "shot_0123456789abcdef01234567.jpg", "shot_0123456789abcdef01234567.png",
             "video_0123456789abcdef01234567.mp4", "shot_1700000000000_1.jpg", "video_1700000000000_1.mp4", "models", "x.litertlm",
             "x.litertlm.part", "speech", "vosk-model-small-en-us-0.15.zip", "vosk-model-small-en-us-0.15.zip.part", "Download", "ReelShelf",
-            "app_webview", "WebView", "backup-work", "restore-staging", "manifest.json", "unknown.bin", "reel-media", "share-staging",
+            "app_webview", "WebView", "backup-work", "backup-check", "restore-staging", "manifest.json", "unknown.bin", "reel-media", "share-staging",
             "copy-1.part.bak", "reels.json.tmp.bak", "frame0.jpg.bak", "sound.wav.part", "reel-video.mp4.part", "notes.txt", "a", "x.tmp", "x.part",
     };
 

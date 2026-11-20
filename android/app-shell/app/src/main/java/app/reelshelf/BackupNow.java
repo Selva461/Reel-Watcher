@@ -102,7 +102,7 @@ final class BackupNow {
         return c;
     }
 
-    private static long count(JSONObject o, String key) {
+    static long count(JSONObject o, String key) {
         Object v = o.opt(key);
         if (!(v instanceof Number)) return 0;
         double d = ((Number) v).doubleValue();
