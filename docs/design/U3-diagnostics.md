@@ -14,7 +14,7 @@ What the page can already read, all local and synchronous through `window.RN`:
 | Reels by status | `db.reels[].status`, statuses in `STATUS` (local.js:761-764) |
 | Last nightly run: time and up to 12 log lines | `db.lastNight = {at, log}` (local.js:655), shown on the run screen (local.js:1139) |
 | Error of a reel | `r.error = e.message` (local.js:442, 455, 572) |
-| Retry state: `tries`, `last_fail` (first 300 characters of the message), `last_fail_at`, `next_try_at` | **A1** local.js:600-605; shown on the reel (**A1** local.js:856-858) |
+| Retry state: `tries`, `last_fail` (first 300 characters of the message), `last_fail_at`, `next_try_at` | **A1** local.js:600-606; shown on the reel (**A1** local.js:856-858) |
 | Nightly title check: `{checked, verified, review, notFound, left, at}` | `RN.nightlyInfo()` (LocalBridge.java:1561-1575), written by NightlyCheck.java:78-80 |
 | Nightly run settings and whether exact alarms are allowed | `RN.nightRunInfo()` (LocalBridge.java:1616-1627) |
 | Model file, ready, size, backend, `verified` (yes/no/unknown/checking/own) | `RN.modelInfo` (LocalBridge.java:949-968; `verified` in **A2-3** LocalBridge.java:591-604) |
