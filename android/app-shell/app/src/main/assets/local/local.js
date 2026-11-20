@@ -1247,9 +1247,10 @@ function applyDraft(d) {
   return { changed, notes: told };
 }
 
+/** Opens the notes editor for a reel (again, after a reload, with what was typed). False, with the editor closed and a message, when the reel is not on the shelf any more. */
 function editDialog(code) {
   const r = reel(code);
-  if (!r) return;
+  if (!r) { editDraft = null; if ($dlg.open) $dlg.close(); toast("This reel is no longer on your shelf."); return false; }
   const n = r.notes, e = Notes.isEdited(r) && r.notes_edit ? r.notes_edit : null;
   const fresh = Object.fromEntries(EDIT_FIELDS.map(([f]) => [f, editText(f, n && n[f])]));
   const again = editDraft && editDraft.code === code ? editDraft : null;  // reopened after a reload: what was typed is kept, the boxes you had not touched show the reel as it is now
@@ -1271,12 +1272,25 @@ function editDialog(code) {
     ctl(f).addEventListener("input", () => { ai[f] = false; });
   }
   $dlg.querySelectorAll("[data-ai]").forEach((b) => b.addEventListener("click", () => {  // only the form changes: Save puts the AI's text back, Cancel leaves yours
-    const f = b.dataset.ai;
-    ctl(f).value = editText(f, e.ai[f]);
+    const f = b.dataset.ai, cur = reel(code), now = cur && Notes.isEdited(cur) && cur.notes_edit;  // the reel as it is now: the page may have reloaded since the editor opened
+    if (!now || !(now.fields || []).includes(f) || !now.ai || !(f in now.ai)) {
+      ai[f] = false;
+      b.remove();
+      toast("This box is no longer edited, so there is no AI text to put back.");
+      return;
+    }
+    ctl(f).value = editText(f, now.ai[f]);
     ai[f] = true;
     $dlg.querySelector(`#ed-${f}-hint`).textContent = "The AI's text is filled in. It is used when you tap Save.";
   }));
   let unsaved = false;  // changes applied in memory that the phone refused to store (storage full): the next Save stores them
+  const onClose = () => {  // the editor was closed (Cancel or Escape): what the reel holds is on the screen, said so when it is not saved
+    $dlg.removeEventListener("close", onClose);
+    if (!unsaved) return;
+    toast("Not saved yet: the phone's storage is full. Your change is on this screen and is saved with your next successful save.");
+    reelScreen(code);
+  };
+  $dlg.addEventListener("close", onClose);
   $dlg.querySelector("#edCancel").addEventListener("click", () => { editDraft = null; $dlg.close(); });
   $dlg.querySelector("#edSave").addEventListener("click", (ev) => {
     ev.preventDefault();  // the dialog closes below, only when everything was saved
@@ -1287,15 +1301,20 @@ function editDialog(code) {
       $dlg.querySelector(`#ed-${f}-err`).textContent = msg;
       if (msg) ctl(f).setAttribute("aria-invalid", "true"); else ctl(f).removeAttribute("aria-invalid");
     }
-    if (res.gone) { editDraft = null; $dlg.close(); toast("This reel is no longer on your shelf."); render(); return; }
+    if (res.gone) { editDraft = null; unsaved = false; $dlg.close(); toast("This reel is no longer on your shelf."); render(); return; }
     if (res.errors) { ctl(EDIT_FIELDS.find(([f]) => res.errors[f])[0]).focus(); return; }
     if (!res.changed && !unsaved) { editDraft = null; $dlg.close(); if (res.notes.length) toast(res.notes.join(" ")); return; }
     unsaved = true;
     staleSave = false;
-    if (saveDb()) { editDraft = null; $dlg.close(); toast(["Saved", ...res.notes].join(". ")); reelScreen(code); }
-    else if (staleSave) { editDialog(code); toast("Your library changed elsewhere. Your text is still here: tap Save again."); }  // reloaded: the editor opens again on the fresh reel with what was typed, which is applied only when you tap Save
+    if (saveDb()) { editDraft = null; unsaved = false; $dlg.close(); toast(["Saved", ...res.notes].join(". ")); reelScreen(code); }
+    else if (staleSave) {  // reloaded: the editor opens again on the fresh reel with what was typed, which is applied only when you tap Save
+      unsaved = false;  // what was applied went with the reload
+      $dlg.removeEventListener("close", onClose);
+      if (editDialog(code)) toast("Your library changed elsewhere. Your text is still here: tap Save again.");
+    }
   });
   if (!$dlg.open) $dlg.showModal();
+  return true;
 }
 
 function pasteDialog(r) {

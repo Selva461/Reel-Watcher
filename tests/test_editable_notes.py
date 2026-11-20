@@ -1335,3 +1335,91 @@ def test_redo_on_a_reel_with_meta_or_phone_notes_that_is_not_edited_changes_noth
     phone.evaluate("() => startRun(['REEL1'], { redo: true })")  # redo alone must never let the AI write over Meta or phone notes
     phone.wait_for_function("() => run && run.finished")
     assert generate_calls(phone) == [] and stored(phone) == {**r, "error": ""}
+# ---------------------------------------------------------------- review of K1-2 (L-1, L-2, L-5)
+
+@pytest.mark.parametrize("how", ["cancel", "escape"])
+def test_closing_the_editor_after_a_save_the_phone_refused_says_so_and_shows_what_the_reel_holds(phone, how):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, topic="Needs space")
+    phone.evaluate("() => { window.__rn.storeRefused = true; }")
+    save(phone)
+    assert dialog_open(phone) and stored(phone)["notes"]["topic"] == "Passwords in apps"  # refused: nothing stored
+    if how == "cancel":
+        phone.locator("#edCancel").click()
+    else:
+        phone.keyboard.press("Escape")
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    phone.wait_for_function("() => window.__toasts.some((t) => t.startsWith('Not saved yet'))")
+    assert toasts(phone)[-1] == "Not saved yet: the phone's storage is full. Your change is on this screen and is saved with your next successful save."
+    assert "Needs space" in screen_text(phone)  # the screen shows what the reel holds, not the old notes
+    assert phone.evaluate("() => reel('REEL1').notes.topic") == "Needs space" and stored(phone)["notes"]["topic"] == "Passwords in apps"
+    phone.evaluate("() => { window.__rn.storeRefused = false; saveDb(); }")
+    assert stored(phone)["notes"]["topic"] == "Needs space"  # saved with the next successful save, as said
+
+
+def test_closing_the_editor_says_nothing_about_saving_when_nothing_is_pending(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, topic="Fine")
+    phone.locator("#edCancel").click()  # typed but not saved: nothing was applied
+    open_editor(phone)
+    typed(phone, topic="Saved fine")
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    open_editor(phone)
+    typed(phone, topic="Stale")
+    rival_saves(phone)
+    save(phone)  # refused as stale: reloaded, reopened with the text
+    phone.wait_for_function("() => window.__toasts.some((t) => t.startsWith('Your library changed elsewhere'))")
+    phone.locator("#edCancel").click()
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert not any("Not saved yet" in t for t in toasts(phone)) and toasts(phone)[0] == "Saved"
+    assert stored(phone)["notes"]["topic"] == "Saved fine"
+
+
+def test_use_the_ai_text_reads_the_ai_text_of_the_reel_as_it_is_after_a_reload(phone):
+    reels = [edited("REEL1")]
+    open_reel(phone, copy.deepcopy(reels))
+    open_editor(phone)
+    elsewhere = copy.deepcopy(reels[0])
+    elsewhere["notes_edit"]["ai"]["topic"] = "The AI topic after another answer"  # e.g. "Keep my edits, update the rest" on another page
+    rival_saves(phone, json.dumps({"reels": [elsewhere], "inbox": []}))
+    phone.evaluate("() => staleReload()")
+    assert dialog_open(phone)
+    phone.locator('[data-ai="topic"]').click()
+    assert phone.locator("#ed-topic").input_value() == "The AI topic after another answer"  # not the one the editor opened with
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    r = stored(phone)
+    assert r["notes"]["topic"] == "The AI topic after another answer" and r["notes_edit"]["fields"] == ["takeaway"]
+
+
+def test_use_the_ai_text_does_nothing_when_the_box_is_no_longer_edited_after_a_reload(phone):
+    reels = [edited("REEL1")]
+    open_reel(phone, copy.deepcopy(reels))
+    open_editor(phone)
+    elsewhere = reel("REEL1", notes=notes(topic="Topic put back elsewhere"), notes_by="phone")  # the edits were all put back on another page
+    rival_saves(phone, json.dumps({"reels": [elsewhere], "inbox": []}))
+    phone.evaluate("() => staleReload()")
+    assert phone.locator("#ed-topic").input_value() == "My own topic"
+    phone.locator('[data-ai="topic"]').click()
+    assert toasts(phone)[-1] == "This box is no longer edited, so there is no AI text to put back."
+    assert phone.locator("#ed-topic").input_value() == "My own topic" and phone.locator('[data-ai="topic"]').count() == 0  # the old AI text is not used
+    phone.locator("#ed-topic").fill("Typed after")  # and what is typed is yours
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    r = stored(phone)
+    assert r["notes"]["topic"] == "Typed after" and r["notes_by"] == "you"
+    assert r["notes_edit"]["ai"] == {"topic": "Topic put back elsewhere"} and r["notes_edit"]["was_by"] == "phone"  # the AI text kept is the reel's own, from now
+
+
+def test_a_reel_removed_elsewhere_closes_the_editor_when_a_stale_save_reloads(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, topic="Typed for nothing")
+    rival_saves(phone, json.dumps({"reels": [], "inbox": []}))
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert toasts(phone)[-1] == "This reel is no longer on your shelf." and not any("tap Save again" in t for t in toasts(phone))
+    assert phone.evaluate("() => reel('REEL1')") is None and phone.evaluate("() => editDraft") is None

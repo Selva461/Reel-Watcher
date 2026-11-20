@@ -39,6 +39,12 @@ notes and points `apk-latest` at it. Builds signed with the stable key (GitHub s
 - If your library changed elsewhere while you were typing (for example the nightly run saved), nothing is lost: the
   page reloads, the editor opens again with your text and says "Your library changed elsewhere. Your text is still here:
   tap Save again." Your text is saved only when you tap Save.
+- Smaller changes to what 1.3.28 added: "Delete all reels and notes" now says "including your own edits" and/or "the
+  versions kept aside" for what it really deletes (1.3.28 said "your own edits" whatever was kept); when several
+  answers are kept aside the toast counts answers ("2 answers kept aside", where 1.3.28 said "2 reels"); more than 12
+  typed tags keep the first 12; a topic or a point is needed before tags or a takeaway can be saved.
+- If the phone cannot store your edit (storage full), the editor stays open; if you then close it, the notes on the
+  screen are what the reel holds, and Reel Shelf says the change is not saved yet and is saved with the next successful save.
 - Nothing writes over your edits (1.3.28). Nothing was tried on a phone yet.
 - Version renumbered at merge: 1.3.29 (versionCode 36) is a provisional number for this stacked change.
 
@@ -49,9 +55,8 @@ notes and points `apk-latest` at it. Builds signed with the stable key (GitHub s
   are kept aside on the reel, and Reel Shelf says "Kept aside: this reel has your edits. Open it to compare." One kept
   answer per source (Meta AI, on-phone AI) is held; a newer answer of the same source replaces only that one.
 - A reel video that Reel Shelf matches to the same saved reel by its creator no longer takes over (and removes) that saved
-  reel when the reel has your edits or a kept version: both stay. "Remove from shelf" names your edits and the versions
-  kept aside before it asks, and "Delete all reels and notes" adds "including your own edits" and/or "the versions kept
-  aside" when there are any.
+  reel when the reel has your edits or a kept version: both stay. "Remove from shelf" and "Delete all reels and notes"
+  now name your edits and the versions kept aside before they ask.
 - Your library file gets three optional fields on a reel (`notes_edit`, `notes_next`, and `notes_by` "you"); older
   versions keep them and the library layout number is unchanged. Nothing was tried on a phone yet.
 - Version renumbered at merge: 1.3.28 (versionCode 35) is a provisional number for this stacked change.
