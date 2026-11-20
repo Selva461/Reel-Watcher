@@ -6,6 +6,34 @@ section here. A merge builds and tests the APK (kept as the workflow artifact); 
 notes and points `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.27
+- A long question to your library no longer overflows the on-phone AI. "Answer with phone AI" sent your question with
+  your 5 best-matching notes (4 with "Look it up online", plus the web results), each note whole, however long.
+  Notes can be long, so that could be several times what a small model can read (its "window", which holds the
+  prompt and the answer together). Then the AI failed or answered from a prompt it had silently cut. The app now
+  works out how much the model can take, the same way it does for writing notes (the window, less the answer length
+  you chose, the model's own instructions and some room for the chat format), and fills the prompt best match first.
+- A question whose notes already fit gets exactly the same prompt as before. When they do not: the instructions and
+  your question stay, and the notes go in whole, in the order of the match, as many as fit. A note that does not fit is
+  left out completely (never cut in the middle), and so are the ones after it, so [1], [2] in the answer are still the
+  notes with those numbers on the screen. With "Look it up online", the web results come after the notes, in what
+  is left, each whole or left out.
+- Under the answer, a line says plainly what was left out, for example "2 of 5 notes did not fit and were left out
+  (the best matches go in first)." Nothing about it is saved in your library.
+- The budget never stops an Ask. If not even your best note fits whole (with "Look it up online": no note and no web
+  result fits), or your question alone takes the whole window, everything is sent in full, exactly as before this
+  version, and a line says so: "Your notes are longer than the phone AI's assumed window, so they were sent in full as
+  before. If the answer looks cut off or wrong, choose Answer length "Short" or use "Ask any AI with these notes"."
+  (For a long question the line says "Your question ..." and suggests shortening it; for web results alone it says
+  "The web results ...".) This matters most for notes in Cyrillic, Hindi, Japanese and other scripts: the size
+  estimate counts 2 tokens for each such character, so an ordinary note of about 1,900 characters is judged too long
+  for the 4,096-token window although a real model may well read it. It is sent as before, so it still answers. The
+  question is cut at a word with "[shortened]" only when something still fits beside it (for example a small web
+  result), and then the line says "Your question was long and was shortened."
+- Not changed: "Ask any AI with these notes" still copies everything (it goes to a chat app of your own, not to
+  the phone's model), the Meta AI prompt, the prompt for writing notes (1.3.26), the models and the permissions.
+  The window is still a cautious 4,096 tokens for each model, and a model you pick by hand gets the smallest window.
+
 ## 1.3.26
 - Long reels no longer overflow the on-phone AI. The prompt sent to the AI used to be cut by fixed limits that did not
   look at the model's memory (its "window", which holds the prompt and the answer together). A reel with a lot of
