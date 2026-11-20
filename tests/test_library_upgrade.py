@@ -23,7 +23,8 @@ def _version_key(name):
     return tuple(int(x) for x in name.split("."))
 
 
-VERSIONS = sorted((p.name for p in FIXTURES.iterdir() if p.is_dir()), key=_version_key) if FIXTURES.is_dir() else []
+# only folders named like a version: a folder of something else (for example a made-up "newer" library) is not a release
+VERSIONS = sorted((p.name for p in FIXTURES.iterdir() if p.is_dir() and re.fullmatch(r"\d+(\.\d+)+", p.name)), key=_version_key) if FIXTURES.is_dir() else []
 NEWEST = "1.3.11"
 
 
@@ -88,16 +89,19 @@ def check_diff(actual, expected, what):
 # 3. Verify.migrate (verify.js, run when the page opens, once per change of rules, db.verify_rules): libraries from before
 #    the rules existed get `verify_rules: 4` and the titles are put back for a new online check (see RULES_*). The rule
 #    version a library carries is read from the fixture, not assumed.
+# 4. loadDb (R4-2): a library that has no `schema_version` gets `"schema_version": 1` (the number of the layout this page
+#    reads; see SCHEMA in local.js). No released version wrote it, so every fixture gains exactly this one key, once.
 
 CODE_WORKING = "FIXA0006"
 WORKING = ("changed", ("reels", CODE_WORKING, "status"), "working", "new")
 RULES_STAMP = ("added", ("verify_rules",), 4)
+SCHEMA_STAMP = ("added", ("schema_version",), 1)
 
 
 def expected(version):
     """The allowed differences for a fixture, from what the page of that version wrote. Returns a list of diff tuples."""
     reels = json.loads(texts(version)[0])
-    out = [WORKING]
+    out = [WORKING, SCHEMA_STAMP]
     rules = reels.get("verify_rules", 0)
     if rules < 4:
         out.append(RULES_STAMP if "verify_rules" not in reels else ("changed", ("verify_rules",), rules, 4))
@@ -312,6 +316,7 @@ def test_the_old_migrations_of_loaddb_do_what_the_allowlist_says_and_nothing_mor
         ("changed", ("reels", "HAND0002", "status"), "working", "new"),
         ("changed", ("reels", "HAND0003", "author"), "Media", ""),
         ("added", ("verify_rules",), 4),  # Verify.migrate on a library from before the rules
+        SCHEMA_STAMP,  # loadDb: a library with no schema_version gets 1
     ], "the hand-made library")
 
 
@@ -384,6 +389,6 @@ def test_hand_made_titles_that_the_verify_migration_downgrades_resets_or_deletes
     open_fixture(phone, reels=json.dumps(lib))
     assert phone.evaluate("() => saveDb()") is True
     after = json.loads(phone.rn()["db"])
-    check_diff(diff(lib, after), HAND_EXPECTED[rules], "the hand-made titles at rules %d" % rules)
+    check_diff(diff(lib, after), HAND_EXPECTED[rules] + [SCHEMA_STAMP], "the hand-made titles at rules %d" % rules)  # SCHEMA_STAMP: loadDb adds schema_version 1 (R4-2)
     assert sorted(m["id"] for m in after["media"]) == sorted(HAND_KEPT[rules]), "no title is lost beyond the listed ones"
     assert after["verify_rules"] == 4

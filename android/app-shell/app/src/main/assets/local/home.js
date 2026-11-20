@@ -322,7 +322,7 @@ function inboxScreen() {
     ${nr.on !== undefined ? `<a class="list-item" href="#/settings" style="align-items:center">${UI.moon}<span class="grow small">${nr.on ? `${String(nr.hour).padStart(2, "0")}:00 · ${nr.minBattery ? `≥ ${nr.minBattery}%` : "any battery"} · ≤ ${settings.nightMax || 200}` : "Off"}</span></a>` : ""}
     ${Verify.cardHtml()}
     ${(db.inbox || []).length ? `<a class="card accent" href="#/file"><span class="grow"><strong>${plural(db.inbox.length, "Meta AI answer")}</strong></span>${ICON.chev}</a>` : ""}
-    ${failed.length ? `<details class="stack"><summary class="label">Could not finish · ${failed.length}</summary><div class="stack" style="margin-top:8px">${failed.slice(0, 40).map(reelRow).join("")}</div></details>` : ""}
+    ${failed.length ? `<a class="card" href="#/failed"><span class="grow"><strong>${plural(failed.length, "reel")} could not be finished</strong></span>${ICON.chev}</a>` : ""}
     ${settings.metaAi && forMeta().length > 1 && !running ? `<button class="btn block" id="batch">Ask Meta AI · ${Math.min(BATCH, forMeta().length)}</button>` : ""}
     ${today.length ? `<div class="label">Today · ${today.length}</div><div class="stack">${today.slice(0, 50).map(reelRow).join("")}</div>` : ""}
     ${titlesToday.length ? `<div class="label">New titles · ${titlesToday.length}</div><div class="stack">${titlesToday.slice(0, 20).map(titleRow).join("")}</div>` : ""}
@@ -344,10 +344,19 @@ function addVideoFolder() {
   }).catch((e) => { if (e.message !== "cancelled") toast(e.message); });
 }
 
+/** What the picker's copy says in the toast: the bridge answers "3", or {"kept":3,"failed":2,"why":"not enough storage space on the phone"}. */
+function picturesAddedText(answer) {
+  let r;
+  try { r = JSON.parse(answer); } catch (e) { r = Number(answer) || 0; }
+  const kept = r && typeof r === "object" ? Number(r.kept) || 0 : Number(r) || 0;
+  const failed = r && typeof r === "object" ? Number(r.failed) || 0 : 0;
+  return `${plural(kept, "picture")} added` + (failed ? `, ${failed} could not be saved${r.why ? ` (${r.why})` : ""}` : "");
+}
+
 /** Comment screenshots: choose them, they are read on the phone and filed under the reel they belong to. */
 function commentsFromPictures() {
   phone("addShotPictures").then((n) => {
-    toast(`${plural(Number(n) || 0, "picture")} added`);
+    toast(picturesAddedText(n));
     location.hash = "#/shots";
     Shots.process();
   }).catch((e) => { if (e.message !== "cancelled") toast(e.message); });

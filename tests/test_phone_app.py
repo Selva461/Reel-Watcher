@@ -45,24 +45,41 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
     openUrl: (u) => { st.opened.push(u); keep(); },
     allowWork: () => {},
     stopModel: () => { st.stopped++; keep(); },
-    modelInfo: (name) => JSON.stringify({ file: name, ready: st.model.ready, bytes: st.model.ready ? 1.6e9 : 0, partial: st.model.partial,
-      downloading: false, backend: st.model.ready ? "gpu" : "", installed: st.model.installed }),
-    deleteModel: () => { st.model.ready = false; keep(); return true; },
+    // st.model.verified is what Java reports for the file ("yes", "no", "unknown", "checking", "own"); st.model.kept: "Keep using it" was chosen
+    // st.model.byFile: what differs for one model file (for example {"x.litertlm": {ready: true}}); "downloading" is one flag for the whole phone, as in Java
+    modelInfo: (name) => { const m = Object.assign({}, st.model, (st.model.byFile || {})[name] || {});
+      return JSON.stringify({ file: name, ready: m.ready, bytes: m.ready ? 1.6e9 : 0, partial: m.partial,
+      downloading: !!st.model.downloading, backend: m.ready ? "gpu" : "", installed: m.installed,
+      verified: m.verified || "yes", kept: !!m.kept }); },
+    deleteModel: (name) => { st.calls.push(["deleteModel", name]); st.model.ready = false; keep(); return true; },
+    // the one-time check of a model already on the phone: it starts only for "unknown" and only when Java would allow it (st.checkRefused),
+    // and it ends by itself with st.model.checkResult unless st.checkHold keeps it running (the test calls window.__finishCheck())
+    checkModel: (name) => { st.calls.push(["checkModel", name]); const m = st.model;
+      if (m.ready && m.verified === "unknown" && !st.checkRefused) { m.verified = "checking"; if (!st.checkHold) later(() => window.__finishCheck()); }
+      keep(); return m.verified || "yes"; },
+    stopCheck: () => { st.calls.push(["stopCheck"]); if (st.model.verified === "checking") st.model.verified = "unknown"; keep(); later(() => rnProgress("check", 0, 0)); },
+    keepModel: (name) => { st.calls.push(["keepModel", name]); st.model.kept = st.model.verified === "no"; keep(); return st.model.kept; },
     fetchPage: (id, url) => { st.calls.push(["fetchPage", url]); keep(); later(() => {
       const p = Object.keys(st.pages).find((k) => url.includes(k));
       p ? rnDone(id, true, st.pages[p]) : rnDone(id, false, st.igStatus || "Instagram answered 404"); }); },
     generate: (id, prompt, opts) => { st.calls.push(["generate", prompt, JSON.parse(opts)]); keep(); later(() => {
       const a = st.answers.shift();
       a ? rnDone(id, true, JSON.stringify({ text: a, backend: "gpu", ms: 10 })) : rnDone(id, false, "The AI model failed: out of memory"); }); },
+    // st.holdDownload keeps a download running (the model shows "downloading") until the test calls window.__finishDownload()
     downloadModel: (id, url, name) => { st.calls.push(["download", url, name]); keep();
-      later(() => rnProgress("download", 800e6, 1.6e9)); later(() => { st.model.ready = true; keep(); rnDone(id, true, "ready"); }); },
-    pickModel: (id) => later(() => rnDone(id, false, "cancelled")),
+      if (st.holdDownload) { st.model.downloading = true; st.downloadId = id; keep(); return; }
+      later(() => rnProgress("download", 800e6, 1.6e9)); later(() => { st.model.ready = true; st.model.verified = "yes"; st.model.kept = false; keep(); rnDone(id, true, "ready"); }); },
+    // st.pickName is the file the user picks: Java keeps it under its own name, marked "own" (never "yes"), and never replaces a file
+    pickModel: (id) => later(() => { if (!st.pickName) { rnDone(id, false, "cancelled"); return; }
+      st.model.ready = true; st.model.verified = "own"; st.model.installed = (st.model.installed || []).concat([st.pickName]); keep(); rnDone(id, true, st.pickName); }),
     postJson: (id, url, body) => { st.calls.push(["postJson", url, JSON.parse(body)]); keep(); later(() => {
       st.player ? rnDone(id, true, JSON.stringify(st.player)) : rnDone(id, false, "YouTube answered 403"); }); },
     openInstagram: () => { st.opened.push("instagram-export"); keep(); },
     readReelVideo: (id, url) => { st.calls.push(["video", url]); keep(); later(() => st.video ? rnDone(id, true, JSON.stringify(st.video)) : rnDone(id, false, "Instagram answered 403 for the video")); },
-    speechInfo: () => JSON.stringify({ ready: !!st.speech, downloading: false, size: 40e6 }),
-    downloadSpeech: (id) => { st.calls.push(["speechDownload"]); keep(); later(() => rnProgress("speech", 20e6, 40e6)); later(() => { st.speech = true; keep(); rnDone(id, true, "ready"); }); },
+    speechInfo: () => JSON.stringify({ ready: !!st.speech, downloading: false, size: 40e6, partial: st.speechPartial || 0 }),
+    downloadSpeech: (id, ...extra) => { st.calls.push(["speechDownload", ...extra]); keep(); later(() => rnProgress("speech", 20e6, 40e6)); later(() => {
+      if (st.speechFail) { rnDone(id, false, st.speechFail); return; }  // Java refused it (st.speechFail is its message): nothing is installed
+      st.speech = true; st.speechPartial = 0; keep(); rnDone(id, true, "ready"); }); },
     deleteSpeech: () => { st.speech = false; keep(); },
     addShotPictures: (id) => later(() => rnDone(id, false, "cancelled")),
     webSearch: (id, q) => { st.calls.push(["webSearch", q]); keep(); later(() => st.web ? rnDone(id, true, JSON.stringify(st.web)) : rnDone(id, false, "No internet, or the search services did not answer")); },
@@ -72,6 +89,7 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
     workUpdate: (title, text, d, t) => { st.work = (st.work || []).concat([["update", title]]); keep(); },
     workEnd: () => { st.work = (st.work || []).concat([["end"]]); keep(); },
     isNight: () => !!st.night,
+    nightActive: () => !!st.nightActive,  // the app's page: a nightly run is still going (the phone is asking it to stop)
     nightDone: () => { st.nightDone = (st.nightDone || 0) + 1; keep(); },
     nightRunInfo: () => JSON.stringify(st.nightRun || { on: true, hour: 0, minBattery: 40, exact: true }),
     setNightRun: (on, hour, bat) => { st.nightRun = { on, hour, minBattery: bat, exact: true }; keep(); },
@@ -87,6 +105,8 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
     nightlyInfo: () => JSON.stringify({ on: !!st.nightly, scheduled: !!st.nightly }),
     saveFile: (id, name, mime, text) => { st.saved.push({ name, mime, text }); keep(); later(() => rnDone(id, true, "Downloads/ReelShelf/" + name)); },
   };
+  window.__finishCheck = () => { st.model.verified = st.model.checkResult || "yes"; keep(); rnProgress("check", 0, 0); };
+  window.__finishDownload = () => { st.model.downloading = false; st.model.ready = true; st.model.verified = "yes"; st.model.kept = false; st.model.partial = 0; keep(); rnDone(st.downloadId, true, "ready"); };
   if (st.ytApps) window.RN.postYoutube = (id, url, body, client) => {  // the newer app: asks as one of YouTube's apps
     st.calls.push(["postYoutube", url, JSON.parse(body), client]); keep(); later(() => {
       const a = st.ytApps[/get_transcript/.test(url) ? "transcript" : client];
@@ -257,12 +277,206 @@ def test_custom_prompt_and_model_settings_are_used(phone):
     dl = [c for c in phone.rn()["calls"] if c[0] == "download"][0]
     assert ["update", "Downloading the AI model"] in phone.rn()["work"]  # keeps going after leaving the app, with Stop
     phone.wait_for_function("() => (window.__rn.work || []).slice(-1)[0][0] === 'end'")
-    assert dl[1].startswith("https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/") and dl[2].endswith(".litertlm")
+    assert dl[1] == "" and dl[2] == "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm"  # the page names the model; Java knows the pinned address
     phone.get_by_text("running on GPU").wait_for()
     phone.evaluate("() => { const s = window.__rn; s.shared.push('https://www.instagram.com/reel/CCC333/'); sessionStorage.setItem('rn', JSON.stringify(s)); onAppResume(); }")
     phone.goto(phone.url.split("#")[0] + "#/r/CCC333")
     phone.get_by_role("button", name="Ask Meta AI").click()
     assert phone.rn()["copied"] == "My master prompt for https://www.instagram.com/reel/CCC333/ please"
+
+
+def test_the_page_names_models_but_never_an_address():
+    """Java picks the pinned address from its own table (ModelCatalog); the page only names the model."""
+    import re
+    js = (LOCAL / "local.js").read_text(encoding="utf-8")
+    assert "resolve/main" not in js and "huggingface.co" not in js
+    models = js[js.index("const MODELS = ["):js.index("\n];", js.index("const MODELS = ["))]
+    assert len(re.findall(r"\bfile: \"[^\"]+\.litertlm\"", models)) == 3
+    assert not re.search(r"\burl\s*:", models)  # no address field in MODELS
+    sent = re.findall(r"phone\(\"downloadModel\",\s*([^,]*),", js)
+    assert len(sent) == 2 and all(a.strip() == '""' for a in sent)  # every download call sends an empty address
+
+
+# ---------------------------------------------------------------- models already on the phone, and models you picked (A2-3)
+
+QWEN_FILE = "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm"
+ON_PHONE = {"ready": True, "partial": 0, "installed": []}  # a model file that exists ("ready" only means that)
+
+
+def calls_named(pg, *names):
+    return [c for c in pg.rn()["calls"] if c[0] in names]
+
+
+def test_a_model_already_on_the_phone_is_checked_once_in_the_background_then_called_verified(phone):
+    phone.open_with({"model": {**ON_PHONE, "verified": "unknown", "checkResult": "yes"}, "checkHold": True}, "#/settings")
+    phone.get_by_text("Checking this model file against the published one.").wait_for()
+    assert phone.get_by_role("button", name="Stop checking").count() == 1
+    assert phone.locator("#mstate").inner_text() == "Ready"  # "ready" keeps its meaning: it exists and works while it is checked
+    assert phone.get_by_role("button", name="Delete the model").count() == 1
+    phone.evaluate("() => window.__finishCheck()")
+    phone.get_by_text("Verified: this is the published model file.").wait_for()
+    assert phone.get_by_role("button", name="Stop checking").count() == 0
+    phone.get_by_role("button", name="CPU").click()  # Settings is drawn again: no second check
+    phone.get_by_text("Verified: this is the published model file.").wait_for()
+    assert calls_named(phone, "checkModel") == [["checkModel", QWEN_FILE]]
+
+
+def test_a_model_that_is_not_the_published_file_is_kept_and_usable_with_a_warning_and_a_download_again_button(phone):
+    phone.open_with({"model": {**ON_PHONE, "verified": "no"}}, "#/settings")
+    phone.get_by_text("This model file is not the published one. It may be damaged.").wait_for()
+    assert phone.get_by_role("button", name="Download again (1.49 GB)").count() == 1
+    assert phone.get_by_role("button", name="Keep using it").count() == 1
+    assert phone.locator("#mstate").inner_text() == "Ready"  # still ready: notes keep using it
+    assert phone.get_by_text("Verified: this is the published model file.").count() == 0
+    assert not calls_named(phone, "deleteModel", "download", "checkModel")  # nothing is deleted, replaced or re-checked by itself
+    phone.get_by_role("button", name="Keep using it").click()
+    phone.get_by_text("Not the published file (you chose to keep using it).").wait_for()
+    assert phone.get_by_role("button", name="Keep using it").count() == 0 and phone.get_by_role("button", name="Download again (1.49 GB)").count() == 1
+    assert calls_named(phone, "keepModel") == [["keepModel", QWEN_FILE]]
+    phone.reload()
+    phone.wait_for_selector("#app > *")
+    phone.get_by_text("Not the published file (you chose to keep using it).").wait_for()  # remembered, not asked again
+    assert phone.get_by_text("It may be damaged.").count() == 0 and not calls_named(phone, "deleteModel", "download")
+
+
+def test_download_again_keeps_the_old_file_until_the_new_one_is_done_and_ends_verified(phone):
+    phone.open_with({"model": {**ON_PHONE, "verified": "no"}, "holdDownload": True}, "#/settings")
+    phone.get_by_role("button", name="Download again (1.49 GB)").click()
+    phone.get_by_text("Downloading again").wait_for()
+    assert phone.get_by_role("button", name="Pause download").count() == 1
+    assert phone.get_by_role("button", name="Delete the model").count() == 1  # the old file is still the model
+    assert calls_named(phone, "download") == [["download", "", QWEN_FILE]]  # the existing verified download: the page names the model only
+    phone.evaluate("() => window.__finishDownload()")
+    phone.get_by_text("Verified: this is the published model file.").wait_for()
+    assert not calls_named(phone, "deleteModel")
+
+
+def test_another_models_card_is_not_marked_downloading_again_while_a_different_model_downloads(phone):
+    """The phone has one download flag. A model that is ready must not look as if it were downloading again, with a Pause button,
+    only because another model (chosen in "Model to use") is the one downloading."""
+    gemma = "gemma-4-E4B-it.litertlm"
+    phone.open_with({"model": {"ready": False, "partial": 0, "installed": [], "byFile": {QWEN_FILE: {"ready": True, "verified": "yes"}}},
+                     "settings": json.dumps({"modelFile": gemma}), "holdDownload": True}, "#/settings")
+    phone.get_by_role("button", name="Download model").click()
+    phone.wait_for_function("() => document.getElementById('mstate').innerText === 'Downloading'")
+    assert phone.get_by_role("button", name="Pause download").count() == 1  # the model that downloads says so
+    phone.locator("#pickm").select_option(QWEN_FILE)  # now the card of a model that is ready and is not the one downloading
+    phone.wait_for_function("() => document.getElementById('mstate').innerText === 'Ready'")
+    assert phone.get_by_role("button", name="Pause download").count() == 0 and phone.get_by_text("Downloading again").count() == 0
+    phone.get_by_text("Verified: this is the published model file.").wait_for()
+    phone.locator("#pickm").select_option(gemma)  # and back: its own card still shows the download
+    phone.wait_for_function("() => document.getElementById('mstate').innerText === 'Downloading'")
+    assert phone.get_by_role("button", name="Pause download").count() == 1
+
+
+def test_a_model_file_you_picked_is_called_your_own_and_is_never_checked_or_called_verified(phone):
+    phone.open_with({"model": {**ON_PHONE, "installed": ["mine.litertlm"], "verified": "own"},
+                     "settings": json.dumps({"modelFile": "mine.litertlm"})}, "#/settings")
+    phone.get_by_text("Your own file, not verified.").wait_for()
+    assert phone.get_by_text("Verified: this is the published model file.").count() == 0
+    assert phone.get_by_role("button", name="Download again", exact=False).count() == 0
+    assert not calls_named(phone, "checkModel", "deleteModel")
+
+
+def test_picking_a_model_file_selects_it_as_your_own(phone):
+    phone.open_with({"pickName": "mine.litertlm"}, "#/settings")
+    phone.get_by_role("button", name="Use my own model file (.litertlm)").click()
+    phone.get_by_text("Your own file, not verified.").wait_for()
+    assert json.loads(phone.rn()["settings"])["modelFile"] == "mine.litertlm"
+    assert phone.get_by_text("Verified: this is the published model file.").count() == 0
+    assert not calls_named(phone, "checkModel", "deleteModel", "download")
+
+
+def test_a_check_that_cannot_start_now_says_not_checked_yet_and_check_now_tries_again(phone):
+    phone.open_with({"model": {**ON_PHONE, "verified": "unknown", "checkResult": "yes"}, "checkRefused": True}, "#/settings")
+    phone.get_by_text("Not checked yet.").wait_for()
+    assert len(calls_named(phone, "checkModel")) == 1  # Java was asked once, and said not now
+    phone.get_by_role("button", name="Check now").click()
+    phone.get_by_text("Not now: the check needs the app open").wait_for()
+    assert len(calls_named(phone, "checkModel")) == 2 and phone.get_by_text("Not checked yet.").count() == 1
+    phone.evaluate("() => { window.__rn.checkRefused = false; }")
+    phone.get_by_role("button", name="Check now").click()
+    phone.get_by_text("Verified: this is the published model file.").wait_for()
+
+
+def test_a_check_can_be_stopped_and_is_not_started_again_until_you_ask(phone):
+    phone.open_with({"model": {**ON_PHONE, "verified": "unknown", "checkResult": "no"}, "checkHold": True}, "#/settings")
+    phone.get_by_text("Checking this model file against the published one.").wait_for()
+    phone.get_by_role("button", name="Stop checking").click()
+    phone.get_by_text("Not checked yet.").wait_for()
+    assert calls_named(phone, "stopCheck") == [["stopCheck"]]
+    phone.get_by_role("button", name="CPU").click()  # Settings is drawn again: the check you stopped stays stopped
+    phone.get_by_text("Not checked yet.").wait_for()
+    assert len(calls_named(phone, "checkModel")) == 1
+    phone.get_by_role("button", name="Check now").click()
+    phone.get_by_text("Checking this model file against the published one.").wait_for()
+    assert len(calls_named(phone, "checkModel")) == 2
+    phone.evaluate("() => window.__finishCheck()")  # this time the answer is "no": warned, kept, never deleted
+    phone.get_by_text("This model file is not the published one. It may be damaged.").wait_for()
+    assert phone.locator("#mstate").inner_text() == "Ready" and not calls_named(phone, "deleteModel")
+
+
+def test_notes_are_still_written_with_a_model_that_is_not_the_published_file(phone):
+    """The check only labels a model: it keeps working (the owner's decision D1), and nothing starts a check or a download by itself."""
+    phone.open_with({"shared": ["https://www.instagram.com/reel/AAA111/"], "pages": {"AAA111/embed": EMBED},
+                     "model": {**ON_PHONE, "verified": "no"}, "answers": [ANSWER]})
+    phone.get_by_text("1 new reel saved").wait_for()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    r = db_of(phone)["reels"][0]
+    assert r["status"] == "done" and r["notes_by"] == "phone" and r["notes"]["topic"] == "Hardcoded secrets in mobile apps"
+    assert [c for c in phone.rn()["calls"] if c[0] == "generate"]
+    assert not calls_named(phone, "deleteModel", "download", "checkModel")
+
+
+def test_the_nightly_run_never_checks_a_model(phone):
+    phone.open_with({"night": True, "model": {**ON_PHONE, "verified": "unknown"}})
+    phone.wait_for_function("window.__rn.nightDone >= 1")
+    assert not calls_named(phone, "checkModel", "stopCheck", "keepModel", "deleteModel")
+
+
+def test_java_keeps_the_model_check_out_of_the_way():
+    """The Android classes cannot run on a computer, so the few lines that keep the check where it belongs are pinned here
+    (its rules and files are tested in ModelCheckTest): it starts only from checkModel and only through ModelCheck.refuse
+    (night, screen, download, job, battery), it stops with stopAll, a download, a copy, every job and leaving the screen,
+    a download that passed the check is recorded as verified, and picking a file never deletes or replaces one."""
+    app = LOCAL.parents[1] / "java" / "app" / "reelshelf"
+    model = (app / "LocalModel.java").read_text(encoding="utf-8")
+    bridge = (app / "LocalBridge.java").read_text(encoding="utf-8")
+    activity = (app / "MainActivity.java").read_text(encoding="utf-8")
+
+    def body(text, start, end):
+        a = text.index(start)
+        return text[a:text.index(end, a + len(start))]
+
+    assert "checks.cancel()" in body(model, "void stopAll()", "void allow()")
+    assert "ModelCheck.recordDownloaded(" in body(model, "void download(", "ModelVerifier verifier()")
+    assert 'o.put("ready", f.isFile());' in body(bridge, "public String modelInfo", "@JavascriptInterface")  # "ready" still only means the file exists
+    import re
+    assert set(re.findall(r"ModelCheck\.(\w+)", model)) == {"Runner", "recordDownloaded"}  # answers and downloads never ask whether a model was checked
+    check = body(bridge, "public String checkModel", "public void stopCheck")
+    assert "ModelCheck.refuse(onScreen, act.isNight(), downloading, jobs.get() > 0," in check
+    assert bridge.count("checks.start(") == 1 and bridge.index("checks.start(") > bridge.index("public String checkModel")
+    assert "() -> onScreen && jobs.get() == 0" in check  # asked again when the worker gets to the check: not off screen, not behind a job
+    # runWork counts the job and stops a model check. The S4 backup, restore and kept-files methods run on the same worker without
+    # that (they work on the library and the files kept for it, not on a model), so a check may run beside them: no other caller may.
+    owners = {re.findall(r"(?:public|private) void (\w+)\(", bridge[:m.start()])[-1] for m in re.finditer(r"work\.execute\(", bridge)}
+    assert owners == {"runWork", "backupLibrary", "chooseBackup", "restoreBackup", "saveKept", "deleteKept"} and bridge.count("work.execute(") == 6
+    run = body(bridge, "private void runWork", "work.execute(")
+    assert "model.checks.cancel()" in run and run.index("jobs.incrementAndGet()") < run.index("model.checks.cancel()")  # the job is counted first
+    for sig in ("public void downloadModel", "public void downloadSpeech", "public void pickModel"):
+        assert "model.checks.cancel()" in body(bridge, sig, "@JavascriptInterface"), sig
+    pick = body(bridge, "public void pickModel", "@JavascriptInterface")  # the lambda and savePicked
+    assert "ModelCheck.keepPicked(" in pick and "dest.delete()" not in pick and "renameTo(" not in pick
+    assert "ModelCheck.pickTemp(model.dir())" in pick and '"picked-model.tmp"' not in bridge  # never <name>.part: that is a paused catalog download
+    assert "catch (IOException | RuntimeException e)" in body(pick, "ModelCheck.keepPicked(", "done(id, true")  # an odd name never ends the app
+    # a copy that a killed app left behind is removed before the next copy starts, and by Delete only while no copy is running
+    assert pick.index("picking = true") < pick.index("ModelCheck.clearPickTemp(model.dir())") < pick.index("savePicked(id, uri, name)")
+    assert "picking = false" in pick[pick.index("savePicked(id, uri, name)"):]
+    assert "if (!picking) ModelCheck.clearPickTemp(model.dir())" in body(bridge, "public boolean deleteModel", "@JavascriptInterface")
+    stop = body(activity, "protected void onStop()", "super.onStop()")
+    assert stop.index("local.screen(false)") < stop.index("if (!working)")
 
 
 def test_bulk_paste_links_and_old_answers(phone):
@@ -354,7 +568,7 @@ def test_big_zip64_export_is_read(phone, tmp_path):
 def test_overnight_run_does_everything_then_ends_the_notification(phone):
     phone.open_with({"shared": ["https://www.instagram.com/reel/NIG001/"], "pages": {"NIG001/embed": EMBED}, "answers": [ANSWER]}, "#/run")
     phone.get_by_role("button", name="Run everything overnight").click()
-    phone.get_by_text("Backup saved to Downloads/ReelShelf/").wait_for()
+    phone.get_by_text("Notes exported to Downloads/ReelShelf/").wait_for()
     st = phone.rn()
     assert any(c[0] == "download" for c in st["calls"]) and any(c[0] == "generate" for c in st["calls"])
     assert db_of(phone)["reels"][0]["status"] == "done" and st["saved"][-1]["name"].startswith("reel-notes-")
@@ -404,7 +618,7 @@ def test_waiting_for_instagram_export_reminder(phone):
 def test_exports_and_leaving_the_app_stops_work(phone):
     phone.open_with({"shared": ["https://www.instagram.com/reel/DDD444/", ANSWER + "\nhttps://www.instagram.com/reel/DDD444/"]})
     phone.goto(phone.url.split("#")[0] + "#/settings")
-    phone.get_by_role("button", name="Save JSON").click()
+    phone.get_by_role("button", name="Export notes (JSON, cannot be restored)").click()
     phone.get_by_text("Saved to Downloads/ReelShelf/").wait_for()
     saved = phone.rn()["saved"][0]
     data = json.loads(saved["text"])
@@ -616,7 +830,39 @@ def test_try_on_five_reels_and_speech_model_download(phone):
     phone.goto(phone.url.split("#")[0] + "#/settings")
     phone.get_by_role("button", name="Download speech to text").click()
     phone.get_by_text("Speech to text is ready").wait_for()
-    assert ["speechDownload"] in phone.rn()["calls"]
+    assert ["speechDownload"] in phone.rn()["calls"]  # the page names no address: Java knows the pinned one
+
+
+def test_a_speech_download_that_fails_the_check_is_told_honestly_and_never_shown_as_ready(phone):
+    msg = "The download was damaged or changed on the way (check failed). Nothing was installed. Tap Download to try again."
+    phone.open_with({"speechFail": msg}, "#/settings")
+    assert phone.locator(".tag").first.inner_text() == "Not downloaded"
+    phone.get_by_role("button", name="Download speech to text").click()
+    phone.get_by_text(msg).wait_for()
+    phone.get_by_role("button", name="Download speech to text").wait_for()  # still offered: nothing was installed, try again
+    assert phone.locator(".tag").first.inner_text() == "Not downloaded"
+    assert phone.get_by_role("button", name="Delete the speech model").count() == 0 and not phone.rn().get("speech")
+    assert phone.get_by_text("Speech to text is ready").count() == 0
+
+
+def test_a_paused_speech_download_is_shown_as_paused_and_continued(phone):
+    phone.open_with({"speechPartial": 20000000}, "#/settings")
+    assert phone.locator(".tag").first.inner_text() == "Paused"
+    assert phone.get_by_role("button", name="Download speech to text").count() == 0  # the same button now continues
+    assert phone.locator("#dlsp").inner_text() == "Continue download"
+    phone.locator("#dlsp").click()
+    phone.get_by_text("Speech to text is ready").wait_for()
+    phone.get_by_role("button", name="Delete the speech model").wait_for()
+    assert phone.locator(".tag").first.inner_text() == "Ready"
+    assert [c for c in phone.rn()["calls"] if c[0] == "speechDownload"] == [["speechDownload"]]
+
+
+def test_the_page_asks_for_the_speech_model_without_an_address_and_says_it_is_checked():
+    import re
+    js = (LOCAL / "local.js").read_text(encoding="utf-8")
+    assert "alphacephei" not in js  # the address, size and fingerprints live in Java (ModelCatalog.SPEECH)
+    assert re.findall(r'phone\("downloadSpeech"([^)]*)\)', js) == [""]
+    assert "It is checked against the published file before it is installed." in js
 
 
 def test_useful_reels_go_first_then_memes(phone):

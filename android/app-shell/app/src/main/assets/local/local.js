@@ -68,19 +68,27 @@ function sync(method, ...args) {
 
 let db = { reels: [], inbox: [], media: [], mediaTypes: [] };
 let dbLocked = false;  // the library file could not be read: nothing is saved over it until you choose (lockedScreen)
+let dbNewer = false;   // ... because a newer Reel Shelf saved it (newerScreen): not damaged, and never to be set aside
+/** The newest library layout this version reads: reels.json says which one it was saved with in "schema_version". LibraryFile.REELS_SCHEMA in the app must be the same number (LibraryFileTest checks). */
+const SCHEMA = 1;
+/** A file is newer when it says it was saved with a bigger NUMBER than we read. A missing, null or non-number value is not (the same rule as LibraryFile.java: nothing ever wrote one). */
+function isNewer(v, supported) { return typeof v === "number" && v > supported; }
 function libraryInfo(which) { try { return JSON.parse(sync("libraryInfo", which || "reels") || "{}"); } catch (e) { return {}; } }
-function emptyDb() { return { reels: [], inbox: [], media: [], mediaTypes: [] }; }
+function emptyDb() { return { reels: [], inbox: [], media: [], mediaTypes: [], schema_version: SCHEMA }; }
 /** Reads the library from the phone. Nothing of the copy already in memory survives: a stored library that is new or empty (for example one another page just started) gives an empty library, never the old records. */
 function loadDb() {
   db = emptyDb();
+  dbNewer = false;
   const t = sync("load");
   const info = libraryInfo();
   if (info.state === "unreadable") { dbLocked = true; return; }  // the phone found it damaged and kept it as it is
+  if (info.state === "newer") { dbLocked = dbNewer = true; return; }  // saved by a newer Reel Shelf: the phone gives nothing and keeps it as it is
   if (t) {
     try {
       const d = JSON.parse(t);
+      if (d && typeof d === "object" && !Array.isArray(d) && isNewer(d.schema_version, SCHEMA)) { dbLocked = dbNewer = true; return; }  // whatever its shape: it is not ours to judge
       if (!d || typeof d !== "object" || Array.isArray(d) || (d.reels != null && !Array.isArray(d.reels))) throw new Error("not a library");
-      db = { ...d, reels: d.reels || [], inbox: d.inbox || [], media: d.media || [], mediaTypes: d.mediaTypes || [] };
+      db = { ...d, reels: d.reels || [], inbox: d.inbox || [], media: d.media || [], mediaTypes: d.mediaTypes || [], schema_version: d.schema_version == null ? SCHEMA : d.schema_version };  // stamped when missing; written with the next save
       for (const r of db.reels) if (r.status === "working") r.status = r.notes ? "done" : "new";  // the app was closed mid-way
       for (const r of db.reels) if (r.author && !Notes.isYoutube(r) && !Notes.username(r.author)) r.author = "";  // "Media": a label from the export, not a creator (before 1.3.5)
     } catch (e) { dbLocked = true; return; } }  // damaged: never save over it
@@ -117,15 +125,17 @@ function staleReload() {
 }
 function reel(code) { return db.reels.find((r) => r.code === code || r.ig_code === code); }
 
+// ctx: the model's window in tokens (prompt and answer together), which sets how long a prompt may be (Notes.promptBudget). Every value
+// is a cautious 4096 until a phone confirms it (device check 1, TESTING.md E71): Qwen's from its file name (ekv4096), the Gemmas' unknown.
 const MODELS = [
   { id: "qwen", name: "Qwen2.5 1.5B", file: "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
-    url: "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
+    ctx: 4096,  // from the file name; not confirmed on a phone: device check 1
     size: 1.6e9, note: "Free, about 1.6 GB, good for English notes. Needs a phone with 6 GB of RAM or more." },
   { id: "gemma4", name: "Gemma 4 E2B (watches the reel)", file: "gemma-4-E2B-it.litertlm",
-    url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
+    ctx: 4096,  // unknown: a cautious guess until device check 1
     size: 2.59e9, note: "Recommended. Free, about 2.6 GB. Looks at key frames and listens to the sound of each reel, plus the text on screen and what is said, then writes the intent, tone and points. About a minute per reel: best at night on the charger." },
   { id: "gemma4e4", name: "Gemma 4 E4B (best quality, slower)", file: "gemma-4-E4B-it.litertlm",
-    url: "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm",
+    ctx: 4096,  // unknown: a cautious guess until device check 1
     size: 3.66e9, note: "Free, about 3.7 GB. Same as E2B but more accurate, about twice as slow. Needs 8 GB of RAM or more." },
 ];
 const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en", tmdbKey: "", omdbKey: "", metaAi: false, webLookup: false };
@@ -169,9 +179,10 @@ function addReels(found, how) {
 /** An answer in the notes format: filed under the reel it names, else the reel you last asked Meta AI about. */
 function fileAnswer(text, by = "meta", target = null, standalone = false) {
   const parts = Notes.splitAnswers(text);
-  if (!parts.length) return { filed: 0, inbox: 0 };
+  if (!parts.length) return { filed: 0, inbox: 0, kept: 0 };
   let filed = 0;
   let inbox = 0;
+  let kept = 0;  // answers kept aside because the reel has your edits
   for (const p of parts) {
     let r = target ? reel(target) : null;
     if (!r && p.links.length) {
@@ -188,31 +199,50 @@ function fileAnswer(text, by = "meta", target = null, standalone = false) {
       r = reel(code);
     }
     if (!r) { db.inbox.push({ text: p.text, at: Date.now() }); inbox++; continue; }
-    setNotes(r, p.notes, by, p.text);
-    filed++;
+    if (setNotes(r, p.notes, by, p.text)) filed++; else kept++;
   }
   saveDb();
-  return { filed, inbox };
+  return { filed, inbox, kept };
 }
 
-function setNotes(r, notes, by, raw) {
+const KEPT_ASIDE = "Kept aside: this reel has your edits. Open it to compare.";
+/** What is said when an answer was kept aside for a reel with your edits (setNotes gave false): the same words for one, a count for several. */
+function keptAside(n) { return n > 1 ? `Kept aside: ${n} reels have your edits. Open them to compare.` : KEPT_ASIDE; }
+
+/**
+ * Writes the notes of a reel. A reel with your edits is never overwritten by an AI answer: the answer is kept aside in
+ * notes_next, one place per source ("meta", "phone"; a newer answer of a source replaces only that source's), nothing
+ * else on the reel changes (not the notes, status, raw or Products), and false is returned: every caller says so
+ * (KEPT_ASIDE). `force` writes anyway (for code that moves a kept version onto the screen). True when written.
+ */
+function setNotes(r, notes, by, raw, force) {
+  const text = raw ? String(raw).slice(0, 20000) : "";
+  if (Notes.isEdited(r) && by !== "you" && !force) {
+    (r.notes_next = r.notes_next || {})[by] = { at: Date.now(), notes, raw: text };
+    return false;
+  }
+  if (by === "meta" && !force && r.notes_next && r.notes_next.meta) {  // a newer Meta AI answer replaces an older one kept aside
+    delete r.notes_next.meta;
+    if (!Object.keys(r.notes_next).length) delete r.notes_next;
+  }
   r.notes = notes;
   r.notes_by = by;
   r.notes_at = Date.now();
   r.status = "done";
   r.error = "";
-  if (raw) r.raw = String(raw).slice(0, 20000);
+  if (raw) r.raw = text;
   if (typeof Products !== "undefined") Products.addFromReel(db, r);  // products the notes name go to Products
+  return true;
 }
 
 /** Files the shared items in the library, in one save. Returns the counts, and whether the save worked. */
 function fileShared(items) {
-  const n = { reels: 0, answers: 0, waiting: 0, other: 0, saved: true };
+  const n = { reels: 0, answers: 0, waiting: 0, kept: 0, other: 0, saved: true };
   deferSaves = true;  // 100 shared reels are one save, not 100
   try {
     for (const it of items) {
       const text = String(it.text || "");
-      if (Notes.parse(text)) { const r = fileAnswer(text, "meta"); n.answers += r.filed; n.waiting += r.inbox; continue; }
+      if (Notes.parse(text)) { const r = fileAnswer(text, "meta"); n.answers += r.filed; n.waiting += r.inbox; n.kept += r.kept; continue; }
       const found = Notes.links(text);
       if (found.length) n.reels += addReels(found, "share"); else n.other++;
     }
@@ -242,7 +272,8 @@ function takeShared() {
   sync("ackShared", JSON.stringify(items.map((x) => x.id).filter(Boolean)));
   const msg = [n.reels && `${plural(n.reels, "new reel")} saved`, n.answers && `${plural(n.answers, "Meta AI answer")} filed`,
     n.waiting && `${plural(n.waiting, "answer")} to file`, n.other && `${plural(n.other, "share")} had no reel link`].filter(Boolean).join(", ");
-  if (msg) toast(msg);
+  const kept = n.kept ? keptAside(n.kept) : "";
+  if (msg || kept) toast([msg, kept].filter(Boolean).join(". "));
   return items.length;
 }
 
@@ -274,7 +305,10 @@ function bindIgWaiting() {
 
 let run = null;  // {codes, i, step, stop, done, failed, current}
 
-function needsWork(r, ready) {
+function needsWork(r, ready, now = Date.now()) {
+  const wait = (r.next_try_at || 0) - now;
+  // failed again and again, or waiting for its next try (a date further away than the longest wait is a wrong clock: due)
+  if ((r.tries || 0) >= Notes.RETRY_CAP || (wait > 0 && wait <= Notes.retryAfter(Notes.RETRY_CAP - 1))) return false;
   if (r.notes && !(r.notes_by === "auto" && (ready || (!Notes.isYoutube(r) && !r.video_tried)))) return false;
   if (r.file) return !r.video_tried || (ready && Notes.material(r) >= 30 && r.status !== "ready_no_text");  // a video on the phone
   if (!r.url) return false;
@@ -411,7 +445,7 @@ async function readFileVideo(r) {
   if (at && Notes.username(at[1]) && !r.author) r.author = at[1];
   const same = r.author ? db.reels.filter((x) => x !== r && x.url && !x.file && !Notes.isYoutube(x) && (x.author || "").toLowerCase() === r.author.toLowerCase()
     && !/^video/.test(x.content || "")) : [];
-  if (same.length === 1) {  // the saved reel that only had its caption: it is this video
+  if (same.length === 1 && !Notes.hasUserData(same[0])) {  // the saved reel that only had its caption: it is this video (one with your edits or kept versions stays, as its own reel)
     const old = same[0];
     r.url = old.url;
     r.ig_code = old.code;
@@ -498,16 +532,26 @@ function writeWithoutAi(r) {
   return true;
 }
 
+/** Tokens a prompt may take for the model in use: its window less the answer and the system text (that of the call: the notes'
+ *  by default, or an Ask's). A model picked by hand has an unknown window: the smallest known one counts. */
+function promptBudget(system = Notes.LOCAL_SYSTEM) {
+  const m = MODELS.find((x) => x.file === settings.modelFile);
+  return Notes.promptBudget({ ctx: m ? m.ctx : Math.min(...MODELS.map((x) => x.ctx)), answer: settings.maxTokens, system });
+}
+
 async function writeWithPhoneAi(r) {
   const media = run && run.media === r.code;  // key frames and sound of this reel are ready for the AI
   if (run) run.media = "";
-  const out = JSON.parse(await phone("generate", Notes.localPrompt(r, settings.localExtra, { media }),
+  // a prompt with pictures and sound has no budget yet: their size in tokens is not known (device check 3), so it is sent as before
+  const info = Notes.localPromptInfo(r, settings.localExtra, { media, budget: media ? undefined : promptBudget() });
+  const out = JSON.parse(await phone("generate", info.prompt,
     JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.LOCAL_SYSTEM, maxTokens: settings.maxTokens, temperature: settings.temperature, media })));
   const notes = Notes.parse(out.text);
   if (!notes) throw new Error("The on-phone AI's answer was not in the notes format. Try again, or Ask Meta AI.");
   Notes.keepBacked(notes, r);
-  setNotes(r, notes, "phone", out.text);
-  return out;
+  const saved = setNotes(r, notes, "phone", out.text);
+  out.shortened = info.shortened;  // what was cut to fit the model's window (for the run log; not stored)
+  return saved ? out : null;  // null: the reel has your edits, the answer was kept aside
 }
 
 /** Useful reels first, then jokes, memes and music; newest first within each. */
@@ -516,22 +560,52 @@ function byUsefulThenNewest(a, b) {
   return ka - kb || (b.added_at || 0) - (a.added_at || 0);
 }
 
+/** The night's reels: 3 never-tried (useful first, newest first), then 1 of the oldest waiting (due retries come in here), up to max. */
+function nightQueue(reels, ready, now, max) {
+  const cand = reels.filter((x) => needsWork(x, ready, now));
+  const qa = cand.filter((x) => !x.tries).sort(byUsefulThenNewest);
+  const qb = cand.slice().sort((a, b) => (a.added_at || 0) - (b.added_at || 0));
+  const out = [], seen = new Set();
+  let ia = 0, ib = 0;
+  const next = (q, i) => { while (i < q.length && seen.has(q[i].code)) i++; return i; };
+  while (out.length < max) {
+    for (let k = 0; k < 4 && out.length < max; k++) {
+      let x;
+      if (k < 3) { ia = next(qa, ia); x = qa[ia]; if (!x) { ib = next(qb, ib); x = qb[ib]; } }
+      else { ib = next(qb, ib); x = qb[ib]; if (!x) { ia = next(qa, ia); x = qa[ia]; } }
+      if (!x) return out;
+      seen.add(x.code); out.push(x);
+    }
+  }
+  return out;
+}
+
+/** The run log's words for a prompt that was shortened to fit the model (nothing when it was not). */
+function shortenedNote(cut) {
+  return (cut.length ? " (prompt shortened to fit the model)" : "") + (cut.includes("also") ? " (your extra instruction was shortened to fit the model)" : "");
+}
+
 async function startRun(codes) {
   if (run && !run.finished) { location.hash = "#/run"; return; }
   if (!codes) await scanVideos();  // reel videos saved since last time are read too
   const ready = !!modelInfo().ready;
   const list = (codes || db.reels.filter((r) => needsWork(r, ready)).sort(byUsefulThenNewest).map((r) => r.code)).filter((c) => reel(c));
   run = { codes: list, i: 0, step: "", stop: false, done: 0, failed: 0, current: "", finished: false, log: [], ready };
+  let streak = { key: "", n: 0 }, tripped = false;
+  const handled = new Set();  // a video that took over its caption-only reel during this run is the same reel: once  // failures in a row with the same reason: a broken model stops the run
   sync("allowWork");
   workTick();  // the notification appears now, while the app is on screen
   location.hash = "#/run";
   render();
   for (; run.i < run.codes.length && !run.stop; run.i++) {
     const r = reel(run.codes[run.i]);
-    if (!r) continue;
+    if (!r || handled.has(r)) continue;
+    handled.add(r);
     run.current = r.code;
     r.status = "working";
     r.error = "";
+    let cut = [];  // what had to be shortened in this reel's prompt
+    let kept = false;  // the AI's answer was kept aside: you edited this reel while it was written
     try {
       if (!r.caption_read || (!Notes.isYoutube(r) && !r.video_tried)) {
         run.step = "caption";
@@ -549,24 +623,34 @@ async function startRun(codes) {
         } else {
           run.step = "ai";
           paintRun();
-          await writeWithPhoneAi(r);
-          run.done++;
+          const got = await writeWithPhoneAi(r);
+          if (got) { cut = got.shortened; run.done++; } else kept = true;  // null: kept aside, no notes were written
         }
       } else if (!r.notes) {
         if (Notes.material(r) >= 30) writeWithoutAi(r);
         else r.status = Notes.isYoutube(r) ? "ready_no_text" : "ready";
       }
-      if (r.notes) r.status = "done";
+      if (r.notes) { r.status = "done"; delete r.tries; delete r.next_try_at; delete r.last_fail; delete r.last_fail_at; }
+      streak = { key: "", n: 0 };
     } catch (e) {
       if (run.stop || e.message === "stopped") { r.status = "new"; break; }
       if (/slow down/.test(e.message)) { r.status = "new"; run.note = e.message; break; }
       r.status = "failed";
       r.error = e.message;
       run.failed++;
+      const now = Date.now(), key = String(e.message).split(":")[0].slice(0, 40);
+      r.tries = (r.tries || 0) + 1;
+      r.last_fail_at = now;
+      r.last_fail = String(e.message).slice(0, 300);
+      const wait = Notes.retryAfter(r.tries);
+      r.next_try_at = wait === null ? 0 : now + wait;  // parked at the cap: needsWork stops on tries, not on the time
+      streak = { key, n: streak.key === key ? streak.n + 1 : 1 };
+      if (streak.n >= 3) { run.note = `Stopped after 3 failures in a row: ${r.last_fail}`; tripped = true; }
     }
-    run.log.unshift({ code: r.code, ok: r.status === "done", text: r.status === "done" ? (r.notes.topic || "Notes written") : r.error || (r.caption ? "Caption read, too short for notes" : "No caption from Instagram") });
+    run.log.unshift({ code: r.code, ok: r.status === "done", text: kept ? KEPT_ASIDE : r.status === "done" ? (r.notes.topic || "Notes written") + shortenedNote(cut) : r.error || (r.caption ? "Caption read, too short for notes" : "No caption from Instagram") });
     saveDb();
     paintRun();
+    if (tripped) break;
   }
   run.finished = true;
   run.step = "";
@@ -584,7 +668,8 @@ function stopRun() {
 
 // ------------------------------------------------------------------ overnight run: everything in one go (stops below 40% battery)
 // 1. the on-phone AI model (downloaded if missing), 2. Start on every reel waiting, 3. screenshots, 4. titles checked
-// online, 5. a JSON backup in Downloads/ReelShelf. One notification with Stop the whole time. Never starts by itself.
+// online, 5. the notes saved as JSON in Downloads/ReelShelf (an export that cannot be restored, not a backup: that is Back up now in Settings).
+// One notification with Stop the whole time. Never starts by itself.
 let night = null;
 function nightText() {
   if (!night) return "";
@@ -611,7 +696,7 @@ async function overnightRun(auto) {
     else if (!mi.ready) {  // at night only a download you already started is continued
       const m = MODELS.find((x) => x.file === settings.modelFile) || MODELS[0];
       onProgress.download = (d, t) => { night.detail = `Downloading the AI model: ${mb(d)} of ${mb(t > 0 ? t : m.size)}`; };
-      try { await phone("downloadModel", m.url, m.file); say("AI model downloaded"); }
+      try { await phone("downloadModel", "", m.file); say("AI model downloaded"); }
       catch (e) { say("AI model not downloaded (" + e.message + "): notes are written without AI"); }
     } else say("AI model ready");
     if (!night.stop) {
@@ -619,9 +704,10 @@ async function overnightRun(auto) {
       await scanVideos();
       // reels read before videos were read are read again only after you tried it yourself (Try on 5 or Start)
       const ready = !!modelInfo().ready;
-      await startRun(db.reels.filter((x) => needsWork(x, ready) && (settings.rereadOk || !x.caption_read || Notes.isYoutube(x)))
-        .sort(byUsefulThenNewest).slice(0, settings.nightMax || 200).map((x) => x.code));  // useful first, then memes; capped per night
+      await startRun(nightQueue(db.reels.filter((x) => settings.rereadOk || !x.caption_read || Notes.isYoutube(x)), ready, Date.now(), settings.nightMax || 200)
+        .map((x) => x.code));  // 3 new (useful first) to 1 oldest, capped per night
       say(`Reel notes: ${run ? run.done : 0} written, ${run ? run.failed : 0} failed`);
+      if (run && run.note) say(run.note);
     }
     if (!night.stop && typeof Shots !== "undefined") {
       night.step = "screenshots"; night.detail = "Reading pictures";
@@ -635,9 +721,9 @@ async function overnightRun(auto) {
       say("Titles checked online");
     }
     if (!night.stop && !auto) {
-      night.step = "backup"; night.detail = "Saving a JSON copy";
+      night.step = "export"; night.detail = "Saving your notes as JSON";
       const where = await phone("saveFile", `reel-notes-${new Date().toISOString().slice(0, 10)}.json`, "application/json", Notes.exportJson(db.reels)).catch(() => "");
-      if (where) say("Backup saved to " + where);
+      if (where) say("Notes exported to " + where + ". This is not a backup you can restore: use Back up now in Settings.");
     }
   } finally {
     if (night.stop) say("Stopped");
@@ -729,7 +815,10 @@ window.fileCommentScreen = (lines, at) => {
 
 let backFrom = "";  // the reel you just looked at in Instagram
 window.onAppResume = () => {
+  if (handingOver) return;  // waiting for the nightly run: handOver opens the library when it has stopped
+  if (sync("nightActive")) { handOver(); return; }  // the night started while this screen was away, and is now asked to stop
   if (dbLocked) return;  // the library is not open: Try again on the screen
+  if (restore.busy === "restore") return;  // the backup of this library is being made and then it is replaced: a reel shared meanwhile must be filed into the restored library (reloadAfterRestore does that), not into the one that is about to be set aside
   if (sync("libraryStale", "reels") || sync("libraryStale", "shots")) staleReload();  // saved elsewhere while this screen was away
   else loadSettings();  // settings have no revision: read again
   const seen = db.reels.filter((x) => x.opened_at && Date.now() - x.opened_at < 20 * 60000).sort((a, b) => b.opened_at - a.opened_at)[0];
@@ -806,6 +895,22 @@ function notesHtml(n) {
     ${sec("Tags", (n.tags || []).length ? `<span class="tagrow">${n.tags.map((t) => `<span class="tag">#${esc(t)}</span>`).join("")}</span>` : "")}</div>`;
 }
 
+/** What went wrong with a reel that failed: how often, why, and when it is tried again (or that it was given up on). */
+function retryLine(r) {
+  const why = esc(r.last_fail || "no reason was given"), t = Number(r.tries) || 0;
+  if (t >= Notes.RETRY_CAP) return `Stopped trying after ${plural(t, "try", "tries")}: ${why}.`;
+  return `Tried ${plural(t, "time")}, last on ${day(r.last_fail_at)}: ${why}. Next try after ${day(r.next_try_at)}.`;
+}
+
+/** Reels Start gave up on or put off: the ones that could not be finished, with one button to try them all again. */
+function failedScreen() {
+  const failed = db.reels.filter((r) => r.status === "failed");
+  $app.innerHTML = `${header("Could not finish", "#/inbox")}
+    ${failed.length ? `<button class="btn primary block" id="retryAll">Try all again</button>` : `<div class="empty">Nothing here.</div>`}
+    <div class="stack">${failed.map((r) => `${reelRow(r)}${r.tries ? `<span class="small muted">${retryLine(r)}</span>` : ""}`).join("")}</div>`;
+  bind("#retryAll", "click", () => { failed.forEach((r) => { r.tries = 0; r.next_try_at = 0; }); saveDb(); startRun(failed.map((r) => r.code)); });
+}
+
 function reelScreen(code) {
   const r = reel(code);
   if (!r) { $app.innerHTML = `${header("Not found", "#/")}<div class="empty">This reel is no longer in your shelf.</div>`; return; }
@@ -817,6 +922,7 @@ function reelScreen(code) {
       <span class="small muted">${esc([r.author ? "@" + r.author : "", "saved " + day(r.added_at), ...(r.collections || [])].filter(Boolean).join(" · "))}</span></div>
     ${backFrom === r.code ? `<div class="card stack"><strong>Back from Instagram</strong><span class="small muted">${r.comments ? "Comments are here. " : "Took screenshots of the comments? Tap Add comments. "}Then tap Read this reel properly: one note from the video, what is said, the text on screen and the comments.</span></div>` : ""}
     ${r.error && !n ? `<div class="card small">${esc(r.error)}</div>` : ""}
+    ${r.tries && (!n || r.notes_by === "auto") ? `<div class="card small">${retryLine(r)}</div>` : ""}
     ${n ? notesHtml(n) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">${r.video_tried ? "Instagram gave too little to work from. Type what the reel says below." : "Tap Start: Reel Shelf reads what the reel shows and says, then writes the notes."}</span></div>`}
     ${r.content ? `<span class="small muted">Read from: ${esc({ caption: "the caption only (Instagram gave no video)", video: "caption and the text on screen", "video+speech": "caption, the text on screen and what is said" }[r.content] || r.content)}</span>` : ""}
     <div class="grid2">
@@ -824,6 +930,7 @@ function reelScreen(code) {
       ${r.url ? `<button class="btn" id="open">Open in ${Notes.isYoutube(r) ? "YouTube" : "Instagram"}</button>` : ""}
       ${n ? `<button class="btn" id="copy">Copy notes</button>` : ""}
       ${Notes.isYoutube(r) && r.caption_read && !r.transcript ? `<button class="btn" id="ytagain">Read from YouTube again</button>` : ""}
+      ${r.tries && (!n || r.notes_by === "auto") ? `<button class="btn primary" id="retryReel">Try again now</button>` : ""}
       ${r.url && !Notes.isYoutube(r) ? `<button class="btn primary" id="deep">Read this reel properly</button>` : ""}
       ${r.url ? `<button class="btn" id="addcom">Add comments</button>` : ""}
       ${ready && r.url ? `<button class="btn" id="phoneai">${n ? "Redo with phone AI" : "Write with phone AI"}</button>` : ""}
@@ -864,8 +971,9 @@ function reelScreen(code) {
     startRun([r.code]);
   });
   bind("#addrt", "click", () => titleDialog(null, r.code));
+  bind("#retryReel", "click", () => { r.tries = 0; r.next_try_at = 0; saveDb(); startRun([r.code]); });
   bind("#ytagain", "click", () => { r.caption_read = 0; if (r.notes_by === "auto") { r.notes = null; r.status = "new"; } saveDb(); startRun([r.code]); });
-  bind("#del", "click", () => { if (confirm("Remove this reel and its notes from Reel Shelf?")) { db.reels = db.reels.filter((x) => x !== r); saveDb(); location.hash = "#/"; } });
+  bind("#del", "click", () => { if (confirm(Notes.hasUserData(r) ? "Remove this reel, its notes, your edits and the versions kept aside from Reel Shelf?" : "Remove this reel and its notes from Reel Shelf?")) { db.reels = db.reels.filter((x) => x !== r); saveDb(); location.hash = "#/"; } });
 }
 
 function relatedHtml(r) {
@@ -914,6 +1022,23 @@ function topicScreen(key) {
 
 let lastAsk = { q: "", answer: null, results: [] };
 
+/** The line under an Ask answer when notes, web results or the question did not fit the model's window (nothing when all went in).
+ *  `all`: nothing fit, so everything was sent in full, as before there was a budget (the budget never turns an Ask into a refusal).
+ *  Only shown: nothing about it is stored on a reel or in the library. */
+function leftOut(info, all) {
+  if (all) {
+    const [who, verb, sent] = info.questionCut ? ["Your question", "is", "it was"] : info.total ? ["Your notes", "are", "they were"] : ["The web results", "are", "they were"];
+    return `${who} ${verb} longer than the phone AI's assumed window, so ${sent} sent in full as before. If the answer looks cut off or wrong, ` +
+      `${info.questionCut ? "shorten your question" : 'choose Answer length "Short"'} or use "Ask any AI with these notes".`;
+  }
+  const gone = (n, of, what) => `${n} of ${plural(of, what)} did not fit and ${n === 1 ? "was" : "were"} left out`;
+  const lines = [];
+  if (info.used < info.total) lines.push(gone(info.total - info.used, info.total, "note") + " (the best matches go in first).");
+  if (info.webUsed < info.webTotal) lines.push(gone(info.webTotal - info.webUsed, info.webTotal, "web result") + ".");
+  if (info.questionCut) lines.push("Your question was long and was shortened.");
+  return lines.join(" ");
+}
+
 function askScreen() {
   const fromUrl = (location.hash.match(/[?&]q=([^&]*)/) || [])[1];
   if (fromUrl !== undefined) { const q = decodeURIComponent(fromUrl); if (q !== lastAsk.q) lastAsk = { q, answer: null, results: [], web: null }; }
@@ -931,7 +1056,7 @@ function askScreen() {
     ${q && settings.webLookup && !lastAsk.web ? `<button class="btn block" id="webAsk">${UI.globe} Look it up online</button>` : ""}
     ${q && !settings.webLookup && !results.length ? `<p class="hint">Switch on "Look things up online" in <a href="#/settings">Settings</a> to search Wikipedia and DuckDuckGo.</p>` : ""}
     ${lastAsk.answer ? `<div class="card stack"><span class="label">Answer from your notes${lastAsk.answer.by ? ` (${esc(lastAsk.answer.by)})` : ""}</span><p class="pre">${esc(lastAsk.answer.text).replace(/\[(\d{1,2})\]/g, (m, i) => results[i - 1] ? `<a href="#/r/${enc(results[i - 1].reel.code)}">[${i}]</a>` : m)
-      .replace(/\[W(\d)\]/g, (m, i) => lastAsk.web && lastAsk.web[i - 1] ? `<a href="#" data-url="${esc(lastAsk.web[i - 1].url)}">[W${i}]</a>` : m)}</p></div>` : ""}
+      .replace(/\[W(\d)\]/g, (m, i) => lastAsk.web && lastAsk.web[i - 1] ? `<a href="#" data-url="${esc(lastAsk.web[i - 1].url)}">[W${i}]</a>` : m)}</p>${lastAsk.answer.left ? `<p class="small muted" id="askLeft">${esc(lastAsk.answer.left)}</p>` : ""}</div>` : ""}
     ${lastAsk.web ? webHtml(lastAsk.web) : ""}
     ${results.length ? `<div class="grid2">${ready ? `<button class="btn primary" id="aiAns">Answer with phone AI</button>` : ""}<button class="btn" id="copyAsk">Ask any AI with these notes</button></div>` : ""}
     <div class="stack">${results.map((x, i) => {
@@ -955,9 +1080,11 @@ function askScreen() {
     b.textContent = "Thinking... keep the app open";
     sync("allowWork");
     try {
-      const out = JSON.parse(await phone("generate", Notes.answerPrompt(q, results.slice(0, 5)),
-        JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: "You answer only from the notes you are given, briefly, citing them like [1].", maxTokens: settings.maxTokens, temperature: 0.1 })));
-      lastAsk.answer = { text: out.text, by: "on-phone AI" };
+      const info = Notes.answerPromptInfo(q, results.slice(0, 5), { budget: promptBudget(Notes.ASK_SYSTEM) });
+      const all = !info.used;  // not even the best note fits whole (or the question took the room): send it all, as before the budget
+      const out = JSON.parse(await phone("generate", all ? Notes.answerPrompt(q, results.slice(0, 5)) : info.prompt,
+        JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.ASK_SYSTEM, maxTokens: settings.maxTokens, temperature: 0.1 })));
+      lastAsk.answer = { text: out.text, by: "on-phone AI", left: leftOut(info, all) };
     } catch (err) { toast(err.message === "stopped" ? "Stopped" : err.message); }
     sync("stopModel");
     if (location.hash.startsWith("#/ask")) askScreen();
@@ -982,9 +1109,11 @@ async function webAsk(q, results, b) {
     if (location.hash.startsWith("#/ask")) askScreen();
     sync("allowWork");
     try {
-      const out = JSON.parse(await phone("generate", Notes.webAnswerPrompt(q, results.slice(0, 4), lastAsk.web),
-        JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: "You answer only from the notes and web results you are given, briefly, citing them like [1] or [W1].", maxTokens: settings.maxTokens, temperature: 0.1 })));
-      lastAsk.answer = { text: Notes.markOneSource(out.text, lastAsk.web), by: "on-phone AI, with web results" };
+      const info = Notes.webAnswerPromptInfo(q, results.slice(0, 4), lastAsk.web, { budget: promptBudget(Notes.WEB_ASK_SYSTEM) });
+      const all = !info.used && !info.webUsed;  // no note and no web result fits: send it all, as before the budget
+      const out = JSON.parse(await phone("generate", all ? Notes.webAnswerPrompt(q, results.slice(0, 4), lastAsk.web) : info.prompt,
+        JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.WEB_ASK_SYSTEM, maxTokens: settings.maxTokens, temperature: 0.1 })));
+      lastAsk.answer = { text: Notes.markOneSource(out.text, lastAsk.web), by: "on-phone AI, with web results", left: leftOut(info, all) };
     } catch (err) { toast(err.message === "stopped" ? "Stopped" : err.message); }
     sync("stopModel");
   }
@@ -1010,9 +1139,9 @@ function pasteDialog(r) {
     const t = $dlg.querySelector("#ans").value;
     const notes = Notes.parse(t);
     if (!notes) { e.preventDefault(); toast("That does not look like the notes format (TOPIC, POINTS, ...)"); return; }
-    setNotes(r, notes, "meta", t);
+    const written = setNotes(r, notes, "meta", t);
     saveDb();
-    toast("Saved");
+    toast(written ? "Saved" : KEPT_ASIDE);
     setTimeout(() => reelScreen(r.code), 0);
   });
 }
@@ -1046,7 +1175,7 @@ function addScreen() {
     let msg;
     if (answers.length) {
       const r = fileAnswer(t, "meta", null, true);
-      msg = `${plural(r.filed, "answer")} saved` + (r.inbox ? `, ${r.inbox} to file` : "");
+      msg = [r.filed || r.inbox || !r.kept ? `${plural(r.filed, "answer")} saved` + (r.inbox ? `, ${r.inbox} to file` : "") : "", r.kept ? keptAside(r.kept) : ""].filter(Boolean).join(". ");
     } else {
       const found = Notes.links(t);
       if (!found.length) { toast("No reel links or answers found in that text"); return; }
@@ -1094,7 +1223,7 @@ function fileScreen() {
     <button class="btn block" id="alone">Keep it as a note on its own</button>
     <button class="btn block danger" id="drop">Throw it away</button>`;
   const done = () => { db.inbox.shift(); saveDb(); location.hash = db.inbox.length ? "#/file" : "#/inbox"; render(); };
-  bind("[data-pick]", "click", (e, b) => { setNotes(reel(b.dataset.pick), n, "meta", a.text); done(); });
+  bind("[data-pick]", "click", (e, b) => { if (!setNotes(reel(b.dataset.pick), n, "meta", a.text)) toast(KEPT_ASIDE); done(); });
   bind("#alone", "click", () => {
     const code = "note-" + Date.now().toString(36);
     db.reels.unshift({ code, url: "", author: "", collections: [], status: "done", added_at: Date.now(), added_by: "answer" });
@@ -1115,12 +1244,15 @@ function runScreen() {
       ${(() => { const old = db.reels.filter((r) => r.caption_read && !r.video_tried && !Notes.isYoutube(r)); if (!old.length) return "";
         const fun = old.filter((r) => Notes.reelKind(r) === "fun").length;
         return `<p class="hint">${plural(old.length - fun, "useful reel")} will be read properly first (video, text on screen, speech), newest first, then ${plural(fun, "meme or fun reel")} (the note explains the joke).</p>`; })()}
+      ${(() => { const parked = db.reels.filter((r) => r.status === "failed" && (r.tries || 0) >= Notes.RETRY_CAP).length;
+        const wait = db.reels.filter((r) => r.status === "failed" && (r.tries || 0) < Notes.RETRY_CAP && (r.next_try_at || 0) > Date.now()).length;
+        return wait || parked ? `<p class="hint">${plural(wait, "reel")} ${wait === 1 ? "waits" : "wait"} for a retry; ${parked} stopped after ${Notes.RETRY_CAP} tries. <a href="#/failed">See them</a></p>` : ""; })()}
       ${todo.length > 5 ? `<button class="btn primary block" id="try5">Try on 5 reels first</button>` : ""}
       ${todo.length ? `<button class="btn ${todo.length > 5 ? "" : "primary"} block" id="start">Start: ${plural(todo.length, "reel")}</button>` : `<div class="empty">Nothing waiting. Share a reel to Reel Shelf first.</div>`}
       <p class="hint">Start reads each reel: its caption, the text shown on screen and${speechInfo().ready ? "" : " (after you download the speech model in Settings)"} what is said. Instagram is asked gently, one reel every few seconds, with no account.</p>
       <a class="btn block" href="#/shots" id="shotsbtn">${ICON.search} Read my screenshots</a>
       <div class="card stack"><strong>Overnight run</strong>
-        <span class="hint">Plug in the charger, tap this and leave the phone. In one go: downloads the on-phone AI if needed, writes notes for every reel waiting, reads your screenshots, checks titles online and saves a backup to Downloads/ReelShelf. A notification shows it, with Stop.</span>
+        <span class="hint">Plug in the charger, tap this and leave the phone. In one go: downloads the on-phone AI if needed, writes notes for every reel waiting, reads your screenshots, checks titles online and saves your notes as a JSON file to Downloads/ReelShelf (an export, not a backup you can restore: use Back up now in Settings for that). A notification shows it, with Stop.</span>
         ${night && !night.finished ? `<strong>${esc("Now: " + night.step)}</strong><span class="small muted">${esc(nightText())}</span>`
           : `<button class="btn block" id="night">Run everything overnight</button>`}
         ${night && night.log.length ? `<span class="small muted">${night.log.map(esc).join("<br>")}</span>` : ""}
@@ -1162,10 +1294,11 @@ function speechInfo() { try { return JSON.parse(sync("speechInfo") || "{}"); } c
 function speechHtml() {
   const si = speechInfo();
   if (!RN || !RN.speechInfo) return "";
+  const paused = !si.ready && !speechDl && si.partial > 0;  // an unfinished download is kept and continued
   return `<div class="stack"><h2>What reels say</h2><div class="card stack">
-    <div class="row between"><strong>Speech to text (English)</strong><span class="tag ${si.ready ? "ok" : "warn"}">${si.ready ? "Ready" : speechDl ? "Downloading" : "Not downloaded"}</span></div>
-    <span class="small muted">Turns what is said in a reel into text, on the phone, with no internet after the download. About 40 MB.</span>
-    ${si.ready ? `<button class="btn block danger" id="delsp">Delete the speech model</button>` : speechDl ? `<span class="small muted" id="sptext">${mb(speechDl.d)} of ${mb(speechDl.t)}</span>` : `<button class="btn primary block" id="dlsp">Download speech to text</button>`}
+    <div class="row between"><strong>Speech to text (English)</strong><span class="tag ${si.ready ? "ok" : "warn"}">${si.ready ? "Ready" : speechDl ? "Downloading" : paused ? "Paused" : "Not downloaded"}</span></div>
+    <span class="small muted">Turns what is said in a reel into text, on the phone, with no internet after the download. About 40 MB. It is checked against the published file before it is installed.</span>
+    ${si.ready ? `<button class="btn block danger" id="delsp">Delete the speech model</button>` : speechDl ? `<span class="small muted" id="sptext">${mb(speechDl.d)} of ${mb(speechDl.t)}</span>` : `<button class="btn primary block" id="dlsp">${paused ? "Continue download" : "Download speech to text"}</button>`}
     <p class="hint">Start (and the nightly run) then reads each reel's video: the text on screen and the spoken words. Reels Instagram gives no video for stay caption only.</p></div></div>`;
 }
 function bindSpeech() {
@@ -1180,11 +1313,423 @@ function bindSpeech() {
   bind("#delsp", "click", () => { if (confirm("Delete the speech model? Reels will then be read without their spoken words.")) { sync("deleteSpeech"); settingsScreen(); } });
 }
 
+// ------------------------------------------------------------------ Back up now (Settings): one ZIP with the whole library
+// The phone makes it, checks it can be read back, and saves it to Downloads/ReelShelf (RN.backupLibrary). The page only passes the counts to show.
+// Restoring one is the next section (#/restore). Library newer: its screen shows instead of Settings and has no button (a newer library is never replaced).
+let backup = { running: false, result: null };  // result: {ok: true, name, where, bytes, counts, uninstall_warning, shots_skipped} or {ok: false, text}
+function backupSize(n) { return n < 1048576 ? Math.max(1, Math.round(n / 1024)) + " KB" : mb(n); }
+function backupInner() {
+  const r = backup.result;
+  const status = backup.running ? `<span class="small" role="status">Making the backup. A big library can take a minute. Please keep the app open.</span>`
+    : !r ? ""
+    : r.ok ? `<span class="small" role="status"><strong>Saved to ${esc(r.where)}</strong> (${esc(plural(Number(r.counts.reels) || 0, "reel"))}, ${esc(plural(Number(r.counts.titles) || 0, "title"))}, ${esc(backupSize(Number(r.bytes) || 0))})</span>
+      ${r.uninstall_warning ? `<span class="small"><strong>This file is in the app's own folder on this version of Android, so it is deleted if you uninstall Reel Shelf.</strong> Copy it somewhere else (for example with a file manager) to keep it.</span>` : ""}
+      ${r.shots_skipped ? `<span class="small">The list of read screenshots could not be read, so it is not in this backup. It can be made again from your pictures.</span>` : ""}`
+    : `<span class="small" role="alert"><strong>${esc(r.text)}</strong></span>`;
+  return `<h2>Backup and restore</h2>
+    <div class="card stack">
+      <button class="btn primary block" id="backupnow" ${backup.running ? "disabled" : ""}>${backup.running ? "Backing up..." : "Back up now"}</button>
+      ${status}
+      <a class="btn block" href="#/restore" id="restorebtn">Restore from a backup</a>
+      <a class="btn block" href="#/kept" id="keptbtn">Files kept for safety</a>
+      <p class="hint">The backup contains all your reels, notes, watchlist, quotes and products. Anyone who gets the file can read them. It does not contain your settings, API keys, AI models, pictures or videos. It also holds a short part of the text read from each of your screenshots, and their file names.</p>
+      <p class="hint">It is saved in Downloads/ReelShelf. Keep it somewhere safe, or delete it when you no longer need it: Reel Shelf never deletes old backups for you. Restoring replaces your library with a backup after you confirm; the library you have now is kept on the phone, not deleted.</p>
+      <p class="hint">Files kept for safety lists the copies Reel Shelf set aside on this phone (a library it could not read, or the library a restore replaced) and any temporary restore files. You choose whether to save or delete each one; Reel Shelf never deletes them for you.</p>
+    </div>`;
+}
+function paintBackup() {
+  const el = document.getElementById("backup");
+  if (!el) return;  // left Settings meanwhile: the result is shown when you come back
+  el.innerHTML = backupInner();
+  bind("#backupnow", "click", backupNow);
+}
+function backupNow() {
+  if (backup.running) return;
+  backup = { running: true, result: null };
+  paintBackup();
+  const counts = { reels: db.reels.length, titles: (db.media || []).length, screenshots: typeof Shots !== "undefined" ? Shots.total() : 0 };
+  phone("backupLibrary", JSON.stringify(counts)).then((t) => {
+    let r = null;
+    try { r = JSON.parse(t); } catch (e) { /* the sentence below */ }
+    backup = { running: false, result: r && typeof r === "object" && r.counts && typeof r.counts === "object" ? { ...r, ok: true } : { ok: false, text: "The backup could not be saved. Your library was not changed." } };
+  }, (e) => { backup = { running: false, result: { ok: false, text: e.message } }; }).then(paintBackup);
+}
+
+// ------------------------------------------------------------------ Restore from a backup (#/restore): choose and check, then confirm; nothing changes until Restore
+// RN.chooseBackup opens Android's file picker and checks the file on the phone (nothing is installed) and answers with a preview and a token;
+// RN.restoreBackup(token) installs what was checked. The library in place is kept on the phone (reels.json.before-restore-...), never deleted.
+// restoreBackup is only ever called from the confirm screen, with the token the phone gave, and never while work runs. The phone's refusals are plain
+// sentences and are shown as they are. Nothing is restored over a newer library (its screen has no button: LibraryFile.replaceWith refuses it).
+const RESTORE_WORK = "Reel Shelf is busy with a job (writing notes, reading screenshots, an online check, a download or the nightly run). Stop it, or wait until it is done, then try again. Nothing was changed.";  // RestoreNow.WORK
+const RESTORE_BUSY = "Another backup or restore is already running. Wait for it to finish, then try again. Nothing was changed.";  // RestoreNow.BUSY
+const NOTHING_TO_BACK_UP = "There is nothing to back up yet.";  // BackupNow.NOTHING: a fresh install has no library to save first, which is no reason to stop (a test checks all three against the Java sentences)
+function restoreFresh() { return { step: "pick", busy: "", status: "", message: "", preview: null, before: true, saved: "", result: null }; }
+let restore = restoreFresh();  // step: pick | confirm | done; busy: "" | check | restore
+function restoreBlocked() {
+  if (workNow()) return RESTORE_WORK;
+  if (sync("nightActive")) return RESTORE_WORK;
+  if (backup.running) return RESTORE_BUSY;
+  return "";
+}
+function backupDate(iso) {
+  const t = Date.parse(iso || "");
+  return isNaN(t) ? "" : new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+function libraryCounts(n, t) { return `${plural(Number(n) || 0, "reel")}, ${plural(Number(t) || 0, "title")}`; }
+/** The checked backup and its staged files are dropped (the phone forgets the token too). */
+function restoreDrop() {
+  if (restore.preview) sync("cancelRestore");
+  restore = restoreFresh();
+}
+function restoreRepaint() {
+  if (location.hash === "#/restore") render();
+  else if (restore.preview) restoreDrop();  // the screen was left while the file was being checked: nothing stays staged
+}
+/** A restore that was running always ends on its own screen (the result, or the reason it stopped), wherever the address bar was meanwhile. */
+function restoreShow() {
+  if (location.hash === "#/restore") render(); else location.hash = "#/restore";
+}
+function restoredHtml(res) {
+  const shots = res.shots === "restored" ? "The list of read screenshots was restored too."
+    : res.shots === "kept" ? "The backup has no list of read screenshots, so yours was left as it is."
+    : res.shots === "failed" ? "The list of read screenshots could not be restored: it is as it was before. Your reels, notes and watchlist were restored."
+    : "";
+  const kept = res.set_aside ? `Your previous library is kept on the phone as <strong>${esc(res.set_aside)}</strong> (in Reel Shelf's private storage, not in Downloads). It is not deleted.`
+    : "There was no library on this phone to keep.";
+  return `${header("Restored", "")}
+    <div class="card stack"><strong>Your library was restored${res.date ? " from the backup of " + esc(res.date) : ""}</strong>
+      <span class="small" role="status">Your library now has ${esc(libraryCounts(db.reels.length, (db.media || []).length))}.</span>
+      <span class="small">${kept}</span>
+      ${res.shots_set_aside ? `<span class="small">Your previous list of read screenshots is kept as <strong>${esc(res.shots_set_aside)}</strong>.</span>` : ""}
+      ${res.saved ? `<span class="small">A backup of the library you had was saved to ${esc(res.saved)}.</span>` : ""}
+      ${shots ? `<span class="small" ${res.shots === "failed" ? 'role="alert"' : ""}>${res.shots === "failed" ? `<strong>${esc(shots)}</strong>` : esc(shots)}</span>` : ""}
+      <p class="hint">Pictures and videos are not in backups; reels whose video is no longer on this phone keep their notes.</p></div>
+    <a class="btn primary block" href="#/">Open my library</a>`;
+}
+function restoreScreen() {
+  const r = restore, p = r.preview;
+  if (r.result) { $app.innerHTML = restoredHtml(r.result); return; }
+  const back = dbLocked ? "#/" : "#/settings";
+  const msg = r.message ? `<span class="small" role="alert"><strong>${esc(r.message)}</strong></span>` : "";
+  const wait = r.busy ? `<span class="small" role="status">${esc(r.status || (r.busy === "check" ? "Checking the file. A big backup can take a minute. Please keep the app open." : "Restoring. Please keep the app open."))}</span>` : "";
+  if (!p) {
+    $app.innerHTML = `${header("Restore from a backup", back)}
+      <div class="card stack">
+        <span>Choose a backup made by Back up now (a file called ReelShelf-backup-...zip). The file is checked first; nothing changes until you confirm on the next screen.</span>
+        <button class="btn primary block" id="rpick" ${r.busy ? "disabled" : ""}>${r.busy ? "Checking..." : "Choose a backup file"}</button>
+        ${wait}${msg}
+        <p class="hint">A reels.json file or a notes export (JSON) is not a backup and cannot be restored: only a file made by Back up now can. Pictures and videos are not in backups.</p></div>
+      <a class="btn block" href="${back}" id="rback">Cancel</a>`;
+    bind("#rpick", "click", restorePick);
+    return;
+  }
+  const now = dbLocked ? "your library, which could not be read," : `your library (${libraryCounts(db.reels.length, (db.media || []).length)})`;
+  const date = backupDate(p.created_at);
+  const question = `Replace ${now} with the backup${date ? " from " + date : ""} (${libraryCounts(p.reels, p.titles)})? Your current library is kept on the phone, not deleted.`;
+  $app.innerHTML = `${header("Restore from a backup", back)}
+    <div class="card stack"><strong>Replace your library?</strong>
+      <span id="rquestion">${esc(question)}</span>
+      <span class="small">${p.app_version ? `Made by Reel Shelf ${esc(p.app_version)}. ` : ""}${p.has_shots ? "It includes the list of read screenshots." : "It has no list of read screenshots, so yours stays as it is."}</span>
+      ${dbLocked ? `<span class="small">The unreadable file is set aside under a new name, not deleted.</span>`
+        : `<label class="row" style="gap:10px"><input type="checkbox" id="rbefore" ${r.before ? "checked" : ""} ${r.busy ? "disabled" : ""}><span>Save a backup of the current library first</span></label>
+           <span class="hint">It goes to Downloads/ReelShelf, like Back up now. If it cannot be made, nothing is restored.</span>`}
+      ${wait}${msg}
+      <button class="btn primary block" id="rgo" ${r.busy ? "disabled" : ""}>${r.busy === "restore" ? "Restoring..." : "Restore this backup"}</button>
+      <button class="btn block" id="rcancel" ${r.busy ? "disabled" : ""}>Cancel</button></div>`;
+  bind("#rbefore", "change", (e, el) => { restore.before = el.checked; });
+  bind("#rgo", "click", restoreGo);
+  bind("#rcancel", "click", () => { restoreDrop(); location.hash = back; });
+}
+/** Step 1: the phone opens its file picker and checks the file. Nothing is changed. */
+function restorePick() {
+  if (restore.busy) return;
+  const why = restoreBlocked();
+  if (why) { restore.message = why; restoreScreen(); return; }
+  restore.busy = "check";
+  restore.status = "";
+  restore.message = "";
+  restoreScreen();
+  phone("chooseBackup").then((t) => {
+    let p = null;
+    try { p = JSON.parse(t); } catch (e) { /* the sentence below */ }
+    if (p && typeof p === "object" && typeof p.token === "string" && p.token) { restore.preview = p; restore.step = "confirm"; }
+    else restore.message = "The file could not be checked. Nothing was changed.";
+  }, (e) => { restore.message = e.message; }).then(() => { restore.busy = ""; restoreRepaint(); });
+}
+/** What the phone has now (the restored library, settings, screenshots), and what was shared while the library was shut. */
+function reloadAfterRestore() {
+  backup = { running: false, result: null };
+  dbLocked = false;
+  loadSettings();
+  loadDb();
+  if (typeof Shots !== "undefined") Shots.reload();
+  if (!dbLocked) openLibrary();  // a link shared before the restore is filed into the restored library and acknowledged once
+}
+/** Step 2, only from the confirm screen: the backup of the current library first (unless unticked), then the restore. */
+function restoreGo() {
+  const p = restore.preview;
+  if (restore.busy || !p) return;
+  const box = document.getElementById("rbefore");
+  if (box) restore.before = box.checked;
+  const why = restoreBlocked();
+  if (why) { restore.message = why; restoreScreen(); return; }
+  restore.busy = "restore";
+  restore.message = "";
+  restore.saved = "";
+  restore.status = "";
+  let first = Promise.resolve();
+  if (restore.before && !dbLocked) {  // a locked library cannot be backed up: the restore sets the unreadable file aside instead
+    restore.status = "Saving a backup of your current library first. Please keep the app open.";
+    first = phone("backupLibrary", JSON.stringify({ reels: db.reels.length, titles: (db.media || []).length, screenshots: typeof Shots !== "undefined" ? Shots.total() : 0 })).then((t) => {
+      try { const r = JSON.parse(t); if (r && typeof r.where === "string") restore.saved = r.where; } catch (e) { /* the restore goes on: it was saved */ }
+    }, (e) => {
+      if (e.message === NOTHING_TO_BACK_UP) return;  // no library file yet (a fresh install): nothing to save first
+      const stop = new Error(`The backup of your current library could not be made, so nothing was restored. ${e.message} Untick "Save a backup of the current library first" to restore without it.`);
+      stop.keepConfirm = true;
+      throw stop;
+    });
+  }
+  restoreScreen();
+  first.then(() => {
+    const again = restoreBlocked();  // a job could have been started meanwhile
+    if (again) { const stop = new Error(again); stop.keepConfirm = true; throw stop; }
+    restore.status = "Restoring. Please keep the app open.";
+    restoreScreen();
+    return phone("restoreBackup", p.token);
+  }).then((t) => {
+    let r = null;
+    try { r = JSON.parse(t); } catch (e) { /* an answer the page cannot read still means it was restored */ }
+    r = r && typeof r === "object" ? r : {};
+    const result = { set_aside: String(r.set_aside || ""), shots: String(r.shots || ""), shots_set_aside: String(r.shots_set_aside || ""), saved: restore.saved, date: backupDate(p.created_at) };
+    reloadAfterRestore();  // still "restoring" here: nothing drawn while it reads the library is anything but the restore screen
+    restore = { ...restoreFresh(), step: "done", result };
+    restoreShow();
+  }, (e) => {
+    restore.busy = "";
+    restore.status = "";
+    restore.message = e.message;
+    if (!e.keepConfirm) { sync("cancelRestore"); restore.preview = null; restore.step = "pick"; }  // the phone has used the token up (or lost the file): choose again
+    if (!dbLocked) openLibrary();  // nothing was replaced: what onAppResume held back while it ran (a reel shared meanwhile, results of the online check) is filed into this library now
+    restoreShow();
+  });
+}
+
+// ------------------------------------------------------------------ Files kept for safety (#/kept): the copies Reel Shelf set aside (S4-4)
+// The phone lists them (RN.keptFiles) and checks every name again; the page only ever passes back a name from that list. Save to Downloads is
+// RN.saveKept(name). Delete is two steps: RN.askDeleteKept(name) answers with the file as it is now and a one-use token for the confirm screen,
+// and RN.deleteKept(name, token) deletes only that file. Nothing is deleted without the confirm screen, and never while work runs (the phone
+// refuses too). The library itself, its previous copy and everything else are not in the list. Not reachable while the library is locked.
+const KEPT_WORK = "Reel Shelf is busy with a job (writing notes, reading screenshots, an online check, a download or the nightly run). Stop it, or wait until it is done, then try again. Nothing was deleted.";  // KeptFiles.WORK
+const KEPT_BUSY = "Another backup, restore or file action is already running. Wait for it to finish, then try again. Nothing was deleted.";  // KeptFiles.BUSY
+const KEPT_PRIVACY = "A file kept for safety is a copy of your private library: your reels, notes, watchlist, quotes and products (for the screenshot list, a short part of the text read from each screenshot, and their file names). Saving one to Downloads/ReelShelf puts a copy where other apps and file managers can read it, and anyone who gets that file can read it. It does not contain your settings, API keys or AI models.";
+function keptFresh() { return { items: null, error: "", msg: null, saved: {}, confirm: null, busy: "" }; }
+let kept = keptFresh();  // items: null until listed; msg: {bad, text}; saved: name -> the answer of the last Save; confirm: {name, token, item}; busy: "" | "save:NAME" | "delete"
+function keptBlocked() {
+  if (workNow()) return KEPT_WORK;
+  if (sync("nightActive")) return KEPT_WORK;
+  if (backup.running || restore.busy) return KEPT_BUSY;
+  return "";
+}
+function keptLoad() {
+  let r = null;
+  try { r = JSON.parse(sync("keptFiles")); } catch (e) { /* the sentence below */ }
+  if (r && typeof r === "object" && Array.isArray(r.items)) {
+    kept.items = r.items.filter((x) => x && typeof x === "object" && typeof x.name === "string" && x.name);
+    kept.error = typeof r.error === "string" ? r.error : "";
+  } else {
+    kept.items = [];
+    kept.error = "The list of kept files could not be read. Nothing was changed.";
+  }
+}
+function keptDate(ms) {
+  const d = new Date(Number(ms) || 0);
+  return !Number(ms) || isNaN(d) ? "" : d.toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function keptSize(n) { n = Number(n) || 0; return n < 1024 ? plural(n, "byte") : backupSize(n); }
+function keptTitle(it) {
+  const what = it.library === "shots" ? "screenshot list" : "library";
+  if (it.kind === "temp") return "Temporary restore files";
+  if (it.kind === "before_restore") return `Your ${what} before a restore`;
+  if (it.kind === "bad_backup") return `Earlier copy of your ${what}, set aside`;
+  if (it.kind === "bad") return `Your ${what}, set aside`;
+  return "A file kept for safety";
+}
+// A set-aside file is not known to be damaged (a good copy can be set aside when restoring it failed, and a file nobody had checked yet is set aside before a save): never say it is.
+function keptWhy(it) {
+  const what = it.library === "shots" ? "screenshot list" : "library";
+  if (it.kind === "temp") return "Left over from checking a backup file. Your library is not affected.";
+  if (it.kind === "before_restore") return "Kept when a backup replaced it.";
+  if (it.kind === "bad" || it.kind === "bad_backup") return `Earlier copy set aside when your ${what} could not be read. It may still hold your data.`;
+  return "";
+}
+function keptCard(it) {
+  const st = kept.saved[it.name];
+  const done = !st ? "" : st.ok
+    ? `<span class="small" role="status"><strong>Saved to ${esc(st.where)}</strong> (${esc(keptSize(st.bytes))})</span>
+       ${st.uninstall_warning ? `<span class="small"><strong>This file is in the app's own folder on this version of Android, so it is deleted if you uninstall Reel Shelf.</strong> Copy it somewhere else (for example with a file manager) to keep it.</span>` : ""}
+       <span class="small">That copy is private data too: delete it from Downloads when you no longer need it.</span>`
+    : `<span class="small" role="alert"><strong>${esc(st.text)}</strong></span>`;
+  const off = kept.busy ? "disabled" : "";
+  const when = it.kind === "temp" ? `${esc(plural(Number(it.files) || 0, "file"))}, changed ${esc(keptDate(it.at))}` : `Kept since ${esc(keptDate(it.at))}`;
+  const del = `<button class="btn ${it.kind === "temp" ? "block " : ""}danger" data-kdel="${esc(it.name)}" ${off}>Delete</button>`;
+  const save = `<button class="btn" data-ksave="${esc(it.name)}" ${off}>${kept.busy === "save:" + it.name ? "Saving..." : "Save to Downloads"}</button>`;
+  return `<div class="card stack"><strong>${esc(keptTitle(it))}</strong>
+    <span class="small">${when} · ${esc(keptSize(it.size))}</span>
+    <span class="small muted">${esc(keptWhy(it))}</span>
+    ${it.kind === "temp" ? "" : `<span class="small muted">${esc(it.name)}</span>`}
+    ${done}
+    ${it.kind === "temp" ? del : `<div class="grid2">${save}${del}</div>`}</div>`;
+}
+function keptScreen() {
+  if (kept.items === null) keptLoad();
+  if (kept.confirm) { keptConfirmScreen(); return; }
+  const msg = kept.msg ? `<span class="small" role="${kept.msg.bad ? "alert" : "status"}"><strong>${esc(kept.msg.text)}</strong></span>` : "";
+  const err = kept.error ? `<span class="small" role="alert"><strong>${esc(kept.error)}</strong></span>` : "";
+  $app.innerHTML = `${header("Files kept for safety", "#/settings")}
+    <div class="card stack">
+      <span>Reel Shelf set these aside on this phone and never deletes them by itself: a library file it could not read, or the library a restore replaced. They use space on the phone.</span>
+      <p class="hint" id="keptprivacy">${esc(KEPT_PRIVACY)}</p>
+      ${msg}${err}</div>
+    ${kept.items.length ? kept.items.map(keptCard).join("") : kept.error ? "" : `<div class="empty">Nothing is kept for safety. A copy appears here when Reel Shelf sets aside a library it could not read, or the library a restore replaced.</div>`}`;
+  bind("[data-ksave]", "click", (e, b) => keptSave(b.dataset.ksave));
+  bind("[data-kdel]", "click", (e, b) => keptAsk(b.dataset.kdel));
+}
+/** Save to Downloads: a copy, checked by reading it back; the kept file stays where it is. */
+function keptSave(name) {
+  if (kept.busy) return;
+  const mine = kept;
+  mine.busy = "save:" + name;
+  mine.msg = null;
+  delete mine.saved[name];
+  keptScreen();
+  phone("saveKept", name).then((t) => {
+    let r = null;
+    try { r = JSON.parse(t); } catch (e) { /* the sentence below */ }
+    mine.saved[name] = r && typeof r === "object" && typeof r.where === "string" ? { ...r, ok: true } : { ok: false, text: "The file could not be saved. The kept file was not changed." };
+  }, (e) => { mine.saved[name] = { ok: false, text: e.message }; }).then(() => {
+    mine.busy = "";
+    if (kept === mine && location.hash === "#/kept") keptScreen();
+  });
+}
+/** Delete, step 1: ask the phone for the file's facts and a token. Nothing is deleted; the confirm screen comes next. */
+function keptAsk(name) {
+  if (kept.busy) return;
+  const why = keptBlocked();
+  if (why) { kept.msg = { bad: true, text: why }; keptScreen(); return; }
+  let a = null;
+  try { a = JSON.parse(sync("askDeleteKept", name)); } catch (e) { /* the sentence below */ }
+  if (a && typeof a === "object" && a.ok === true && typeof a.token === "string" && a.token && a.item && typeof a.item === "object" && a.item.name === name) {
+    kept.confirm = { name, token: a.token, item: a.item };
+    kept.msg = null;
+  } else {
+    kept.msg = { bad: true, text: a && typeof a.text === "string" && a.text ? a.text : "That file could not be checked. Nothing was deleted." };
+    keptLoad();  // it may be gone
+  }
+  keptScreen();
+}
+function keptConfirmScreen() {
+  const c = kept.confirm, it = c.item;
+  const date = keptDate(it.at);
+  const what = it.kind === "temp"
+    ? `Delete the temporary restore files (${plural(Number(it.files) || 0, "file")}, ${keptSize(it.size)} together)?`
+    : `Delete "${keptTitle(it)}", the file ${it.name}${date ? ", kept since " + date : ""} (${keptSize(it.size)})?`;
+  const msg = kept.msg ? `<span class="small" role="alert"><strong>${esc(kept.msg.text)}</strong></span>` : "";
+  $app.innerHTML = `${header("Delete this file?", "#/settings")}
+    <div class="card stack"><strong>Delete this file?</strong>
+      <span id="kquestion">${esc(what + " This cannot be undone: once it is deleted it is gone from the phone.")}</span>
+      <span class="small">${it.kind === "temp" ? "They are only copies made while a backup file was checked. Your library is not touched." : "Your current library is not touched. If you might need this file, cancel and save it to Downloads first."}</span>
+      ${msg}
+      <button class="btn block danger" id="kgo" ${kept.busy ? "disabled" : ""}>${kept.busy === "delete" ? "Deleting..." : "Delete this file"}</button>
+      <button class="btn block" id="kcancel" ${kept.busy ? "disabled" : ""}>Cancel</button></div>`;
+  bind("#kgo", "click", keptGo);
+  bind("#kcancel", "click", () => { kept.confirm = null; kept.msg = null; keptScreen(); });
+}
+/** Delete, step 2, only from the confirm screen with the token the phone gave. Whatever the answer, back to the list, read again. */
+function keptGo() {
+  const c = kept.confirm;
+  if (!c || kept.busy) return;
+  const why = keptBlocked();
+  if (why) { kept.msg = { bad: true, text: why }; keptScreen(); return; }
+  const mine = kept;
+  mine.busy = "delete";
+  mine.msg = null;
+  keptScreen();
+  phone("deleteKept", c.name, c.token).then(() => {
+    mine.msg = { bad: false, text: `Deleted: ${keptTitle(c.item)} (${keptSize(c.item.size)}). It cannot be brought back.` };
+  }, (e) => { mine.msg = { bad: true, text: e.message }; }).then(() => {
+    mine.busy = "";
+    mine.confirm = null;
+    if (kept !== mine) return;
+    keptLoad();
+    if (location.hash === "#/kept") keptScreen();
+  });
+}
+
+// ------------------------------------------------------------------ is the model file on the phone the published one?
+// "ready" only means the file exists. info.verified says more: "yes" (it is the published file), "no" (it is not: it may be damaged;
+// it is kept and still works, and you may download it again), "own" (a file you picked yourself), "checking", "unknown".
+let checkOff = new Set();  // models whose check you stopped: not started again until you tap Check now
+function verifyHtml(info, m) {
+  if (!info.verified) return "";
+  if (info.verified === "checking") return `<span class="small muted">Checking this model file against the published one. It can take a minute; the model keeps working meanwhile.</span><button class="btn block" id="vstop">Stop checking</button>`;
+  if (info.verified === "yes") return `<span class="small muted">Verified: this is the published model file.</span>`;
+  if (info.verified === "own") return `<span class="small muted">Your own file, not verified.</span>`;
+  if (info.verified === "no") {
+    const again = m ? `<button class="btn primary" id="redl">${info.partial ? "Continue download" : `Download again (${mb(m.size)})`}</button>` : "";
+    if (info.kept) return `<span class="small muted">Not the published file (you chose to keep using it).</span>${again ? `<div class="grid2">${again}</div>` : ""}`;
+    return `<span class="tag warn">Not the published file</span><span class="small">This model file is not the published one. It may be damaged.</span>
+      <div class="grid2">${again}<button class="btn" id="vkeep">Keep using it</button></div>`;
+  }
+  return `<span class="small muted">Not checked yet.</span><button class="btn block" id="vnow">Check now</button>`;
+}
+/** Draws only the check's own lines again (a check ended, was stopped, or you chose something): never the whole screen, which would wipe a half-typed box. */
+function redrawVerify() {
+  const box = document.getElementById("mverify");
+  if (!box || location.hash !== "#/settings") return;
+  box.innerHTML = verifyHtml(modelInfo(), MODELS.find((x) => x.file === settings.modelFile));
+  bindVerify();
+}
+function bindVerify() {
+  const m = MODELS.find((x) => x.file === settings.modelFile);
+  bind("#vstop", "click", () => { checkOff.add(settings.modelFile); sync("stopCheck"); redrawVerify(); });
+  bind("#vnow", "click", () => {
+    checkOff.delete(settings.modelFile);
+    sync("checkModel", settings.modelFile);
+    if (modelInfo().verified === "unknown") toast("Not now: the check needs the app open, no download or job running, and a battery that is not low.");
+    redrawVerify();
+  });
+  bind("#vkeep", "click", () => { sync("keepModel", settings.modelFile); toast("Kept. Notes keep using this model file."); redrawVerify(); });
+  bind("#redl", "click", () => { if (m) startModelDownload(m); });
+}
+
+/** Downloads (or continues, or downloads again over a file that is not the published one) the model m from Settings. The old file stays until the new one is complete and verified. */
+function startModelDownload(m) {
+  onProgress.download = (d, t) => {
+    const bar = document.getElementById("mbar");
+    const txt = document.getElementById("mtext");
+    const tot = t > 0 ? t : m.size;
+    if (bar) bar.style.width = Math.round((d / tot) * 100) + "%";
+    if (txt) txt.textContent = `${mb(d)} of ${mb(tot)}`;
+    modelDl = { d, t: tot, file: m.file };
+  };
+  modelDl = { d: 0, t: m.size, file: m.file };  // which model: the phone has one download flag, so another model's card must not look like it downloads
+  workTick();
+  phone("downloadModel", "", m.file).then(() => { modelDl = null; toast("The AI model is ready"); if (location.hash === "#/settings") settingsScreen(); })
+    .catch((err) => { modelDl = null; if (err.message !== "paused") toast(err.message); if (location.hash === "#/settings") settingsScreen(); });
+  setTimeout(() => { if (location.hash === "#/settings") settingsScreen(); }, 300);
+}
+
 function settingsScreen() {
-  const info = modelInfo();
+  let info = modelInfo();
+  if (info.ready && info.verified === "unknown" && !checkOff.has(settings.modelFile)) {  // the one-time check of a model already on the phone (Java decides if it may start now)
+    sync("checkModel", settings.modelFile);
+    info = modelInfo();
+  }
+  onProgress.check = redrawVerify;
   const m = MODELS.find((x) => x.file === settings.modelFile);
   const others = (info.installed || []).filter((f) => !MODELS.some((x) => x.file === f));
   const dl = !!info.downloading;
+  const redl = !!(info.ready && dl && m && modelDl && modelDl.file === m.file);  // downloading again over a model file that is already there (this card's file, not another model's download)
   const pct = m && info.partial ? Math.round((info.partial / m.size) * 100) : 0;
   const seg = (key, opts) => `<div class="seg">${opts.map(([v, l]) => `<button data-set="${key}" data-val="${esc(JSON.stringify(v))}" aria-pressed="${settings[key] === v}">${l}</button>`).join("")}</div>`;
   $app.innerHTML = `${header("Settings", "#/")}
@@ -1194,11 +1739,12 @@ function settingsScreen() {
       <p class="hint">Only your question is sent (no notes, no account, no AI service). Answers show their links. Off by default.</p></div>
     <div class="stack"><h2>On-phone AI</h2>
       <div class="card stack">
-        <div class="row between"><strong>${esc(m ? m.name : settings.modelFile)}</strong><span class="tag ${info.ready ? "ok" : "warn"}" id="mstate">${info.ready ? "Ready" : dl ? "Downloading" : info.partial ? "Paused" : "Not downloaded"}</span></div>
+        <div class="row between"><strong>${esc(m ? m.name : settings.modelFile)}</strong><span class="tag ${info.ready ? "ok" : "warn"}" id="mstate">${redl ? "Downloading again" : info.ready ? "Ready" : dl ? "Downloading" : info.partial ? "Paused" : "Not downloaded"}</span></div>
         <span class="small muted">${esc(m ? m.note : "Your own model file")}</span>
-        ${!info.ready && m ? `<span class="bar"><span id="mbar" style="width:${pct}%"></span></span><span class="small muted" id="mtext">${info.partial ? `${mb(info.partial)} of ${mb(m.size)}` : `${mb(m.size)} to download. Use Wi-Fi.`}</span>` : ""}
+        ${(!info.ready || redl) && m ? `<span class="bar"><span id="mbar" style="width:${pct}%"></span></span><span class="small muted" id="mtext">${info.partial ? `${mb(info.partial)} of ${mb(m.size)}` : `${mb(m.size)} to download. Use Wi-Fi.`}</span>` : ""}
         ${info.ready ? `<span class="small muted">${mb(info.bytes)} on this phone${info.backend ? ` · running on ${info.backend.toUpperCase()}` : ""}</span>` : ""}
-        ${!info.ready && m ? (dl ? `<button class="btn block" id="pause">Pause download</button>` : `<button class="btn primary block" id="dl">${info.partial ? "Continue download" : "Download model"}</button>`) : ""}
+        ${info.ready && !redl && info.verified ? `<div class="stack" id="mverify">${verifyHtml(info, m)}</div>` : ""}
+        ${(!info.ready || redl) && m ? (dl ? `<button class="btn block" id="pause">Pause download</button>` : `<button class="btn primary block" id="dl">${info.partial ? "Continue download" : "Download model"}</button>`) : ""}
         ${info.ready || info.partial ? `<button class="btn block danger" id="delm">Delete the model</button>` : ""}
         <p class="hint">The download keeps going if you leave the app, with a notification and a Stop button. If it stops, it continues from where it stopped (also during the nightly run).</p>
       </div>
@@ -1221,32 +1767,21 @@ function settingsScreen() {
     </div>
     ${nightSettingsHtml()}
     ${Verify.settingsHtml()}
+    <div class="stack" id="backup">${backupInner()}</div>
     <div class="stack"><h2>Export (${plural(db.reels.length, "reel")})</h2>
-      <div class="grid2"><button class="btn" id="exjson">Save JSON</button><button class="btn" id="exmd">Save Markdown</button></div>
+      <button class="btn block" id="exjson">Export notes (JSON, cannot be restored)</button>
+      <button class="btn block" id="exmd">Save Markdown</button>
       <div class="grid2"><button class="btn" id="exshare">Share notes</button><button class="btn" id="excopy">Copy all</button></div>
       <button class="btn block" id="excsv">Save watchlist (${plural((db.media || []).length, "title")}, CSV)</button>
-      <p class="hint">Files go to Downloads/ReelShelf. Send the JSON to Claude to analyze all your reels together.</p>
+      <p class="hint">Files go to Downloads/ReelShelf. Send the JSON to Claude to analyze all your reels together. An export keeps only your notes and cannot be restored: to keep everything, use Back up now.</p>
     </div>
     <p class="hint">Sharing a reel only saves it. Work starts only when you tap Start (or Process); it can keep going after you leave the app, always with a notification and a Stop button, and ends when done.</p>
     <button class="btn block danger" id="wipe">Delete all reels and notes</button>`;
   Verify.bindSettings(settingsScreen);
   bindSpeech();
   bind("[data-set]", "click", (e, b) => { settings[b.dataset.set] = JSON.parse(b.dataset.val); saveSettings(); settingsScreen(); });
-  bind("#dl", "click", () => {
-    onProgress.download = (d, t) => {
-      const bar = document.getElementById("mbar");
-      const txt = document.getElementById("mtext");
-      const tot = t > 0 ? t : m.size;
-      if (bar) bar.style.width = Math.round((d / tot) * 100) + "%";
-      if (txt) txt.textContent = `${mb(d)} of ${mb(tot)}`;
-      modelDl = { d, t: tot };
-    };
-    modelDl = { d: 0, t: m.size };
-    workTick();
-    phone("downloadModel", m.url, m.file).then(() => { modelDl = null; toast("The AI model is ready"); if (location.hash === "#/settings") settingsScreen(); })
-      .catch((err) => { modelDl = null; if (err.message !== "paused") toast(err.message); if (location.hash === "#/settings") settingsScreen(); });
-    setTimeout(() => { if (location.hash === "#/settings") settingsScreen(); }, 300);
-  });
+  bind("#dl", "click", () => startModelDownload(m));
+  bindVerify();
   bind("#pause", "click", () => { sync("stopModel"); modelDl = null; workTick(); setTimeout(settingsScreen, 400); });
   bind("#delm", "click", () => { if (confirm("Delete the AI model from this phone? You can download it again later.")) { sync("deleteModel", settings.modelFile); settingsScreen(); } });
   bind("#own", "click", () => {
@@ -1262,24 +1797,26 @@ function settingsScreen() {
   bind("#savep", "click", () => { settings.prompt = document.getElementById("prompt").value.slice(0, 8000) || Notes.META_PROMPT; saveSettings(); toast("Prompt saved"); });
   bind("#resetp", "click", () => { settings.prompt = Notes.META_PROMPT; saveSettings(); settingsScreen(); toast("Prompt reset"); });
   const stamp = () => new Date().toISOString().slice(0, 10);
+  bind("#backupnow", "click", backupNow);
   bind("#exjson", "click", () => phone("saveFile", `reel-notes-${stamp()}.json`, "application/json", Notes.exportJson(db.reels)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#exmd", "click", () => phone("saveFile", `reel-notes-${stamp()}.md`, "text/markdown", Notes.exportMarkdown(db.reels)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#excsv", "click", () => phone("saveFile", `watchlist-${stamp()}.csv`, "text/csv", Catalog.exportCsv(db)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#exshare", "click", () => sync("shareText", Notes.exportMarkdown(db.reels), "Share your reel notes"));
   bind("#excopy", "click", () => { sync("copy", Notes.exportMarkdown(db.reels)); toast("All notes copied"); });
-  bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes? This cannot be undone.`)) { db.reels = []; db.inbox = []; if (saveDb()) sync("dropBackup", "reels"); toast("Deleted (your watchlist is kept)"); settingsScreen(); } });
+  bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes${db.reels.some(Notes.hasUserData) ? ", including your own edits" : ""}? This cannot be undone.`)) { db.reels = []; db.inbox = []; if (saveDb()) sync("dropBackup", "reels"); toast("Deleted (your watchlist is kept)"); settingsScreen(); } });
 }
 
 // ------------------------------------------------------------------ router
 
 const ROUTES = [
   [/^#?\/?$/, libraryScreen, "lib", true], [/^#\/inbox$/, inboxScreen, "inbox", true],
-  [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "lib"], [/^#\/file$/, fileScreen, "inbox"],
+  [/^#\/r\/(.+)$/, (m) => reelScreen(decodeURIComponent(m[1])), "lib"], [/^#\/file$/, fileScreen, "inbox"], [/^#\/failed$/, failedScreen, "inbox"],
   [/^#\/ask(\?.*)?$/, askScreen, "lib"], [/^#\/topic\/(.+)$/, (m) => topicScreen(decodeURIComponent(m[1])), "lib"],
   [/^#\/watch$/, () => { lib.kind = "movies"; location.replace("#/"); }, "lib"], [/^#\/m\/(.+)$/, (m) => titleScreen(decodeURIComponent(m[1])), "lib"],
   [/^#\/add$/, addScreen, "inbox"], [/^#\/run$/, runScreen, "inbox"],
   [/^#\/shots$/, () => Shots.screen(), "inbox"], [/^#\/shots\/review$/, () => Shots.review(), "inbox"], [/^#\/settings$/, settingsScreen, ""],
   [/^#\/check$/, () => Verify.screen(), "inbox"], [/^#\/quotes$/, () => { lib.kind = "quotes"; location.replace("#/"); }, "lib"],
+  [/^#\/restore$/, restoreScreen, ""], [/^#\/kept$/, keptScreen, ""],
 ];
 
 /** The library file could not be read. Nothing is saved over it; you choose what happens next. */
@@ -1289,8 +1826,9 @@ function lockedScreen() {
       <span class="small">Reel Shelf has not changed it, and will not save anything until you choose. Shared reels wait safely.</span></div>
     <button class="btn block" id="retry">Try again</button>
     <button class="btn block" id="saveBad">Save the unreadable file to Downloads</button>
+    <a class="btn block" href="#/restore" id="restorebtn">Restore from a backup</a>
     <button class="btn block danger" id="startNew">Start a new library</button>
-    <p class="hint">Start a new library sets the unreadable file aside under a new name (it is not deleted). Save a copy to Downloads first if you want to keep it outside the app.</p>`;
+    <p class="hint">Start a new library sets the unreadable file aside under a new name (it is not deleted). Save a copy to Downloads first if you want to keep it outside the app. Restore from a backup does the same with the unreadable file, then puts the backup you choose in its place.</p>`;
   bind("#retry", "click", () => { dbLocked = false; loadDb(); if (dbLocked) toast("Still unreadable"); else openLibrary(); render(); });
   bind("#saveBad", "click", () => phone("saveUnreadable", "reels").then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#startNew", "click", () => {
@@ -1303,6 +1841,46 @@ function lockedScreen() {
   });
 }
 
+// ------------------------------------------------------------------ the app is opened while the nightly run is still going
+// The phone has asked the nightly run to stop its current work (the reel being processed is cancelled; what is saved stays). Until it has, this screen does not read or save
+// anything, so the two can never work on the library at once; then everything is read fresh from disk.
+let handingOver = false;
+const HANDOVER = window.__handover || { poll: 500, max: 45000 };  // the phone ends the run after 20 s; this is only a safety net
+function handOverScreen() {
+  $app.innerHTML = `${header("Finishing the nightly run", "")}
+    <div class="card stack"><strong>The nightly run is finishing</strong>
+      <span class="small">It stops its current work and keeps everything already saved. Your library opens in a moment.</span>
+      <span class="bar"><span style="width:100%"></span></span></div>`;
+}
+function handOver() {
+  if (handingOver) return;
+  handingOver = true;
+  paintTabs("");
+  topBar(false);
+  handOverScreen();
+  const t0 = Date.now();
+  const tick = () => {
+    if (sync("nightActive") && Date.now() - t0 < HANDOVER.max) { setTimeout(tick, HANDOVER.poll); return; }
+    handingOver = false;
+    loadSettings();
+    loadDb();  // fresh: what the night saved is in it, and saves from here on are for this version
+    if (typeof Shots !== "undefined") Shots.reload();  // the screenshot list too: the night may have saved a newer one
+    if (!dbLocked && restore.busy !== "restore") openLibrary();  // not while a restore installs: it opens the restored library itself (or, if it fails, restoreGo does)
+    render();
+  };
+  tick();
+}
+
+/** The library was saved by a newer Reel Shelf. Nothing is saved over it and it is never set aside: the only choice is a copy of the file. */
+function newerScreen() {
+  const v = sync("appVersion");
+  $app.innerHTML = `${header("Library not opened", "")}
+    <div class="card stack"><span>This library was saved by a newer Reel Shelf. This version${v ? ` (${esc(v)})` : ""} cannot open it safely and has not changed it. Install the newest Reel Shelf.</span></div>
+    <button class="btn block" id="saveBad">Save a copy to Downloads</button>
+    <p class="hint">Reels you share meanwhile wait safely.</p>`;
+  bind("#saveBad", "click", () => phone("saveUnreadable", "reels").then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
+}
+
 /** What happens when the library is open: things shared while the app was closed come in, titles checked overnight are applied. */
 function openLibrary() {
   takeShared();
@@ -1311,7 +1889,11 @@ function openLibrary() {
 }
 
 function render() {
-  if (dbLocked) { paintTabs(""); topBar(false); lockedScreen(); return; }
+  if (handingOver) { paintTabs(""); topBar(false); handOverScreen(); return; }  // first on every route, the restore screen included
+  if (restore.busy === "restore") { paintTabs(""); topBar(false); restoreScreen(); return; }  // while it installs this is the only screen: nothing else may save over it
+  if (location.hash !== "#/restore" && !restore.busy && (restore.preview || restore.step === "done")) restoreDrop();  // left the screen: a checked backup is dropped, a result is forgotten
+  if (location.hash !== "#/kept" && kept.items !== null) kept = keptFresh();  // left the screen: a pending delete confirmation and the list are forgotten
+  if (dbLocked) { paintTabs(""); topBar(false); if (dbNewer) newerScreen(); else if (location.hash === "#/restore") restoreScreen(); else lockedScreen(); return; }
   const h = location.hash || "#/";
   for (const [rx, fn, tab, top] of ROUTES) {
     const m = h.match(rx);
@@ -1327,8 +1909,13 @@ function render() {
 
 window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); });
 loadSettings();
-loadDb();
-bindTopBar();
-if (!dbLocked) openLibrary();  // while locked nothing is taken from the share queue or the check results
-render();
+if (sync("nightActive")) {  // opened while the nightly run is still going: it is finishing; the library is not touched until it has stopped
+  bindTopBar();
+  handOver();
+} else {
+  loadDb();
+  bindTopBar();
+  if (!dbLocked) openLibrary();  // while locked nothing is taken from the share queue or the check results
+  render();
+}
 if (sync("isNight")) { if (dbLocked) sync("nightDone"); else overnightRun(true); }  // the nightly run (no screen): see NightRun.java
