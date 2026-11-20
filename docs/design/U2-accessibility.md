@@ -1,6 +1,6 @@
 # U2: accessibility audit and minimal fixes (design, not approved)
 
-Base for every file:line below: `origin/stabilize/s4-4-files-set-aside` at **563f81f** (PR #70, not merged, 1.3.25). The page files are under `android/app-shell/app/src/main/assets/local/`. Where a line is the same on the default branch (1.3.11) is not checked line by line; screens added by unmerged PRs (backup, restore, kept files) are included. Planning only: no code was changed. **No finding below was checked with TalkBack or on a phone**: they come from reading the code and computing colour contrast (WCAG 2.x formula, script in the session scratchpad).
+Base for every file:line below: `origin/stabilize/s4-4-files-set-aside` at **563f81f** (PR #70, not merged, 1.3.25). The page files are under `android/app-shell/app/src/main/assets/local/`. Where a line is the same on the default branch (1.3.11) is not checked line by line; screens added by unmerged PRs (backup, restore, kept files) are included. Line numbers in `tests/` are from the same branch unless marked (on the default branch the same test lines are 452-453). Planning only: no code was changed. **No finding below was checked with TalkBack or on a phone**: they come from reading the code and computing colour contrast (WCAG 2.x formula, script in the session scratchpad).
 
 ## Problem
 Reel Shelf is one WebView page (`index.html`) with screens drawn by `$app.innerHTML` (29 places). Nothing has been checked for TalkBack, large text, contrast or motion. Some basics are good; a few patterns hurt every screen.
@@ -51,14 +51,14 @@ Reel Shelf is one WebView page (`index.html`) with screens drawn by `$app.innerH
 3. Do nothing until a phone audit: leaves F1 and F2, which are certain from the code.
 
 ## The change (option 1)
-`app.css` must stay byte-equal to `src/reel_watcher/webapp/app.css` (tests/test_phone_app.py:452-453), so every CSS fix goes into **`local.css`** (Android only), which loads after it (index.html:11).
+`app.css` must stay byte-equal to `src/reel_watcher/webapp/app.css` (tests/test_phone_app.py:459-460 on 563f81f; 452-453 on the default branch), so every CSS fix goes into **`local.css`** (Android only), which loads after it (index.html:11).
 1. F1: remove `aria-live` from `<main>`. Messages that must be heard keep their `role="status"` or `role="alert"`, or go through the toast.
 2. F2: `header()` gives the `<h1>` `tabindex="-1"`; the `hashchange` handler focuses it after `render()` (not on repaints of the same screen, not while a dialog is open).
 3. F3: `local.css`: `:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }` and the same for `.search:focus-within`.
 4. F4: drop the tab `aria-label`s (the visible text is the name) and give the badge visually hidden text: "3 new". Same for Library.
 5. F5: each card becomes a `group` labelled "Screenshot N of M, FILE-TEXT"; the buttons get `aria-label`s like "Add a name for screenshot 3", "Open screenshot 3 in Google Lens", "Screenshot 3 is not a title".
 6. F6: `.bar` gets `role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow` and a label (in the shared bar markup).
-7. F7: `local.css` overrides `--line` to #6A6B74 (3.42:1 on bg, 3.07:1 on surface; computed).
+7. F7: `local.css` overrides `--line` to #6A6B74 (computed: 3.42:1 on bg #15161A, 3.07:1 on surface #1F2026, 2.59:1 on surface2 #2C2D34). `--line` is also the **off track of `.switch`** (app.css:91, which sits on a card: 3.07:1, and the white knob stays 15:1+ on it) and the **border of `.poster-ph`** (local.css:13; its fill is surface2, so the border is 2.59:1 against its own fill but 3.07:1 or 3.42:1 against the card or page around it, which is the edge that matters). Both get lighter; that is a visible change, listed in the PR.
 8. F8: `local.css`: `.icon-btn`, `button.bare`, `.chip`, `.seg button`, `.small-field select` get `min-width/min-height: 48px`; `.switch` keeps its look inside a 48 dp hit area (padding).
 9. F9, F10: "Copy quote"; Filters says "Filters, on" when the dot shows.
 10. F12: `summary { padding: 12px 0; }`.
@@ -72,14 +72,14 @@ Reel Shelf is one WebView page (`index.html`) with screens drawn by `$app.innerH
 
 ## Tests
 **Phone harness (Playwright, Chromium, fake RN; `tests/test_accessibility.py`):** visit every route in `ROUTES` (local.js:1642-1651) plus the locked, newer, restore, kept and dialog states, and assert:
-- every `button`, `a[href]`, `input`, `select`, `textarea`, `[role=switch]` has an accessible name (Playwright `get_by_role` / `aria_snapshot`, already used in tests/test_app.py:250-262);
+- every `button`, `a[href]`, `input`, `select`, `textarea`, `[role=switch]` has an accessible name (Playwright `get_by_role`, already used in tests/test_app.py:250-262; `aria_snapshot` would be new: no test in `tests/` uses it yet);
 - the names of buttons inside one card are unique on the screen (F5);
 - every interactive element's bounding box is at least 48 x 48 (a short, named exception list, for example inline text links);
 - `#app` has no `aria-live`; after a `hashchange`, `document.activeElement` is the `<h1>`;
 - `.bar` elements have `role=progressbar` and a value;
 - with `reduced_motion="reduce"`, the computed `transition-duration` of `.bar > span` is `0s`;
 - reflow: at a 195 px wide viewport (390 at 200%) `scrollWidth <= clientWidth` on every screen. This only approximates large text; it is not the Android font setting.
-**Pure test:** parse the CSS variables and assert text pairs >= 4.5:1 and border pairs >= 3:1.
+**Pure test:** parse the CSS variables (app.css plus the local.css overrides) and assert these exact pairs. Text >= 4.5:1: `--text`, `--soft`, `--muted`, `--accent`, `--danger`, `--info` each on `--bg`, `--surface`, `--surface2` and the tab bar #17181D (lowest: `--muted` on surface2, 5.26:1); #8E8B85 (placeholder, `.step.todo`, app.css:67, 99) on `--bg` and `--surface` only (5.32 and 4.78:1; it is 4.04:1 on surface2, where I found no use by reading the CSS and screens, NEEDS VERIFICATION); `--on-accent` on `--accent`; `--ok-fg` on `--ok-bg`; `--warn-fg` on `--warn-bg`. Non-text >= 3:1: `--line` on `--bg` and on `--surface` (buttons, chips, inputs, the switch track, the poster border's outside edge). Recorded, not asserted: `--line` on `--surface2` (2.59:1, the poster border's inner edge).
 **Cannot run in the harness:** TalkBack's real reading order and announcements, Android font scale, display size, Remove animations, the real dp size.
 
 ## PR split
