@@ -6,6 +6,22 @@ section here. A merge builds and tests the APK (kept as the workflow artifact); 
 notes and points `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.15
+- Your library now carries a small version number (`"schema_version": 1` in the library file), and Reel Shelf checks it
+  every time it opens the library. If a future Reel Shelf ever saves your library in a layout this version cannot read,
+  this version says so instead of guessing: **"This library was saved by a newer Reel Shelf. This version cannot open
+  it safely and has not changed it. Install the newest Reel Shelf."** It then leaves the file exactly as it is: it does
+  not put an older copy back over it, does not rename or move it, and saves nothing. The one button is **Save a copy
+  to Downloads**; there is no "Start a new library". Reels you share meanwhile wait safely, and the nightly run does
+  nothing to it. The screenshot list has the same rule (its own version number, which it always had): it is left as it
+  is and the Screenshots screen says why.
+- Nothing changes for your library today: it opens the same, with the same reels, and the number is added the next
+  time something is saved (a library you start from nothing has it from its first save). Older Reel Shelf installs
+  keep working with it, and keep the number when they save. Only this version and later look at the number, so this
+  protects you from the release after this one, not from the ones before it.
+- Checked with automatic tests on a computer (every earlier release's library file opens and is saved back the same,
+  apart from this number). Not yet tried on a phone: see tests E22 to E24 in TESTING.md.
+
 ## 1.3.14
 - Adding a title to your watchlist, and the online check of a title, no longer slow down as the list grows. Each one used
   to read the whole list again to see whether the title was already there: in a test with a list of 5,000 titles,
