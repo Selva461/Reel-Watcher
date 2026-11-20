@@ -26,6 +26,8 @@ import java.util.Map;
  * - a file that cannot be read is never overwritten: a good backup is restored (the damaged file is kept as
  *   NAME.bad-TIME), and with no good backup the file is locked: reads give nothing, writes are refused, until
  *   {@link #startNew()} sets the damaged file aside (renamed, never deleted).
+ * - a file saved by a NEWER Reel Shelf (its schema number is above what this build supports) is locked the same way and
+ *   is never touched at all: not restored from the backup, not renamed, not written, not set aside. See {@link #REELS_SCHEMA}.
  * One instance per file for the whole process, so the app screen and the nightly run obey the same lock.
  * Every change to the file's content advances a revision. A page remembers the revision it loaded; a save based on an
  * older one is refused ({@link #write(String, long)}), so a page working on an out-of-date copy can never overwrite
@@ -33,7 +35,16 @@ import java.util.Map;
  * Pure Java (files and org.json only), tested on a computer.
  */
 final class LibraryFile {
-    enum State { OK, MISSING, RECOVERED, UNREADABLE, STARTED_NEW }
+    enum State { OK, MISSING, RECOVERED, UNREADABLE, STARTED_NEW, NEWER }
+
+    /**
+     * The newest schema this build can read, per file. reels.json says which it was saved with in "schema_version",
+     * shots.json in "v" (it has always had one). A file with a bigger number was saved by a newer Reel Shelf: it is
+     * locked as NEWER and left exactly as it is. They MUST equal SCHEMA in local.js and SHOTS_SCHEMA in shots.js
+     * (LibraryFileTest checks that). Raise them only in a build that can read the new format.
+     */
+    static final int REELS_SCHEMA = 1;
+    static final int SHOTS_SCHEMA = 1;
 
     interface Shape {
         boolean ok(JSONObject o);
@@ -50,7 +61,7 @@ final class LibraryFile {
 
     private static final Map<String, LibraryFile> ALL = new HashMap<>();
 
-    static synchronized LibraryFile of(File dir, String name, Shape shape) {
+    static synchronized LibraryFile of(File dir, String name, Shape shape, String schemaKey, int supported) {
         String key;
         try {
             key = new File(dir, name).getCanonicalPath();
@@ -58,22 +69,28 @@ final class LibraryFile {
             key = new File(dir, name).getAbsolutePath();
         }
         LibraryFile f = ALL.get(key);
-        if (f == null) ALL.put(key, f = new LibraryFile(dir, name, shape));
+        if (f == null) ALL.put(key, f = new LibraryFile(dir, name, shape, schemaKey, supported));
         return f;
     }
 
     static LibraryFile reels(File dir) {
-        return of(dir, "reels.json", RELS);
+        return of(dir, "reels.json", RELS, "schema_version", REELS_SCHEMA);
     }
 
     static LibraryFile shots(File dir) {
-        return of(dir, "shots.json", SHOTS);
+        return of(dir, "shots.json", SHOTS, "v", SHOTS_SCHEMA);
     }
 
     final File main;
     final File bak;
     private final File tmp;
     private final Shape shape;
+    private final String schemaKey;
+    private final int supported;
+    /** The schema number of the NEWER file, rounded up to a whole number (0 unless the state is NEWER). */
+    private long found;
+    /** The file that made the state NEWER: main, or the backup when main is damaged. This is the one "Save a copy" gives out. */
+    private File newerFile;
     private State state = State.MISSING;
     private boolean locked;
     /** The file on disk was read (or written) by this process and found good: only then may it become the backup. */
@@ -85,11 +102,13 @@ final class LibraryFile {
     /** Advances whenever the file's content changes (a save, a restore from the backup, a start-new). In memory: pages cannot outlive the process. */
     private long revision;
 
-    private LibraryFile(File dir, String name, Shape shape) {
+    private LibraryFile(File dir, String name, Shape shape, String schemaKey, int supported) {
         this.main = new File(dir, name);
         this.bak = new File(dir, name + ".bak");
         this.tmp = new File(dir, name + ".tmp");
         this.shape = shape;
+        this.schemaKey = schemaKey;
+        this.supported = supported;
     }
 
     synchronized State state() {
@@ -98,6 +117,16 @@ final class LibraryFile {
 
     synchronized boolean locked() {
         return locked;
+    }
+
+    /** The schema number this build supports for this file. */
+    int supported() {
+        return supported;
+    }
+
+    /** The schema number the NEWER file was saved with (rounded up to a whole number), or 0 when the state is not NEWER. */
+    synchronized long found() {
+        return state == State.NEWER ? found : 0;
     }
 
     /** Name of the damaged file that was set aside, or "". */
@@ -152,19 +181,23 @@ final class LibraryFile {
 
     /** The file's text; "" when there is none or it is locked (see {@link #state()}). Restores a good backup when needed. */
     synchronized String read() {
-        String text = valid(main);
-        if (text != null) {
+        Good now = good(main);
+        if (now != null && newer(now.schema)) return lockNewer(now.schema, main);  // before anything else, and whatever its shape: no restore, no rename, no write
+        if (now != null && now.shapeOk) {
             trusted = true;
             locked = false;
             state = State.OK;
-            return text;
+            return now.text;
         }
         boolean hadMain = main.exists();
-        String old = valid(bak);
-        if (old != null) {
+        Good old = good(bak);
+        // The file is damaged, so nothing can be said about it, but the backup was saved by a newer Reel Shelf. Restoring
+        // it is the newer version's job (it knows the format): this one leaves both files exactly as they are.
+        if (old != null && newer(old.schema)) return lockNewer(old.schema, bak);
+        if (old != null && old.shapeOk) {
             try {
                 if (hadMain) remember(quarantine(main));
-                put(main, old.getBytes(StandardCharsets.UTF_8));  // a copy: the backup stays where it is
+                put(main, old.text.getBytes(StandardCharsets.UTF_8));  // a copy: the backup stays where it is
             } catch (IOException e) {
                 trusted = false;
                 locked = true;
@@ -176,7 +209,7 @@ final class LibraryFile {
             state = State.RECOVERED;
             notice = "recovered";
             revision++;  // the content on disk is no longer what pages loaded before
-            return old;
+            return old.text;
         }
         if (!hadMain && !bak.exists()) {  // nothing was ever saved: a new library
             trusted = true;
@@ -190,8 +223,24 @@ final class LibraryFile {
         return "";
     }
 
-    /** The text of f when it is a whole JSON object of the right shape, else null. */
-    private String valid(File f) {
+    /** A file that is a whole JSON object: its text, whether it has the right shape, and what it says about its schema (null when nothing). */
+    private static final class Good {
+        final String text;
+        final boolean shapeOk;
+        final Object schema;
+
+        Good(String text, boolean shapeOk, Object schema) {
+            this.text = text;
+            this.shapeOk = shapeOk;
+            this.schema = schema;
+        }
+    }
+
+    /**
+     * f as a {@link Good} when it is a whole JSON object, else null. The shape is reported, not required: a newer Reel
+     * Shelf may have changed it (that is what a new schema number is for), and it is then still "newer", not "damaged".
+     */
+    private Good good(File f) {
         try {
             if (!f.isFile() || f.length() == 0) return null;
             String s = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
@@ -199,10 +248,34 @@ final class LibraryFile {
             JSONTokener t = new JSONTokener(s);
             Object v = t.nextValue();
             if (!(v instanceof JSONObject) || t.nextClean() != 0) return null;  // not an object, or something after it
-            return shape.ok((JSONObject) v) ? s : null;
+            JSONObject o = (JSONObject) v;
+            return new Good(s, shape.ok(o), o.opt(schemaKey));
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * Whether a schema value is newer than this build supports: only a NUMBER above {@code supported} is, whatever it is
+     * (2, 1.5, a number too big for a long: it is a bigger number than we know). Everything else is read as before: no key,
+     * null, 0, a negative number, 1 or 1.0, and a value that is not a number at all ("2", true, a list). No release ever
+     * wrote one of those, so it is no sign of a newer Reel Shelf, and locking the library for it would take away a library
+     * nothing is known to be wrong with. The test is on the double value, so a number too big for a double (1e999) is newer,
+     * and NaN (not valid JSON anyway) is not. That 1e999 is read as a number at all is verified on the JVM org.json that
+     * the unit tests use only, NOT on Android's own org.json; no release writes such a value, so nothing depends on it.
+     * local.js (isNewer) and shots.js (load) apply the same rule, and the tests of both use the same list of odd values.
+     */
+    private boolean newer(Object schema) {
+        return schema instanceof Number && ((Number) schema).doubleValue() > supported;
+    }
+
+    private String lockNewer(Object schema, File from) {
+        found = (long) Math.ceil(((Number) schema).doubleValue());  // a whole number, at most Long.MAX_VALUE
+        newerFile = from;
+        trusted = false;
+        locked = true;
+        state = State.NEWER;
+        return "";
     }
 
     // ------------------------------------------------------------------ writing
@@ -285,9 +358,10 @@ final class LibraryFile {
 
     /**
      * Sets the damaged file (and a damaged backup) aside, renamed and kept, and unlocks for a new file. Throws when a
-     * rename fails: the file then stays locked and nothing is replaced.
+     * rename fails: the file then stays locked and nothing is replaced. Always throws for a NEWER file (nothing is changed).
      */
     synchronized File startNew() throws IOException {
+        if (state == State.NEWER) throw new IOException("Saved by a newer Reel Shelf: it is never set aside");
         File bad = main.exists() ? quarantine(main) : null;
         if (bak.exists()) quarantine(bak);
         locked = false;
@@ -304,6 +378,7 @@ final class LibraryFile {
      * place, else the one just set aside. Null when there is none.
      */
     synchronized File unreadableFile() {
+        if (state == State.NEWER && newerFile != null && newerFile.isFile()) return newerFile;  // the newer library itself, even when main is a cut file beside a newer backup  // the newer library itself, even when main is a cut file beside a newer backup
         if (locked) return main.exists() ? main : bak.exists() ? bak : null;
         if (state == State.OK || state == State.MISSING) return main.isFile() ? main : null;
         return setAside != null && setAside.isFile() ? setAside : null;
@@ -318,6 +393,7 @@ final class LibraryFile {
 
     /** Deletes the backup (after "Delete all reels and notes", so deleted reels do not come back from it). */
     synchronized boolean dropBackup() {
+        if (state == State.NEWER) return false;  // the backup of a newer library is never deleted
         return !bak.exists() || bak.delete();
     }
 }

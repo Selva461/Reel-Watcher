@@ -68,19 +68,27 @@ function sync(method, ...args) {
 
 let db = { reels: [], inbox: [], media: [], mediaTypes: [] };
 let dbLocked = false;  // the library file could not be read: nothing is saved over it until you choose (lockedScreen)
+let dbNewer = false;   // ... because a newer Reel Shelf saved it (newerScreen): not damaged, and never to be set aside
+/** The newest library layout this version reads: reels.json says which one it was saved with in "schema_version". LibraryFile.REELS_SCHEMA in the app must be the same number (LibraryFileTest checks). */
+const SCHEMA = 1;
+/** A file is newer when it says it was saved with a bigger NUMBER than we read. A missing, null or non-number value is not (the same rule as LibraryFile.java: nothing ever wrote one). */
+function isNewer(v, supported) { return typeof v === "number" && v > supported; }
 function libraryInfo(which) { try { return JSON.parse(sync("libraryInfo", which || "reels") || "{}"); } catch (e) { return {}; } }
-function emptyDb() { return { reels: [], inbox: [], media: [], mediaTypes: [] }; }
+function emptyDb() { return { reels: [], inbox: [], media: [], mediaTypes: [], schema_version: SCHEMA }; }
 /** Reads the library from the phone. Nothing of the copy already in memory survives: a stored library that is new or empty (for example one another page just started) gives an empty library, never the old records. */
 function loadDb() {
   db = emptyDb();
+  dbNewer = false;
   const t = sync("load");
   const info = libraryInfo();
   if (info.state === "unreadable") { dbLocked = true; return; }  // the phone found it damaged and kept it as it is
+  if (info.state === "newer") { dbLocked = dbNewer = true; return; }  // saved by a newer Reel Shelf: the phone gives nothing and keeps it as it is
   if (t) {
     try {
       const d = JSON.parse(t);
+      if (d && typeof d === "object" && !Array.isArray(d) && isNewer(d.schema_version, SCHEMA)) { dbLocked = dbNewer = true; return; }  // whatever its shape: it is not ours to judge
       if (!d || typeof d !== "object" || Array.isArray(d) || (d.reels != null && !Array.isArray(d.reels))) throw new Error("not a library");
-      db = { ...d, reels: d.reels || [], inbox: d.inbox || [], media: d.media || [], mediaTypes: d.mediaTypes || [] };
+      db = { ...d, reels: d.reels || [], inbox: d.inbox || [], media: d.media || [], mediaTypes: d.mediaTypes || [], schema_version: d.schema_version == null ? SCHEMA : d.schema_version };  // stamped when missing; written with the next save
       for (const r of db.reels) if (r.status === "working") r.status = r.notes ? "done" : "new";  // the app was closed mid-way
       for (const r of db.reels) if (r.author && !Notes.isYoutube(r) && !Notes.username(r.author)) r.author = "";  // "Media": a label from the export, not a creator (before 1.3.5)
     } catch (e) { dbLocked = true; return; } }  // damaged: never save over it
@@ -1303,6 +1311,16 @@ function lockedScreen() {
   });
 }
 
+/** The library was saved by a newer Reel Shelf. Nothing is saved over it and it is never set aside: the only choice is a copy of the file. */
+function newerScreen() {
+  const v = sync("appVersion");
+  $app.innerHTML = `${header("Library not opened", "")}
+    <div class="card stack"><span>This library was saved by a newer Reel Shelf. This version${v ? ` (${esc(v)})` : ""} cannot open it safely and has not changed it. Install the newest Reel Shelf.</span></div>
+    <button class="btn block" id="saveBad">Save a copy to Downloads</button>
+    <p class="hint">Reels you share meanwhile wait safely.</p>`;
+  bind("#saveBad", "click", () => phone("saveUnreadable", "reels").then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
+}
+
 /** What happens when the library is open: things shared while the app was closed come in, titles checked overnight are applied. */
 function openLibrary() {
   takeShared();
@@ -1311,7 +1329,7 @@ function openLibrary() {
 }
 
 function render() {
-  if (dbLocked) { paintTabs(""); topBar(false); lockedScreen(); return; }
+  if (dbLocked) { paintTabs(""); topBar(false); if (dbNewer) newerScreen(); else lockedScreen(); return; }
   const h = location.hash || "#/";
   for (const [rx, fn, tab, top] of ROUTES) {
     const m = h.match(rx);
