@@ -620,8 +620,9 @@ async function startRun(codes, opts = {}) {
       if (run.stop) { r.status = r.notes ? "done" : "new"; break; }
       if (run.ready && (!r.notes || r.notes_by === "auto" || (opts.redo && Notes.isEdited(r)))) {
         if (Notes.material(r) < 30) {
-          r.status = "ready_no_text";
-          r.error = "Instagram gave too little to work from (no video, little caption). Type what the reel says, or open it in Instagram.";
+          const little = "Instagram gave too little to work from (no video, little caption). Type what the reel says, or open it in Instagram.";
+          if (Notes.isEdited(r)) why = little;  // a reel you edited keeps its status and error: the reason is in the run log only
+          else { r.status = "ready_no_text"; r.error = little; }
         } else {
           run.step = "ai";
           paintRun();

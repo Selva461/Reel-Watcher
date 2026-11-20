@@ -21,7 +21,11 @@ notes and points `apk-latest` at it. Builds signed with the stable key (GitHub s
   A Redo that fails, is stopped or meets Instagram's "slow down" leaves the reel as it is (no retry count, never in
   "Could not finish"); the reason is in the run log. Every other way of starting the AI (Start, the nightly run, Read this
   reel properly, Try again now) still skips a reel you edited. On a reel with Meta AI or on-phone AI notes that you did not
-  edit, Redo still changes nothing, as before.
+  edit, Redo still changes nothing, as before. If the reel has too little text to write from, Redo says so in the run
+  log and leaves the reel as it is.
+- After **Use the new AI version** with a version from the on-phone AI, the reel counts as an on-phone AI reel: a later
+  Meta AI answer replaces that on-phone version directly (it is not kept aside, because nothing of yours is on the screen),
+  and your own version stays in "Your edited version is kept" untouched.
 - Nothing was tried on a phone yet.
 - Version renumbered at merge: 1.3.30 (versionCode 37) is a provisional number for this stacked change.
 

@@ -1423,3 +1423,41 @@ def test_a_reel_removed_elsewhere_closes_the_editor_when_a_stale_save_reloads(ph
     phone.wait_for_function("() => !document.getElementById('dlg').open")
     assert toasts(phone)[-1] == "This reel is no longer on your shelf." and not any("tap Save again" in t for t in toasts(phone))
     assert phone.evaluate("() => reel('REEL1')") is None and phone.evaluate("() => editDraft") is None
+
+
+# ---------------------------------------------------------------- review of K1-3 (M-1, L-4)
+
+LITTLE = "Instagram gave too little to work from (no video, little caption). Type what the reel says, or open it in Instagram."
+
+
+def test_redo_on_an_edited_reel_with_too_little_text_says_so_in_the_run_log_and_leaves_the_reel_alone(phone):
+    original = edited("REEL1", caption="hi")
+    open_reel(phone, [copy.deepcopy(original)], model=READY, answers=[ANSWER])
+    click(phone, "Redo with phone AI")
+    finished(phone)
+    assert generate_calls(phone) == []
+    r = stored(phone)
+    assert r["status"] == "done" and r.get("error", "") == "" and r["notes"] == original["notes"] and "notes_next" not in r  # not "Little text", no error text left on the reel
+    assert phone.evaluate("() => [run.log[0].ok, run.log[0].text, run.failed]") == [False, LITTLE, 0]  # no green tick, and the reason is plain
+    phone.goto(phone.url.split("#")[0] + "#/r/REEL1")
+    assert "Little text" not in screen_text(phone) and "Instagram gave too little" not in screen_text(phone)
+
+
+def test_the_same_run_on_a_reel_that_is_not_edited_still_marks_it_as_little_text(phone):
+    open_reel(phone, [reel("REEL1", status="new", notes=None, caption="hi")], model=READY)
+    phone.evaluate("() => startRun(['REEL1'])")
+    r = stored(phone)
+    assert r["status"] == "ready_no_text" and r["error"] == LITTLE and generate_calls(phone) == []  # as before: the control for the test above
+
+
+def test_after_use_the_new_ai_version_with_a_phone_answer_a_later_meta_answer_replaces_it_directly(phone):
+    open_reel(phone, [edited("REEL1", notes_next={"phone": slot("phone")}, raw="R-you")])
+    phone.locator('[data-kept="use"][data-src="phone"]').click()
+    r = stored(phone)
+    assert r["notes_by"] == "phone" and r["notes"] == new_notes() and list(r["notes_next"]) == ["you"]
+    mine = r["notes_next"]["you"]
+    got = phone.evaluate("t => fileAnswer(t)", answer_for("REEL1"))  # a Meta AI answer for the reel, now a phone AI reel
+    assert got["filed"] == 1 and got["kept"] == 0
+    after = stored(phone)
+    assert after["notes_by"] == "meta" and after["notes"]["topic"] == "A newer topic from Meta AI"  # replaced directly: not kept aside
+    assert after["notes_next"] == {"you": mine}  # your own version is untouched, and no phone version is left waiting
