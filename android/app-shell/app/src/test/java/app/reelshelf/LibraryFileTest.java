@@ -735,6 +735,372 @@ public class LibraryFileTest {
         }
     }
 
+    // ------------------------------------------------------------------ snapshots and restoring a backup (LibraryBackup)
+
+    private File staged(String text) throws IOException {
+        File f = tmp.newFile();
+        put(f, text);
+        return f;
+    }
+
+    private static File[] beforeRestore(File dir, String name) {
+        File[] a = dir.listFiles((d, n) -> n.startsWith(name + ".before-restore-"));
+        Arrays.sort(a);
+        return a;
+    }
+
+    /** Every file of dir with its bytes, to show that nothing at all changed. */
+    private static String fingerprint(File dir) throws IOException {
+        StringBuilder b = new StringBuilder();
+        for (String n : names(dir)) b.append(n).append('=').append(get(new File(dir, n))).append('\n');
+        return b.toString();
+    }
+
+    @Test
+    public void replaceWithKeepsTheOldFileUntouchedAndTheBackupAndAdvancesTheRevision() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        f.read();
+        assertTrue(f.write(V1));
+        assertTrue(f.write(V2));  // main = V2, bak = V1
+        long rev = f.revision();
+        String restored = "{\"reels\":[{\"code\":\"RESTORED\"}]}";
+        File aside = f.replaceWith(staged(restored));
+        assertEquals(restored, get(f.main));
+        assertEquals("the old file is kept, byte for byte", V2, get(aside));
+        assertTrue(aside.getName().startsWith("reels.json.before-restore-"));
+        assertEquals("the backup is untouched", V1, get(f.bak));
+        assertEquals(rev + 1, f.revision());
+        assertEquals(LibraryFile.State.OK, f.state());
+        assertEquals("restored", f.takeNotice());
+        assertFalse(f.locked());
+        assertEquals(1, beforeRestore(dir, "reels.json").length);
+        // a page that loaded before the restore is refused as stale and changes nothing
+        LibraryFile.Result r = f.write(V1, rev);
+        assertTrue(r.stale);
+        assertFalse(r.ok);
+        assertEquals(restored, get(f.main));
+        // a page that loads now can save, and the restored file becomes the backup
+        assertTrue(f.write(V2, f.revision()).ok);
+        assertEquals(restored, get(f.bak));
+    }
+
+    @Test
+    public void replaceWithWorksWhileTheLibraryIsUnreadableAndUnlocksIt() throws Exception {
+        File dir = tmp.newFolder();
+        String cut = V2.substring(0, V2.length() / 2);
+        put(new File(dir, "reels.json"), cut);
+        LibraryFile f = LibraryFile.reels(dir);
+        assertEquals("", f.read());
+        assertTrue(f.locked());
+        long rev = f.revision();
+        File aside = f.replaceWith(staged(V1));
+        assertEquals("the unreadable file is set aside, never deleted", cut, get(aside));
+        assertEquals(V1, get(f.main));
+        assertFalse(f.locked());
+        assertEquals(LibraryFile.State.OK, f.state());
+        assertEquals(rev + 1, f.revision());
+        assertTrue(f.write(V2, f.revision()).ok);
+    }
+
+    @Test
+    public void replaceWithIsRefusedWhileTheLibraryIsNewerAndTouchesNothing() throws Exception {
+        // main is newer
+        File dir = tmp.newFolder();
+        put(new File(dir, "reels.json"), NEWER);
+        put(new File(dir, "reels.json.bak"), V1);
+        LibraryFile f = LibraryFile.reels(dir);
+        f.read();
+        assertEquals(LibraryFile.State.NEWER, f.state());
+        String before = fingerprint(dir);
+        long rev = f.revision();
+        File st = staged(V2);
+        try {
+            f.replaceWith(st);
+            fail("a newer library must never be replaced");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage(), expected.getMessage().contains("newer"));
+        }
+        assertEquals(before, fingerprint(dir));
+        assertEquals(V2, get(st));  // the staged file is not consumed either
+        assertEquals(rev, f.revision());
+        assertTrue(f.locked());
+        assertEquals(LibraryFile.State.NEWER, f.state());
+        // a damaged main beside a newer backup is the same
+        File dir2 = tmp.newFolder();
+        put(new File(dir2, "reels.json"), V1.substring(0, 10));
+        put(new File(dir2, "reels.json.bak"), NEWER);
+        LibraryFile g = LibraryFile.reels(dir2);
+        g.read();
+        assertEquals(LibraryFile.State.NEWER, g.state());
+        String before2 = fingerprint(dir2);
+        try {
+            g.replaceWith(staged(V2));
+            fail();
+        } catch (IOException expected) {
+            // refused
+        }
+        assertEquals(before2, fingerprint(dir2));
+    }
+
+    @Test
+    public void replaceWithOnALibraryNobodyReadYetStillSeesThatItIsNewer() throws Exception {
+        File dir = tmp.newFolder();
+        put(new File(dir, "reels.json"), NEWER);
+        LibraryFile f = LibraryFile.reels(dir);  // never read: its state says nothing yet
+        String before = fingerprint(dir);
+        try {
+            f.replaceWith(staged(V2));
+            fail();
+        } catch (IOException expected) {
+            // refused
+        }
+        assertEquals(before, fingerprint(dir));
+    }
+
+    /** What a restarted app sees: the per-process instance is forgotten, so the files on disk are read afresh. */
+    @SuppressWarnings("unchecked")
+    private static LibraryFile restarted(File dir, String name) throws Exception {
+        java.lang.reflect.Field all = LibraryFile.class.getDeclaredField("ALL");
+        all.setAccessible(true);
+        synchronized (LibraryFile.class) {
+            ((java.util.Map<String, LibraryFile>) all.get(null)).remove(new File(dir, name).getCanonicalPath());
+        }
+        return LibraryFile.reels(dir);
+    }
+
+    @Test
+    public void mainIsNeverMissingWhateverGoesWrongDuringReplaceWith() throws Exception {
+        for (int withBak = 0; withBak < 2; withBak++) {
+            for (int kind = 0; kind < 3; kind++) {
+                File dir = tmp.newFolder();
+                LibraryFile f = LibraryFile.reels(dir);
+                f.read();
+                if (withBak == 1) assertTrue(f.write(V1));
+                assertTrue(f.write(V2));
+                String before = fingerprint(dir);
+                long rev = f.revision();
+                final int k = kind;
+                final String[] seen = {null};
+                f.mover = (from, to) -> {
+                    // at the moment of the install, main is still there, whole, and the old file is already kept under its other name
+                    seen[0] = (to.exists() ? get(to) : "MISSING") + "|" + beforeRestore(dir, "reels.json").length;
+                    if (k == 0) throw new Error("killed");
+                    if (k == 1) throw new IllegalStateException("boom");
+                    throw new IOException("disk said no");
+                };
+                try {
+                    f.replaceWith(staged(V1));
+                    fail();
+                } catch (Error | RuntimeException | IOException expected) {
+                    // refused
+                }
+                assertEquals(V2 + "|1", seen[0]);
+                assertEquals(before, fingerprint(dir));  // main, .bak and nothing else: the set-aside link is removed again
+                assertEquals(rev, f.revision());
+                LibraryFile again = restarted(dir, "reels.json");  // a new process
+                assertEquals(V2, again.read());
+                assertEquals(LibraryFile.State.OK, again.state());
+            }
+        }
+    }
+
+    @Test
+    public void ifTheProcessDiesRightAfterTheSetAsideLinkTheLibraryIsStillThere() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        f.read();
+        assertTrue(f.write(V1));
+        // the state a kill leaves between the two steps: the old file under its other name too, main untouched
+        Files.createLink(new File(dir, "reels.json.before-restore-20260101-000000").toPath(), f.main.toPath());
+        LibraryFile again = restarted(dir, "reels.json");
+        assertEquals(V1, again.read());
+        assertEquals(LibraryFile.State.OK, again.state());
+    }
+
+    @Test
+    public void aDamagedBackupBesideAnUnreadableMainSurvivesTheRestoreAndTheNextSave() throws Exception {
+        File dir = tmp.newFolder();
+        String badMain = V2.substring(0, 15), badBak = V1.substring(0, 20);
+        put(new File(dir, "reels.json"), badMain);
+        put(new File(dir, "reels.json.bak"), badBak);
+        LibraryFile f = LibraryFile.reels(dir);
+        assertEquals("", f.read());
+        assertEquals(LibraryFile.State.UNREADABLE, f.state());
+        File aside = f.replaceWith(staged(V1));
+        assertEquals(badMain, get(aside));
+        assertTrue(f.write(V2, f.revision()).ok);  // the next save moves main over .bak
+        File[] kept = dir.listFiles((d, n) -> n.startsWith("reels.json.bak.bad-"));
+        assertEquals("the damaged backup is kept, as startNew keeps it", 1, kept.length);
+        assertEquals(badBak, get(kept[0]));
+        assertEquals(V1, get(f.bak));
+        assertEquals(V2, get(f.main));
+    }
+
+    @Test
+    public void aGoodBackupIsNotMovedByARestore() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        f.read();
+        assertTrue(f.write(V1));
+        assertTrue(f.write(V2));
+        f.replaceWith(staged("{\"reels\":[]}"));
+        assertEquals(V1, get(f.bak));
+        assertEquals(0, dir.listFiles((d, n) -> n.contains(".bak.bad-")).length);
+    }
+
+    @Test
+    public void aSecondRestoreKeepsASecondSetAsideFileAndNeverOverwritesTheFirst() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        f.read();
+        assertTrue(f.write(V1));
+        File a = f.replaceWith(staged(V2));
+        File b = f.replaceWith(staged("{\"reels\":[]}"));
+        assertTrue(!a.equals(b));
+        assertEquals(V1, get(a));
+        assertEquals(V2, get(b));
+        assertEquals(2, beforeRestore(dir, "reels.json").length);
+        assertEquals("{\"reels\":[]}", get(f.main));
+    }
+
+    @Test
+    public void replaceWithOnAMissingLibraryNeedsNoSetAside() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        f.read();
+        assertNull(f.replaceWith(staged(V1)));
+        assertEquals(V1, get(f.main));
+        assertEquals(0, beforeRestore(dir, "reels.json").length);
+    }
+
+    @Test
+    public void aFailedReplaceLeavesTheFileExactlyAsItWas() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        f.read();
+        assertTrue(f.write(V1));
+        assertTrue(f.write(V2));
+        String before = fingerprint(dir);
+        long rev = f.revision();
+        // a staged file that is not a usable library file, a newer one, a missing one: refused before anything moves
+        for (File bad : new File[]{staged("{\"reels\":{\"x\":1}}"), staged(V1 + "junk"), staged(NEWER), new File(dir, "nope")}) {
+            try {
+                f.replaceWith(bad);
+                fail("refused: " + bad);
+            } catch (IOException expected) {
+                // refused
+            }
+        }
+        assertEquals(before, fingerprint(dir));
+        assertEquals(rev, f.revision());
+        // the second rename fails: the set-aside file is moved back
+        File st = staged(V1);
+        f.mover = (from, to) -> {
+            throw new IOException("disk said no");
+        };
+        try {
+            f.replaceWith(st);
+            fail();
+        } catch (IOException expected) {
+            assertEquals("disk said no", expected.getMessage());
+        }
+        assertEquals("main is back exactly as it was", V2, get(f.main));
+        assertEquals(V1, get(f.bak));
+        assertEquals(0, beforeRestore(dir, "reels.json").length);
+        assertEquals(rev, f.revision());
+        assertEquals(LibraryFile.State.OK, f.state());
+        assertEquals("the staged file is still there", V1, get(st));
+    }
+
+    @Test
+    public void aSnapshotIsUnchangedByALaterWriteOrReplaceWith() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile f = LibraryFile.reels(dir);
+        f.read();
+        assertTrue(f.write(V1));
+        File work = tmp.newFolder();
+        File snap = new File(work, "reels.json");
+        assertTrue(f.snapshotTo(snap));
+        assertTrue("a hard link where the file system allows it", Files.isSameFile(snap.toPath(), f.main.toPath()));
+        assertTrue(f.write(V2));
+        assertEquals(V1, get(snap));
+        assertTrue(f.write("{\"reels\":[{\"code\":\"C\"}]}"));
+        assertEquals(V1, get(snap));
+        f.replaceWith(staged("{\"reels\":[{\"code\":\"D\"}]}"));
+        assertEquals(V1, get(snap));
+        // the copy fallback gives the same
+        File copy = new File(work, "copy.json");
+        assertTrue(f.snapshot(copy, false));
+        assertFalse(Files.isSameFile(copy.toPath(), f.main.toPath()));
+        assertEquals(get(f.main), get(copy));
+        assertTrue(f.write(V2));
+        assertEquals("{\"reels\":[{\"code\":\"D\"}]}", get(copy));
+    }
+
+    @Test
+    public void aSnapshotIsRefusedWhileLockedAndHasNothingToMakeWithoutAFile() throws Exception {
+        File dir = tmp.newFolder();
+        LibraryFile missing = LibraryFile.reels(dir);
+        missing.read();
+        assertFalse(missing.snapshotTo(new File(tmp.newFolder(), "x.json")));
+        File dir2 = tmp.newFolder();
+        put(new File(dir2, "reels.json"), V1.substring(0, 12));
+        LibraryFile unreadable = LibraryFile.reels(dir2);
+        unreadable.read();
+        File dest = new File(tmp.newFolder(), "x.json");
+        try {
+            unreadable.snapshotTo(dest);
+            fail();
+        } catch (IOException expected) {
+            // refused
+        }
+        assertFalse(dest.exists());
+        File dir3 = tmp.newFolder();
+        put(new File(dir3, "reels.json"), NEWER);
+        LibraryFile newer = LibraryFile.reels(dir3);  // never read: it reads first
+        try {
+            newer.snapshotTo(dest);
+            fail();
+        } catch (IOException expected) {
+            // refused
+        }
+        assertFalse(dest.exists());
+        // and it never overwrites
+        File dir4 = tmp.newFolder();
+        LibraryFile ok = LibraryFile.reels(dir4);
+        ok.read();
+        ok.write(V1);
+        File there = staged("mine");
+        try {
+            ok.snapshotTo(there);
+            fail();
+        } catch (IOException expected) {
+            // refused
+        }
+        assertEquals("mine", get(there));
+        try {
+            ok.snapshot(there, false);  // the copy path too
+            fail();
+        } catch (IOException expected) {
+            // refused
+        }
+        assertEquals("mine", get(there));
+    }
+
+    @Test
+    public void isValidFollowsTheRulesTheLibraryIsReadWith() throws Exception {
+        assertTrue(LibraryFile.isValid(staged(V1), LibraryFile.RELS));
+        assertTrue(LibraryFile.isValid(staged("{}"), LibraryFile.RELS));
+        assertFalse(LibraryFile.isValid(staged(V1 + "x"), LibraryFile.RELS));
+        assertFalse(LibraryFile.isValid(staged(V1 + "\u0000"), LibraryFile.RELS));
+        assertFalse(LibraryFile.isValid(staged("{\"reels\":{}}"), LibraryFile.RELS));
+        assertFalse(LibraryFile.isValid(staged(""), LibraryFile.RELS));
+        assertFalse(LibraryFile.isValid(new File(tmp.getRoot(), "none"), LibraryFile.RELS));
+        assertTrue(LibraryFile.isValid(staged("{\"seen\":{},\"reels\":{}}"), LibraryFile.SHOTS));
+        assertFalse(LibraryFile.isValid(staged("{\"seen\":[]}"), LibraryFile.SHOTS));
+    }
+
     // ------------------------------------------------------------------ the numbers here and in the page code are the same ones
 
     private static int numberIn(File js, String regex) throws IOException {
