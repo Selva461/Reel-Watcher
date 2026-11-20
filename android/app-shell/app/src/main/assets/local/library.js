@@ -24,11 +24,12 @@ const Lib = (() => {
   }
   const textCache = new WeakMap();
   function fullText(r) {
-    const sig = N.fieldsOf(r).map((x) => x[0] || "").join("\u0001");
+    const f = N.fieldsOf(r);
     const hit = textCache.get(r);
-    if (hit && hit.sig === sig) return hit.t;
-    const t = fold(sig.replace(/\u0001/g, " "));
-    textCache.set(r, { sig, t });
+    if (hit && hit.texts.every((x, i) => x === (f[i][0] || ""))) return hit.t;  // compared field by field: no 4 KB string is joined for each reel
+    const texts = f.map((x) => x[0] || "");
+    const t = fold(texts.join("\u0001").replace(/\u0001/g, " "));
+    textCache.set(r, { texts, t });
     return t;
   }
   function tagsOf(r) { return [...((r.notes || {}).tags || []), ...(r.keywords || [])].map((t) => fold(t).replace(/^#+/, "").replace(/\s+/g, "")); }
@@ -65,9 +66,10 @@ const Lib = (() => {
       return true;
     };
     let hits;
-    if (p.text) hits = N.search(reels, p.text, reels.length).filter((h) => ok(h.reel));
+    if (p.text) hits = N.search(reels, p.text, limit, ok);  // the operators are checked in ranked order, and only until `limit` reels are found
     else if (p.tags.length || p.exclude.length) hits = reels.filter(ok).map((r) => ({ reel: r, score: 0, lines: [] }));
     else return [];
+    hits = hits.slice(0, limit);
     if (p.phrases.length) {  // the lines that hold the exact words come first
       for (const h of hits) {
         const n = h.reel.notes || {};
@@ -76,7 +78,7 @@ const Lib = (() => {
         h.lines = [...new Set([...exact, ...h.lines])].slice(0, 3);
       }
     }
-    return hits.slice(0, limit);
+    return hits;
   }
 
   // ---------------------------------------------------------------- spelling

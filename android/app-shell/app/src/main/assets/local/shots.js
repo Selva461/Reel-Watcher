@@ -11,29 +11,40 @@ const Shots = (() => {
   const LOW_BATTERY = 40;     // pause below this, unless charging (Avles: battery is the only rule)
   let state = { v: 1, seen: {}, reels: {} };  // seen[key] = {m, st, n, f, c: [titles], x: short text}
   let loaded = false;
-  let blocked = false;        // the list could not be read and could not be set aside: nothing is read or saved over it
+  const SHOTS_SCHEMA = 1;     // the newest list layout this version reads (its "v"); LibraryFile.SHOTS_SCHEMA in the app must be the same number (LibraryFileTest checks)
+  let blocked = false;        // the list could not be read and could not be set aside, or a newer Reel Shelf saved it: nothing is read or saved over it
+  let blockedNewer = false;   // ... because a newer Reel Shelf saved it (never set aside: it is not damaged)
   let job = null;             // {phase, total, i, found, added, started, stop, finished, paused, why, recent}
 
   /**
    * Reads the saved list. A list that cannot be read (the phone reports "unreadable", or the page cannot use its text)
    * is set aside by the phone (renamed, kept, never deleted) and the list starts empty, to be read again from the
    * pictures. When it cannot be set aside, nothing is saved over it: blocked stays on and the next visit tries again.
+   * A list saved by a NEWER Reel Shelf (its "v" is above SHOTS_SCHEMA; the phone says "newer") is not damaged: it is never
+   * set aside or saved over, so blocked stays on and nothing is changed.
    */
   function load() {
     if (loaded) return;
     loaded = true;
-    blocked = false;
+    blocked = blockedNewer = false;
     state = { v: 1, seen: {}, reels: {} };  // nothing of the copy already in memory survives a (re)load: a new or empty list stays empty
-    let unusable = false;
+    let unusable = false, newer = false;
     try {
       const t = sync("loadShots");
       if (t) {
         const d = JSON.parse(t);
         if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error("not a list");
-        state = { v: 1, seen: d.seen || {}, reels: d.reels || {} };
+        if (isNewer(d.v, SHOTS_SCHEMA)) newer = true;  // whatever its shape: it is not ours to judge
+        else state = { v: 1, seen: d.seen || {}, reels: d.reels || {} };
       }
     } catch (e) { unusable = true; }
     const info = libraryInfo("shots");
+    if (newer || info.state === "newer") {
+      blocked = blockedNewer = true;
+      loaded = false;  // tried again the next time this is opened
+      toast("The screenshot list was saved by a newer Reel Shelf. Nothing was changed. Install the newest Reel Shelf.");
+      return;
+    }
     if (unusable || info.state === "unreadable") {
       if (sync("libraryStartNew", "shots")) toast("The screenshot list could not be read; it was set aside and will be rebuilt");
       else {
@@ -168,12 +179,18 @@ const Shots = (() => {
     return n;
   }
 
+  /** How many pictures have been read so far, for a backup's counts: 0 when the list is not loaded (it is never loaded for this: loading can set an unreadable list aside). */
+  function total() {
+    return loaded ? counts().all : 0;
+  }
+
   function screen() {
     load();
     if (blocked) {
       $app.innerHTML = `${header("Screenshots", "#/inbox")}
         <div class="card stack"><strong>The screenshot list is not open</strong>
-          <span class="small">It could not be read and could not be set aside, so nothing is read or saved until that works. Nothing was changed. Open this screen again to retry.</span></div>`;
+          <span class="small">${blockedNewer ? "It was saved by a newer Reel Shelf. This version cannot open it safely and has not changed it, so nothing is read or saved. Install the newest Reel Shelf."
+            : "It could not be read and could not be set aside, so nothing is read or saved until that works. Nothing was changed. Open this screen again to retry."}</span></div>`;
       return;
     }
     if (job && !job.finished) { paint(); return; }
@@ -196,7 +213,7 @@ const Shots = (() => {
       <p class="hint">Only new screenshots are read each time. You can leave the app while it runs (a notification shows it, with Stop).
         ${b.level >= 0 ? ` Battery ${b.level}%${b.charging ? ", charging" : ""}. A big first run is best done on the charger.` : ""}</p>
       ${job && job.finished ? doneHtml() : ""}`;
-    bind("#addp", "click", () => phone("addShotPictures").then((n) => { toast(`${plural(Number(n) || 0, "picture")} added`); process(); }).catch((e) => { if (e.message !== "cancelled") toast(e.message); }));
+    bind("#addp", "click", () => phone("addShotPictures").then((n) => { toast(picturesAddedText(n)); process(); }).catch((e) => { if (e.message !== "cancelled") toast(e.message); }));
     bind("#addf", "click", () => phone("addShotFolder").then(() => { toast("Folder added"); screen(); }).catch((e) => { if (e.message !== "cancelled") toast(e.message); }));
     bind("[data-rm]", "click", (e, el) => { if (confirm("Stop reading this folder? Names already found stay in the watchlist.")) { sync("removeShotFolder", el.dataset.rm); screen(); } });
     bind("#go", "click", () => process());
@@ -261,5 +278,5 @@ const Shots = (() => {
 
   function pause() { if (job && !job.finished) { job.paused = true; stop(); } }
 
-  return { screen, review, process, stop, pause, keep, reload, get job() { return job; } };
+  return { screen, review, process, stop, pause, keep, reload, total, get job() { return job; } };
 })();
