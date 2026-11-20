@@ -55,3 +55,10 @@ change shape between those releases (only how it is protected and shown), so the
 They are kept per version anyway, so a future release that writes something different shows up at once.
 
 There is no v1.3.9 tag (1.3.9 was never released), so there is no `1.3.9/`.
+
+## `schema_version`
+
+No fixture has `schema_version`: no released version wrote it. The current page adds `"schema_version": 1` to every one of
+them when it saves (R4-2), which is the one stamp in the `expected()` allowlist of `tests/test_library_upgrade.py`. A
+library from a NEWER Reel Shelf (a number above the one the page reads) is not a fixture here: `tests/test_library_newer.py`
+and `LibraryFileTest` make it from the newest fixture by raising `schema_version` (reels.json) or `v` (shots.json).
