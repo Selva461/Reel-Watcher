@@ -184,6 +184,14 @@ Timing tests can fail when the machine is busy: rerun alone before treating as r
 | 2026-11-16 | 48fe2aa (#45) | GitHub test and audit; independent Opus review; agent-run full suite | success; SAFE TO MERGE (10 of 11 breaks caught); 290 passed locally | run 43804341205 |
 | 2026-11-16 | ea5ea74 (#44) | agent-run full suite and Gradle (on ea9a129); independent Opus review | 299 passed; BUILD SUCCESSFUL; SAFE TO MERGE | session log |
 | 2026-11-16 | 83dc49c (#44) | GitHub Android CI (JUnit and assembleRelease), Tests, audit | all success (wording-only change on top of the reviewed ea5ea74, whose Android CI 43803841147 and Tests 43803841106 were also green) | runs 43805765415, 43805765345 |
+| 2026-11-20 | `6b64655` (`train/test-build`, the merge train) | GitHub Android APK run that built the test APK (a workflow artifact, not a release; the commit the run used was not read) | built, artifact 14618529391, private (Lead report) | run 44715780828 |
+| 2026-11-20 | each of the 18 merged heads | GitHub checks at merge | green at each merge (Lead report; run ids not recorded here) | GitHub |
+| 2026-11-20 | one intermediate post-merge head | GitHub Tests | failed only at the ffmpeg apt step timeout (runner network); the heads before and after were green (Lead report) | GitHub |
+| 2026-11-20 | default head after #64, #63, #62, #61, #4 | post-merge Android APK build with the new actions | success, publish step skipped (Lead report) | GitHub |
+| 2026-11-20 | `f0e5237` (default) | docs agent, local: `pytest --collect-only` | 759 tests collected | local |
+| 2026-11-20 | `f0e5237` | docs agent, local: full `pytest -q` in the container's old venv (playwright 1.63.0, pytest 9.1.1; machine busy, about 14 minutes) | 758 passed, 1 failed: `tests/test_app.py::test_ui_settings_work_before_the_selfcheck_answers` (Playwright timeout); it failed again alone in that venv and passed in the locked environment | local |
+| 2026-11-20 | `f0e5237` | docs agent, local: full `pytest -q` with the locked environment (`uv sync --locked`: playwright 1.65.2, pytest 9.2.0; machine busy, load average up to 8, about 16 minutes) | 758 passed, 1 failed: `tests/test_stale_writes.py::test_two_live_pages_one_is_refused_reloads_and_loses_neither_data_nor_shares` (a load-sensitive assertion); `tests/test_stale_writes.py` alone passed (15 passed). No single run was fully green on this machine; GitHub's runs of these heads were green (Lead report) | local |
+| 2026-11-20 | `f0e5237` | docs agent: JUnit `@Test` annotations counted in `android/app-shell/app/src/test` | 455 in 17 files, counted from the source; NOT run (no Android SDK could be found in the container); the number JUnit ran on GitHub is not recorded here | source count |
 
 Earlier results (Tasks 1, 2a, 2b, P1) were reported per PR; the numbers are in each PR description.
 
