@@ -197,6 +197,14 @@ const Notes = (() => {
     return ((reel.title || "") + " " + (reel.caption || "") + " " + (reel.transcript || "") + " " + (reel.onscreen || "") + " " + (reel.comments || "") + " " + (reel.extra || "")).replace(/#\S+/g, "").trim().length;
   }
 
+  // ---------------------------------------------------------------- retries: a reel that keeps failing is parked
+  const RETRY_CAP = 3;
+  const BACKOFF_H = [12, 72];  // hours to wait after the 1st and the 2nd failure
+  /** Milliseconds to wait before the next try after `tries` failures in a row; null when the reel is parked (no automatic try). */
+  function retryAfter(tries) {
+    return tries >= RETRY_CAP ? null : (BACKOFF_H[Math.max(1, tries) - 1] || BACKOFF_H[BACKOFF_H.length - 1]) * 3600e3;
+  }
+
   // ---------------------------------------------------------------- YouTube: title, description, transcript (no key, no login)
 
   function ytId(r) { return String(r.code || "").replace(/^yt-/, ""); }
@@ -954,7 +962,7 @@ const Notes = (() => {
     return lines.map((l) => String(l).trim()).filter((l) => l.length > 2 && !COMMENT_NOISE.test(l) && !/^\d+[smhdw]\b/.test(l) && !/^@?[a-z0-9_.]{3,30}$/i.test(l));
   }
 
-  return { keepBacked, username, reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, material, embedUrl, readPage,
+  return { keepBacked, username, reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, material, RETRY_CAP, retryAfter, embedUrl, readPage,
     ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
     YT_CLIENTS, condense, search, answerPrompt, webAnswerPrompt, markOneSource, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
     exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS };
