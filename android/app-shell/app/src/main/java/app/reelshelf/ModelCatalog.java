@@ -6,9 +6,11 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * The AI models Reel Shelf may download, and the one place that says what each one must be: its file name, the pinned
+ * The models Reel Shelf may download, and the one place that says what each one must be: its file name, the pinned
  * address, the exact size and the SHA-256 fingerprint. Java decides what is downloaded (the page only names a model),
- * and ModelVerifier refuses to install anything that is not exactly this. Pure Java (no Android types), tested on a computer.
+ * and ModelVerifier refuses to install anything that is not exactly this. The three AI language models are in ALL; the
+ * offline speech model (a ZIP, SPEECH) is a separate row the page cannot ask for by name. Pure Java (no Android types),
+ * tested on a computer.
  *
  * Every Hugging Face address contains the full 40-digit commit (".../resolve/&lt;commit&gt;/..."), never "main", so the
  * bytes behind an address cannot change under a paused download. To move a row to a newer file: read the commit, size and
@@ -33,14 +35,29 @@ final class ModelCatalog {
         final String sha256;
         /** Older fingerprints that are still good files (for models already on the phone). Empty: a new download is always the pinned file. */
         final List<String> accepted;
+        /** The MD5 the publisher lists, checked besides the SHA-256 (32 lowercase hex digits), or null when there is none. */
+        final String md5;
+        /** The one host this file comes from, with no redirect at all (the speech model), or null: Hugging Face and its download hosts. */
+        final String onlyHost;
 
         Entry(String id, String file, String url, long bytes, String sha256, String... accepted) {
+            this(id, file, url, bytes, sha256, null, null, Arrays.asList(accepted));
+        }
+
+        private Entry(String id, String file, String url, long bytes, String sha256, String md5, String onlyHost, List<String> accepted) {
             this.id = id;
             this.file = file;
             this.url = url;
             this.bytes = bytes;
             this.sha256 = sha256;
-            this.accepted = Collections.unmodifiableList(Arrays.asList(accepted));
+            this.md5 = md5;
+            this.onlyHost = onlyHost;
+            this.accepted = Collections.unmodifiableList(accepted);
+        }
+
+        /** A file that must come from exactly one host (no redirect) and also match the MD5 its publisher lists. */
+        static Entry fromOneHost(String id, String file, String url, long bytes, String sha256, String md5, String onlyHost) {
+            return new Entry(id, file, url, bytes, sha256, md5, onlyHost, Collections.<String>emptyList());
         }
     }
 
@@ -64,6 +81,31 @@ final class ModelCatalog {
             3659530240L, "0b2a8980ce155fd97673d8e820b4d29d9c7d99b8fa6806f425d969b145bd52e0");
 
     static final List<Entry> ALL = Collections.unmodifiableList(Arrays.asList(QWEN, GEMMA4, GEMMA4_E4));
+
+    /** The speech model's folder inside its ZIP and in the app (Vosk, Apache 2.0). */
+    static final String SPEECH_FOLDER = "vosk-model-small-en-us-0.15";
+    /** What the published ZIP holds: 20 entries (files and folders), 70898967 bytes once unpacked (read from the real file, 2026-11-18). */
+    static final int SPEECH_ENTRIES = 20;
+    static final long SPEECH_UNPACKED = 70_898_967L;
+
+    // The speech model comes from alphacephei.com, which has no revision in its addresses, so the file is held to three
+    // facts: its exact size, the MD5 the vendor lists in https://alphacephei.com/vosk/models/model-list.json, and a SHA-256
+    // measured by one real download on 2026-11-18 (the response had no redirect; curl | sha256sum and md5sum on the saved
+    // file; the ZIP starts with PK\x03\x04). The size equals Content-Length and the MD5 equals the vendor's. Not in ALL:
+    // the page cannot ask for it by name through downloadModel, and it is not an AI language model.
+    static final Entry SPEECH = Entry.fromOneHost("speech", SPEECH_FOLDER + ".zip",
+            "https://alphacephei.com/vosk/models/" + SPEECH_FOLDER + ".zip",
+            41_205_931L, "30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498",
+            "09ab50ccd62b674cbaa231b825f9c1cb", "alphacephei.com");
+
+    /**
+     * How the speech ZIP may be unpacked. The pinned size and fingerprints are what prove the ZIP; these limits only stop a
+     * runaway unpack, so they sit a little (10%) above what the published file holds: well below the old 400 MB cap, but not
+     * so tight that moving the row to a re-packed copy of the same model (an extra folder entry, a longer README) fails
+     * until these numbers are edited in the same step.
+     */
+    static final ModelZip.Plan SPEECH_ZIP = new ModelZip.Plan(SPEECH_FOLDER, SPEECH_ENTRIES + SPEECH_ENTRIES / 10,
+            SPEECH_UNPACKED + SPEECH_UNPACKED / 10, "am", "conf");
 
     /** The model used when no name is given (as LocalModel.file does). */
     static final Entry DEFAULT = QWEN;
