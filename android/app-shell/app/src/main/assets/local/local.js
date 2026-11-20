@@ -204,8 +204,8 @@ function fileAnswer(text, by = "meta", target = null, standalone = false) {
 }
 
 const KEPT_ASIDE = "Kept aside: this reel has your edits. Open it to compare.";
-/** What is said when an answer was kept aside for a reel with your edits (setNotes gave false): the same words for one, a count for several. */
-function keptAside(n) { return n > 1 ? `Kept aside: ${n} reels have your edits. Open them to compare.` : KEPT_ASIDE; }
+/** What is said when answers were kept aside for reels with your edits (setNotes gave false): the same words for one answer, a count of answers for several. */
+function keptAside(n) { return n > 1 ? `${plural(n, "answer")} kept aside: those reels have your edits. Open them to compare.` : KEPT_ASIDE; }
 
 /**
  * Writes the notes of a reel. A reel with your edits is never overwritten by an AI answer: the answer is kept aside in
@@ -1354,7 +1354,10 @@ function settingsScreen() {
   bind("#excsv", "click", () => phone("saveFile", `watchlist-${stamp()}.csv`, "text/csv", Catalog.exportCsv(db)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#exshare", "click", () => sync("shareText", Notes.exportMarkdown(db.reels), "Share your reel notes"));
   bind("#excopy", "click", () => { sync("copy", Notes.exportMarkdown(db.reels)); toast("All notes copied"); });
-  bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes${db.reels.some(Notes.hasUserData) ? ", including your own edits" : ""}? This cannot be undone.`)) { db.reels = []; db.inbox = []; if (saveDb()) sync("dropBackup", "reels"); toast("Deleted (your watchlist is kept)"); settingsScreen(); } });
+  bind("#wipe", "click", () => {
+    const also = [db.reels.some((r) => Notes.isEdited(r) || r.notes_edit) && "your own edits", db.reels.some((r) => Object.values(r.notes_next || {}).some(Boolean)) && "the versions kept aside"].filter(Boolean).join(" and ");
+    if (confirm(`Delete all ${db.reels.length} reels and their notes${also ? ", including " + also : ""}? This cannot be undone.`)) { db.reels = []; db.inbox = []; if (saveDb()) sync("dropBackup", "reels"); toast("Deleted (your watchlist is kept)"); settingsScreen(); }
+  });
 }
 
 // ------------------------------------------------------------------ router

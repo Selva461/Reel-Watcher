@@ -98,9 +98,45 @@ def test_an_edit_that_changes_nothing_or_is_refused_leaves_the_reel_as_it_was(ph
     before = phone.evaluate("() => JSON.parse(JSON.stringify(reel('REEL1')))")
     got = phone.evaluate("""() => { const r = reel('REEL1');
       return [Notes.applyEdit(r, 'topic', ' Passwords   in apps ', 1), Notes.applyEdit(r, 'points', ['First point about passwords', 'Second point about keys'], 1),
-              Notes.applyEdit(r, 'topic', 'x'.repeat(201), 1), Notes.applyEdit(r, 'intent', 'not editable', 1), Notes.applyEdit(r, 'tags', 'a b c d e f g h i j k l m n', 1)]; }""")
+              Notes.applyEdit(r, 'topic', 'x'.repeat(201), 1), Notes.applyEdit(r, 'intent', 'not editable', 1), Notes.applyEdit(r, 'takeaway', 'k'.repeat(1001), 1)]; }""")
     assert got == [False] * 5
     assert phone.evaluate("() => reel('REEL1')") == before  # still quick notes: Start may still rewrite them
+
+
+def test_tags_or_a_takeaway_alone_do_not_make_notes_but_do_once_there_is_a_topic_or_a_point(phone):
+    start(phone, [reel("REEL1", notes=None, status="ready"), reel("REEL2", notes=None, status="ready")])
+    got = phone.evaluate("""() => { const a = reel('REEL1'), none = {};
+      return [Notes.applyEdit(none, 'tags', 'a', 1), Notes.applyEdit(none, 'takeaway', 'only this', 1), JSON.stringify(none), Notes.applyEdit(a, 'tags', 'a', 1), a.notes, a.notes_by || '',
+              Notes.applyEdit({ notes: { topic: ' ', points: [] }, notes_by: 'meta' }, 'tags', 'a', 1),
+              Notes.applyEdit(a, 'topic', 'now a topic', 2), Notes.applyEdit(a, 'tags', 'a', 3), Notes.applyEdit(a, 'takeaway', 'k', 3), Notes.noBody('', []), Notes.noBody('t', []), Notes.noBody('', ['p'])]; }""")
+    assert got[:2] == [False, False] and got[2] == "{}"  # the empty reel is left exactly as it was
+    assert got[3] is False and got[4] is None and got[5] == ""
+    assert got[6] is False  # notes with a blank topic and no points are not made better by tags
+    assert got[7:10] == [True, True, True] and got[10:] == [True, False, False]
+    r = phone.evaluate("() => reel('REEL1')")
+    assert r["notes"]["topic"] == "now a topic" and r["notes"]["tags"] == ["a"] and r["notes"]["takeaway"] == "k"
+
+
+def test_a_reel_marked_yours_with_no_or_damaged_notes_edit_can_still_be_edited(phone):
+    start(phone, [reel("REEL1", notes=notes(), notes_by="you"), reel("REEL2", notes=notes(), notes_by="you", notes_edit={}),
+                  reel("REEL3", notes=notes(), notes_by="you", notes_edit={"was_by": "meta", "fields": "topic", "ai": None})])
+    got = phone.evaluate("() => ['REEL1', 'REEL2', 'REEL3'].map((c) => [Notes.applyEdit(reel(c), 'topic', 'Edited ' + c, 9), reel(c).notes_edit])")
+    for code, (ok, edit) in zip(["REEL1", "REEL2", "REEL3"], got):
+        assert ok is True, code
+        assert edit == {"was_by": "", "at": 9, "fields": ["topic"], "ai": {}}, code  # a new, empty record: nothing was kept of the AI text, and nothing is claimed
+    assert phone.evaluate("() => reel('REEL1').notes.topic") == "Edited REEL1" and phone.evaluate("() => Notes.revertField(reel('REEL1'), 'topic')") is False
+    assert phone.evaluate("() => Notes.revertField({ notes_by: 'you', notes: {}, notes_edit: {} }, 'topic')") is False  # and reverting one does not throw
+
+
+def test_more_than_twelve_typed_tags_keep_the_first_twelve(phone):
+    start(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    assert phone.evaluate("() => Notes.applyEdit(reel('REEL1'), 'tags', Array.from({ length: 14 }, (_, i) => 't' + i).join(', '), 4)") is True
+    assert phone.evaluate("() => reel('REEL1').notes.tags") == ["t%d" % i for i in range(12)]
+
+
+def test_putting_a_field_back_uses_the_time_it_is_given(phone):
+    start(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    assert phone.evaluate("() => [Notes.applyEdit(reel('REEL1'), 'topic', 'Mine', 5), Notes.revertField(reel('REEL1'), 'topic', 77), reel('REEL1').notes_at]") == [True, True, 77]
 
 
 def test_writing_notes_from_scratch_has_no_ai_text_to_go_back_to(phone):
@@ -154,8 +190,8 @@ def test_a_shared_meta_answer_for_an_edited_reel_is_kept_aside_and_acknowledged(
 
 def test_several_shared_answers_kept_aside_are_counted(phone):
     start(phone, [edited("REEL1"), edited("REEL2"), reel("REEL3")], shared=[answer_for("REEL1"), answer_for("REEL2"), answer_for("REEL3")])
-    phone.wait_for_function("() => document.getElementById('toast').textContent.includes('Kept aside')")
-    assert phone.evaluate("() => document.getElementById('toast').textContent") == "1 Meta AI answer filed. Kept aside: 2 reels have your edits. Open them to compare."
+    phone.wait_for_function("() => document.getElementById('toast').textContent.includes('kept aside')")
+    assert phone.evaluate("() => document.getElementById('toast').textContent") == "1 Meta AI answer filed. 2 answers kept aside: those reels have your edits. Open them to compare."
     r = by_code(phone)
     assert r["REEL3"]["notes"]["topic"] == "A newer topic from Meta AI" and r["REEL3"]["notes_by"] == "meta" and "notes_next" not in r["REEL3"]
     assert "notes_next" in r["REEL1"] and "notes_next" in r["REEL2"] and r["REEL1"]["notes"]["topic"] == "My own topic"
@@ -213,6 +249,15 @@ def test_the_nightly_run_files_a_shared_answer_for_an_edited_reel_aside(phone):
     phone.wait_for_function("() => window.__rn.nightDone >= 1")
     assert phone.rn()["shared"] == [] and KEPT in toasts(phone)
     assert check_kept(phone, before=edited("REEL1"))["notes"]["topic"] == "A newer topic from Meta AI"
+
+
+def test_an_answer_with_no_link_goes_to_the_reel_you_last_asked_about_even_when_you_edited_it_and_is_kept_aside(phone):
+    text = answer_for("REEL1").split("\n\n", 1)[1]  # no link in it: the reel asked about last gets it
+    start(phone, [edited("REEL1", asked_at=FIXTURES_NOW - 1000), reel("REEL2", notes=notes(), notes_by="auto", asked_at=FIXTURES_NOW - 5 * 86400e3)], shared=[text])
+    phone.wait_for_function("() => window.__rn.shared.length === 0")
+    assert phone.evaluate("() => document.getElementById('toast').textContent") == KEPT
+    check_kept(phone, before=edited("REEL1", asked_at=FIXTURES_NOW - 1000))
+    assert by_code(phone)["REEL2"]["notes_by"] == "auto" and db_of(phone)["inbox"] == []
 
 
 def test_a_phone_ai_answer_that_arrives_after_you_edited_is_kept_aside_and_not_counted(phone):
@@ -313,15 +358,18 @@ def test_remove_from_shelf_keeps_its_old_words_for_a_reel_with_nothing_of_yours_
     phone.wait_for_function("() => reel('OLD1') === undefined")
 
 
-@pytest.mark.parametrize("data,words", [(None, ""), ("edited", ", including your own edits"), ("only a waiting AI answer", ", including your own edits")])
-def test_delete_all_adds_your_own_edits_when_any_reel_has_your_data(phone, data, words):
-    reels = [reel("REEL1", notes=notes(), notes_by="meta"), reel("REEL2", **(USER_DATA[data] if data else {}))]
+@pytest.mark.parametrize("data,words", [
+    ((), ""), (("edited",), ", including your own edits"), (("only a stale notes_edit",), ", including your own edits"),
+    (("only a waiting AI answer",), ", including the versions kept aside"), (("only a kept version of yours",), ", including the versions kept aside"),
+    (("edited", "only a waiting AI answer"), ", including your own edits and the versions kept aside")])
+def test_delete_all_says_which_of_your_data_it_deletes(phone, data, words):
+    reels = [reel("REEL1", notes=notes(), notes_by="meta")] + [reel("REEL%d" % (i + 2), **USER_DATA[d]) for i, d in enumerate(data)]
     start(phone, reels, settings="{}")
     phone.goto(phone.url.split("#")[0] + "#/settings")
     confirm_text(phone)
     phone.locator("#wipe").click()
-    assert phone.evaluate("() => window.__confirms") == ["Delete all 2 reels and their notes%s? This cannot be undone." % words]
-    assert sorted(by_code(phone)) == ["REEL1", "REEL2"]
+    assert phone.evaluate("() => window.__confirms") == ["Delete all %d reels and their notes%s? This cannot be undone." % (len(reels), words)]
+    assert len(by_code(phone)) == len(reels)
 
 
 # ---------------------------------------------------------------- 5. reverting
@@ -379,9 +427,9 @@ def test_topic_and_takeaway_limits_and_messages(phone):
     got = clean(phone, [["topic", "t" * 200, "x"], ["topic", "t" * 201, "x"], ["topic", "  a   b  ", "x"], ["topic", " x ", "x"],
                         ["takeaway", "k" * 1000, ""], ["takeaway", "k" * 1001, ""], ["takeaway", "k" * 1001, "k" * 1001], ["takeaway", "", "was"]])
     assert [(g["error"], g["changed"]) for g in got[:2]] == [("", True), ("The topic can be at most 200 letters.", True)]
-    assert got[2]["value"] == "a b" and got[3] == {"value": "x", "error": "", "changed": False}
+    assert got[2]["value"] == "a b" and got[3] == {"value": "x", "error": "", "changed": False, "note": ""}
     assert [(g["error"], g["changed"]) for g in got[4:6]] == [("", True), ("The takeaway can be at most 1,000 letters.", True)]
-    assert got[6]["changed"] is False and got[6]["error"] == "" and got[7] == {"value": "", "error": "", "changed": True}
+    assert got[6]["changed"] is False and got[6]["error"] == "" and got[7] == {"value": "", "error": "", "changed": True, "note": ""}
 
 
 def test_only_a_changed_field_is_checked_and_a_changed_one_may_be_as_long_as_what_is_stored(phone):
@@ -417,14 +465,14 @@ def test_points_limits_messages_and_the_stored_text_that_is_allowed(phone):
         ["points", "Second\nFirst point", ["First point", "Second"]],    # 12: another order is a change
     ]
     got = clean(phone, cases)
-    assert [g["error"] for g in got[:2]] == ["", "Keep at most 40 points, each under 500 letters."]
-    assert [g["error"] for g in got[2:4]] == ["", "Keep at most 40 points, each under 500 letters."]
+    assert [g["error"] for g in got[:2]] == ["", "Keep at most 40 points, each at most 500 letters."]
+    assert [g["error"] for g in got[2:4]] == ["", "Keep at most 40 points, each at most 500 letters."]
     assert got[4]["value"] == ["a", "b", "c"]
     assert got[5]["changed"] is False and got[5]["error"] == ""
     assert got[6]["changed"] is True and got[6]["error"] == "" and got[6]["value"] == edited_one
-    assert got[7]["error"] == "Keep at most 50 points, each under 500 letters."
+    assert got[7]["error"] == "Keep at most 50 points, each at most 500 letters."
     assert len(cases[8][1][0]) == 700 and got[8]["error"] == "" and got[8]["changed"] is True
-    assert got[9]["error"] == "Keep at most 40 points, each under 700 letters."
+    assert got[9]["error"] == "Keep at most 40 points, each at most 700 letters."
     assert got[10]["error"] == "" and got[10]["changed"] is True
     assert got[11]["changed"] is False and got[12]["changed"] is True and got[12]["error"] == ""
 
@@ -438,10 +486,12 @@ def test_tags_follow_the_rule_of_parse_and_are_limited_to_twelve(phone):
     assert phone.evaluate("t => Notes.parse(t).tags", "TOPIC: x\nPOINTS:\n- p\nTAGS: #A, b ,c_d, B, é-x!") == got[0]["value"]  # the same rule as the AI's
     assert got[1]["changed"] is False  # case alone is not a change
     assert got[2]["error"] == "" and got[2]["value"] == twelve
-    assert got[3]["error"] == "Only the first 12 tags are kept." and got[3]["value"] == twelve  # the 13th is "more"; a repeated tag is not a tag
+    assert got[3]["error"] == "" and got[3]["note"] == "Only the first 12 tags are kept." and got[3]["value"] == twelve and got[3]["changed"] is True  # kept, and said
     assert got[4]["changed"] is True and got[4]["value"] == ["b", "a"]
     stored13 = phone.evaluate("() => Notes.cleanField('tags', Array.from({ length: 14 }, (_, i) => 's' + i).join(','), Array.from({ length: 13 }, (_, i) => 's' + i))")
-    assert stored13["error"] == "Only the first 13 tags are kept." and len(stored13["value"]) == 13  # 14 typed, 13 stored: the larger one is the limit
+    assert stored13["note"] == "Only the first 13 tags are kept." and len(stored13["value"]) == 13  # 14 typed, 13 stored: the larger one is the limit
+    same12 = phone.evaluate("t => Notes.cleanField('tags', t.concat(['extra']).join(','), t)", twelve)
+    assert same12["changed"] is False and same12["value"] == twelve and same12["note"]  # the first 12 are what is stored: nothing to change, still said
 
 
 def test_a_topic_and_points_that_are_both_empty_are_refused(phone):

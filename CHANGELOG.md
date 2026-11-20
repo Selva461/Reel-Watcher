@@ -12,8 +12,9 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
   are kept aside on the reel, and Reel Shelf says "Kept aside: this reel has your edits. Open it to compare." One kept
   answer per source (Meta AI, on-phone AI) is held; a newer answer of the same source replaces only that one.
 - A reel video that Reel Shelf matches to the same saved reel by its creator no longer takes over (and removes) that saved
-  reel when the reel has your edits or a kept version: both stay. "Remove from shelf" and "Delete all reels and notes"
-  now name your edits and the versions kept aside before they ask.
+  reel when the reel has your edits or a kept version: both stay. "Remove from shelf" names your edits and the versions
+  kept aside before it asks, and "Delete all reels and notes" adds "including your own edits" and/or "the versions kept
+  aside" when there are any.
 - Your library file gets three optional fields on a reel (`notes_edit`, `notes_next`, and `notes_by` "you"); older
   versions keep them and the library layout number is unchanged. Nothing was tried on a phone yet.
 - Version renumbered at merge: 1.3.28 (versionCode 35) is a provisional number for this stacked change.
