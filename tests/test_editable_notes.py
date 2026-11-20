@@ -565,3 +565,408 @@ def test_an_open_dialog_survives_a_stale_reload_and_the_save_that_triggers_it_cl
     phone.get_by_role("button", name="Save", exact=True).click()
     assert phone.evaluate("() => [document.getElementById('dlg').open, staleSave]") == [False, True]
     assert by_code(phone)["REEL1"]["notes_by"] == "auto"  # the refused save wrote nothing
+
+
+# ================================================================ K1-2: the editor on the reel page
+
+def open_reel(pg, reels, code="REEL1", **extra):
+    start(pg, reels, **extra)
+    pg.goto(pg.url.split("#")[0] + "#/" + "r/" + code)
+    watch_toasts(pg)
+
+
+def edit_button(pg):
+    return pg.get_by_role("button", name="Edit notes", exact=True)
+
+
+def open_editor(pg):
+    edit_button(pg).click()
+    pg.locator("#ed-topic").wait_for()
+
+
+def dialog_open(pg):
+    return pg.evaluate("() => document.getElementById('dlg').open")
+
+
+def typed(pg, **fields):
+    for f, v in fields.items():
+        pg.locator("#ed-" + f).fill(v)
+
+
+def save(pg):
+    pg.locator("#edSave").click()
+
+
+def err(pg, f):
+    return pg.locator("#ed-%s-err" % f).inner_text()
+
+
+def stored(pg, code="REEL1"):
+    return by_code(pg)[code]
+
+
+def screen_text(pg):
+    return pg.locator("#app").inner_text()
+
+
+def test_the_reel_page_offers_edit_notes_or_write_my_own_notes(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone"), reel("REEL2")])
+    assert edit_button(phone).is_visible() and phone.get_by_role("button", name="Copy notes").is_visible()
+    assert phone.get_by_role("button", name="Write my own notes").count() == 0
+    phone.goto(phone.url.split("#")[0] + "#/r/REEL2")
+    assert phone.get_by_role("button", name="Write my own notes").is_visible() and edit_button(phone).count() == 0
+
+
+def test_the_editor_opens_with_the_notes_and_cancel_changes_nothing(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    before = phone.rn()["db"]
+    open_editor(phone)
+    assert phone.locator("#ed-topic").input_value() == "Passwords in apps"
+    assert phone.locator("#ed-points").input_value() == "First point about passwords\nSecond point about keys"
+    assert phone.locator("#ed-takeaway").input_value() == "Keep secrets on the server."
+    assert phone.locator("#ed-tags").input_value() == "security, apps"
+    typed(phone, topic="Typed but not saved", tags="x")
+    phone.locator("#edCancel").click()
+    assert not dialog_open(phone) and phone.rn()["db"] == before  # nothing was written
+    assert "Passwords in apps" in screen_text(phone) and "Typed but not saved" not in screen_text(phone)
+    open_editor(phone)
+    assert phone.locator("#ed-topic").input_value() == "Passwords in apps"  # the next editor starts from the notes, not from what was typed
+    phone.keyboard.press("Escape")
+    assert not dialog_open(phone) and phone.rn()["db"] == before
+
+
+def test_saving_an_edit_marks_each_edited_section_and_says_whose_notes_they_are(phone):
+    quick = reel("REEL1", notes=notes(unbacked=1), notes_by="phone", status="failed", error="boom", tries=1, next_try_at=5, last_fail="x", last_fail_at=4)
+    open_reel(phone, [quick])
+    assert "Notes by the on-phone AI (from the caption)" in screen_text(phone) and "Edited by you" not in screen_text(phone)
+    open_editor(phone)
+    typed(phone, topic="  My   topic ", points="one\n2. two\n\nthree", tags="#Mine, own")
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert toasts(phone) == ["Saved"]
+    r = stored(phone)
+    assert r["notes_by"] == "you" and r["notes"]["topic"] == "My topic" and r["notes"]["points"] == ["one", "two", "three"] and r["notes"]["tags"] == ["mine", "own"]
+    assert r["notes"]["takeaway"] == "Keep secrets on the server." and "unbacked" not in r["notes"]
+    assert r["notes_edit"] == {"was_by": "phone", "at": FIXTURES_NOW, "fields": ["topic", "points", "tags"],
+                               "ai": {"topic": "Passwords in apps", "points": notes()["points"], "tags": ["security", "apps"]}}
+    assert r["status"] == "done" and "tries" not in r and r["notes_at"] == FIXTURES_NOW
+    text = screen_text(phone)
+    assert "Your notes (edited from Notes by the on-phone AI)" in text and text.count("Edited by you") == 3  # topic, points and tags, not the takeaway
+    for label, edited_ in [("Topic", True), ("Points", True), ("Takeaway", False), ("Tags", True)]:
+        block = phone.locator(".note-block", has=phone.locator(".label", has_text=label)).first
+        assert ("Edited by you" in block.inner_text()) is edited_, label
+
+
+def test_editing_failed_quick_notes_takes_away_the_retry_line_and_button(phone):
+    quick = reel("REEL1", notes=notes(), notes_by="auto", status="failed", error="boom", tries=1, next_try_at=FIXTURES_NOW + 1, last_fail="The AI model failed", last_fail_at=FIXTURES_NOW)
+    open_reel(phone, [quick])
+    assert phone.get_by_role("button", name="Try again now").is_visible() and "Tried 1 time" in screen_text(phone)
+    open_editor(phone)
+    typed(phone, topic="Mine now")
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert phone.get_by_role("button", name="Try again now").count() == 0 and "Tried 1 time" not in screen_text(phone)
+    assert "Your notes (edited from Quick notes without AI)" in screen_text(phone)
+
+
+def test_write_my_own_notes_for_a_reel_with_none(phone):
+    open_reel(phone, [reel("REEL1", status="ready", notes=None)])
+    phone.get_by_role("button", name="Write my own notes").click()
+    phone.locator("#ed-topic").wait_for()
+    assert phone.locator("[data-ai]").count() == 0 and phone.locator("h2", has_text="Write your own notes").is_visible()
+    typed(phone, topic="Mine alone", points="a\nb")
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    r = stored(phone)
+    assert r["notes_by"] == "you" and r["notes"]["topic"] == "Mine alone" and r["notes"]["points"] == ["a", "b"] and r["status"] == "done"
+    assert r["notes_edit"]["was_by"] == "" and r["notes_edit"]["ai"] == {} and r["notes_edit"]["fields"] == ["topic", "points"]
+    text = screen_text(phone)
+    assert "Your notes" in text and "edited from" not in text and phone.get_by_role("button", name="Edit notes", exact=True).is_visible()
+    open_editor(phone)
+    assert phone.locator("[data-ai]").count() == 0 and phone.locator("h2", has_text="Edit notes").is_visible()  # nothing of the AI to go back to
+
+
+def test_saving_with_nothing_changed_writes_nothing(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="auto")])
+    before = phone.rn()["db"]
+    open_editor(phone)
+    typed(phone, topic="  Passwords   in apps ")  # only spaces
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert phone.rn()["db"] == before and toasts(phone) == [] and stored(phone)["notes_by"] == "auto"  # still quick notes: Start may rewrite them
+
+
+def test_enter_in_a_box_saves_and_does_not_cancel(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    phone.locator("#ed-topic").fill("Saved with the Enter key")
+    phone.locator("#ed-topic").press("Enter")
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert stored(phone)["notes"]["topic"] == "Saved with the Enter key"
+
+
+def test_typed_text_is_text_not_html_in_the_editor_and_on_the_page(phone):
+    evil = '<img src=x onerror="window.__pwned=1"> </textarea><b>x</b> "q"'
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, topic=evil, points=evil + "\nsecond")
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert phone.locator("#app img").count() == 0 and phone.evaluate("() => window.__pwned") is None
+    open_editor(phone)
+    assert phone.locator("#ed-topic").input_value() == " ".join(evil.split()) and phone.locator("#ed-points").input_value().split("\n")[1] == "second"
+    assert phone.locator("#dlg img").count() == 0 and phone.evaluate("() => window.__pwned") is None
+
+
+# ---------------------------------------------------------------- "Use the AI text" (revert) through the screen
+
+def four_edited(code="REEL1", was_by="phone"):
+    r = reel(code, notes=notes(), notes_by=was_by)
+    return r
+
+
+def edit_all(pg):
+    open_editor(pg)
+    typed(pg, topic="T2", points="one\ntwo", takeaway="K2", tags="x, y")
+    save(pg)
+    pg.wait_for_function("() => !document.getElementById('dlg').open")
+
+
+def test_use_the_ai_text_changes_only_the_form_and_save_puts_it_back(phone):
+    open_reel(phone, [four_edited()])
+    edit_all(phone)
+    assert stored(phone)["notes_edit"]["fields"] == ["topic", "points", "takeaway", "tags"]
+    open_editor(phone)
+    assert phone.locator("[data-ai]").count() == 4
+    phone.locator('[data-ai="topic"]').click()
+    assert phone.locator("#ed-topic").input_value() == "Passwords in apps" and stored(phone)["notes"]["topic"] == "T2"  # only the form changed
+    before = phone.rn()["db"]
+    phone.locator("#edCancel").click()
+    assert phone.rn()["db"] == before and stored(phone)["notes"]["topic"] == "T2"  # Cancel leaves your text, with no question
+    open_editor(phone)
+    assert phone.locator("#ed-topic").input_value() == "T2"
+    phone.locator('[data-ai="topic"]').click()
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    r = stored(phone)
+    assert r["notes"]["topic"] == "Passwords in apps" and r["notes_by"] == "you" and r["notes_edit"]["fields"] == ["points", "takeaway", "tags"]
+    assert "topic" not in r["notes_edit"]["ai"] and screen_text(phone).count("Edited by you") == 3
+
+
+def test_putting_back_every_field_gives_the_notes_back_to_whoever_wrote_them(phone):
+    for was_by in ("phone", "meta", "auto"):
+        open_reel(phone, [four_edited(was_by=was_by)])
+        edit_all(phone)
+        open_editor(phone)
+        for f in ("topic", "points", "takeaway", "tags"):
+            phone.locator('[data-ai="%s"]' % f).click()
+        save(phone)
+        phone.wait_for_function("() => !document.getElementById('dlg').open")
+        r = stored(phone)
+        assert r["notes_by"] == was_by and "notes_edit" not in r and r["notes"] == notes(), was_by  # as before the first edit
+        assert "Edited by you" not in screen_text(phone) and edit_button(phone).is_visible()
+
+
+def test_use_the_ai_text_is_only_offered_for_an_edited_field_and_typing_afterwards_wins(phone):
+    open_reel(phone, [four_edited()])
+    open_editor(phone)
+    assert phone.locator("[data-ai]").count() == 0  # nothing edited yet
+    typed(phone, topic="T2")
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    open_editor(phone)
+    assert phone.locator("[data-ai]").count() == 1 and phone.locator('[data-ai="topic"]').is_visible()
+    phone.locator('[data-ai="topic"]').click()
+    phone.locator("#ed-topic").fill("Typed after the AI text")  # changed his mind: the typed text is saved, not the AI's
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    r = stored(phone)
+    assert r["notes"]["topic"] == "Typed after the AI text" and r["notes_edit"]["fields"] == ["topic"] and r["notes_edit"]["ai"] == {"topic": "Passwords in apps"}
+
+
+def test_no_use_the_ai_text_when_a_stale_notes_edit_is_all_that_is_left(phone):
+    stale = {"was_by": "meta", "at": 1, "fields": ["topic"], "ai": {"topic": "old ai"}}
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="meta", notes_edit=stale)])
+    open_editor(phone)
+    assert phone.locator("[data-ai]").count() == 0
+
+
+# ---------------------------------------------------------------- the limits through the screen
+
+def test_a_topic_over_200_letters_is_refused_with_a_message_and_nothing_is_stored(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    before = phone.rn()["db"]
+    open_editor(phone)
+    typed(phone, topic="t" * 201)
+    save(phone)
+    assert dialog_open(phone) and err(phone, "topic") == "The topic can be at most 200 letters."
+    assert phone.locator("#ed-topic").get_attribute("aria-invalid") == "true" and phone.evaluate("() => document.activeElement.id") == "ed-topic"
+    assert phone.rn()["db"] == before and phone.locator("#ed-topic").input_value() == "t" * 201  # what was typed is still there
+    typed(phone, topic="t" * 200)
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert stored(phone)["notes"]["topic"] == "t" * 200
+
+
+def test_every_limit_has_its_message_under_its_own_box(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    before = phone.rn()["db"]
+    open_editor(phone)
+    typed(phone, topic="t" * 201, points="\n".join("p%d" % i for i in range(41)), takeaway="k" * 1001, tags=", ".join("t%d" % i for i in range(13)))
+    save(phone)
+    assert [err(phone, f) for f in ("topic", "points", "takeaway", "tags")] == [
+        "The topic can be at most 200 letters.", "Keep at most 40 points, each under 500 letters.", "The takeaway can be at most 1,000 letters.", "Only the first 12 tags are kept."]
+    assert phone.locator("#dlg [role=alert]").count() == 4 and phone.rn()["db"] == before and dialog_open(phone)
+    typed(phone, topic="ok", points="a", takeaway="ok", tags="ok")
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert stored(phone)["notes"]["topic"] == "ok"
+    open_editor(phone)
+    assert [phone.locator("#ed-%s-err" % f).inner_text() for f in ("topic", "points", "takeaway", "tags")] == [""] * 4  # a new editor starts clean
+
+
+def test_a_topic_and_points_that_are_both_emptied_are_refused_but_one_of_them_may_be(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, topic="", points="")
+    save(phone)
+    assert dialog_open(phone) and err(phone, "topic") == "Write a topic or at least one point." and err(phone, "points") == "Write a topic or at least one point."
+    typed(phone, topic="", points="only a point")  # the topic emptied and a point written in the same Save
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert stored(phone)["notes"]["topic"] == "" and stored(phone)["notes"]["points"] == ["only a point"]
+    open_editor(phone)
+    typed(phone, topic="A topic again", points="")
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert stored(phone)["notes"]["points"] == [] and stored(phone)["notes"]["topic"] == "A topic again"
+
+
+def test_only_changed_fields_are_checked_through_the_screen(phone):
+    long_ai = ("word " * 400).strip()  # a 2,000-character takeaway from the AI
+    fifty = ["Point number %d of the AI list" % i for i in range(50)]
+    seven = ("abcdef " * 100)[:-1] + "z"  # 700 characters, with spaces (a 700-letter word would make the page wider than the phone)
+    open_reel(phone, [reel("REEL1", notes=notes(takeaway=long_ai, points=fifty + [seven]), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, topic="A new topic")  # the 2,000-character takeaway and the 51 points are untouched
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    r = stored(phone)
+    assert r["notes"]["topic"] == "A new topic" and r["notes"]["takeaway"] == long_ai and len(r["notes"]["points"]) == 51 and r["notes_edit"]["fields"] == ["topic"]
+    open_editor(phone)
+    lines = phone.locator("#ed-points").input_value().split("\n")
+    lines[7] = "Point number 7 fixed"  # one point of 51 AI points
+    lines[50] = "fix" + seven[3:]  # a typo in a 700-character AI point (the same length)
+    typed(phone, points="\n".join(lines), takeaway=long_ai.replace("word", "wrod", 1))  # and a typo in the 2,000-character takeaway
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    r = stored(phone)
+    assert r["notes"]["points"][7] == "Point number 7 fixed" and r["notes"]["points"][50] == "fix" + seven[3:] and len(r["notes"]["points"]) == 51
+    assert r["notes"]["takeaway"].startswith("wrod") and sorted(r["notes_edit"]["fields"]) == ["points", "takeaway", "topic"]
+    open_editor(phone)
+    typed(phone, points="\n".join(lines + ["one point more"]))
+    save(phone)
+    assert dialog_open(phone) and err(phone, "points") == "Keep at most 51 points, each under 700 letters."  # but it may not grow past what is stored
+
+
+# ---------------------------------------------------------------- labels, hints, alerts and size
+
+def test_every_box_has_a_label_a_hint_and_an_alert_and_the_buttons_are_big_enough(phone):
+    open_reel(phone, [four_edited()])
+    edit_all(phone)
+    open_editor(phone)
+    for f, label in (("topic", "Topic"), ("points", "Points"), ("takeaway", "Takeaway"), ("tags", "Tags")):
+        assert phone.locator('label[for="ed-%s"]' % f).inner_text() == label and phone.locator('label[for="ed-%s"]' % f).is_visible()
+        assert phone.locator("#dlg").get_by_label(label, exact=True).get_attribute("id") == "ed-" + f  # the label really names its box
+        ids = phone.locator("#ed-" + f).get_attribute("aria-describedby").split()
+        assert ids == ["ed-%s-hint" % f, "ed-%s-err" % f] and all(phone.locator("#" + i).count() == 1 for i in ids)
+        assert phone.locator("#ed-%s-hint" % f).inner_text().strip() and phone.locator("#ed-%s-err" % f).get_attribute("role") == "alert"
+        assert phone.locator("#ed-" + f).bounding_box()["height"] >= 48
+    for sel in ("#edSave", "#edCancel", '[data-ai="topic"]', '[data-ai="tags"]'):
+        assert phone.locator(sel).bounding_box()["height"] >= 48, sel
+    assert phone.evaluate("() => document.documentElement.scrollWidth") <= 390
+    assert phone.locator("#dlg [role=alert]").count() == 4 and all(not t for t in phone.locator("#dlg [role=alert]").all_inner_texts())  # silent until there is an error
+    typed(phone, topic="x" * 300)
+    save(phone)
+    assert phone.locator("#ed-topic-err").inner_text() and phone.evaluate("() => document.getElementById('ed-topic').getAttribute('aria-invalid')") == "true"
+
+
+# ---------------------------------------------------------------- a stale save keeps what was typed
+
+def rival_saves(pg, db_text=None):
+    """Another page saves the library: this page's next save is refused (and, when db_text is given, the file has changed)."""
+    pg.evaluate("t => { const s = window.__rn; if (t) s.db = t; s.rev = (s.rev || 0) + 1; }", db_text)
+
+
+def test_a_stale_save_reloads_reopens_the_editor_with_what_was_typed_and_applies_it_only_on_the_next_save(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, topic="What I typed", takeaway="And my takeaway")
+    before = phone.rn()["db"]
+    rival_saves(phone)
+    save(phone)
+    phone.wait_for_function("() => window.__toasts.some((t) => t.startsWith('Your library changed elsewhere'))")
+    assert toasts(phone)[-1] == "Your library changed elsewhere. Your text is still here: tap Save again."
+    assert dialog_open(phone) and phone.locator("#ed-topic").input_value() == "What I typed" and phone.locator("#ed-takeaway").input_value() == "And my takeaway"
+    assert phone.rn()["db"] == before and phone.evaluate("() => reel('REEL1').notes.topic") == "Passwords in apps"  # nothing is applied by the reload
+    assert phone.evaluate("() => JSON.stringify(db)").find("What I typed") == -1  # the draft is kept apart from the reels
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    r = stored(phone)
+    assert r["notes"]["topic"] == "What I typed" and r["notes"]["takeaway"] == "And my takeaway" and r["notes_by"] == "you"
+    assert "editDraft" not in json.dumps(db_of(phone)) and phone.evaluate("() => editDraft") is None
+
+
+def test_a_change_made_elsewhere_is_kept_when_the_reopened_editor_saves(phone):
+    reels = [reel("REEL1", notes=notes(), notes_by="phone")]
+    open_reel(phone, reels)
+    open_editor(phone)
+    typed(phone, topic="Mine from here")
+    elsewhere = copy.deepcopy(reels[0])
+    elsewhere["notes"]["tags"] = ["from", "elsewhere"]
+    rival_saves(phone, json.dumps({"reels": [elsewhere], "inbox": []}))
+    save(phone)
+    phone.wait_for_function("() => window.__toasts.some((t) => t.startsWith('Your library changed elsewhere'))")
+    assert phone.locator("#ed-topic").input_value() == "Mine from here" and dialog_open(phone)  # what was typed is kept
+    assert phone.locator("#ed-tags").input_value() == "from, elsewhere"  # a box you did not touch shows the reel as it is now, not as it was
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    r = stored(phone)
+    assert r["notes"]["topic"] == "Mine from here" and r["notes"]["tags"] == ["from", "elsewhere"] and r["notes_edit"]["fields"] == ["topic"]  # applied on the reel as it is now
+
+
+def test_a_reload_while_the_editor_is_open_does_not_lose_the_edit_when_saved(phone):
+    """The page may reload (the nightly run saved) while you type: Save must use the reel as it is after the reload."""
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, topic="Typed before the reload")
+    rival_saves(phone)
+    phone.evaluate("() => staleReload()")
+    assert dialog_open(phone) and phone.locator("#ed-topic").input_value() == "Typed before the reload"
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert stored(phone)["notes"]["topic"] == "Typed before the reload" and stored(phone)["notes_by"] == "you"
+    assert phone.evaluate("() => reel('REEL1').notes.topic") == "Typed before the reload"
+
+
+def test_a_reel_removed_elsewhere_says_so_and_closes_the_editor(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, topic="Too late")
+    phone.evaluate("() => { db.reels = []; }")
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert toasts(phone) == ["This reel is no longer on your shelf."]
+
+
+def test_a_save_the_phone_refuses_for_lack_of_space_keeps_the_editor_open_and_the_next_save_stores_it(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, topic="Needs space")
+    phone.evaluate("() => { window.__rn.storeRefused = true; }")
+    save(phone)
+    assert dialog_open(phone) and toasts(phone) == ["Could not save. Is the phone's storage full?"] and stored(phone)["notes"]["topic"] == "Passwords in apps"
+    phone.evaluate("() => { window.__rn.storeRefused = false; }")
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert stored(phone)["notes"]["topic"] == "Needs space" and toasts(phone)[-1] == "Saved"
