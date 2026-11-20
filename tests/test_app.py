@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -225,25 +226,19 @@ def test_security_rebinding_csrf_and_headers(running):
 # ---------------------------------------------------------------- UI in a real browser at phone size
 
 @pytest.fixture
-def page(running):
-    if not CHROME:
-        pytest.skip("Chromium not available")
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
-        ctx = browser.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True,
-                                  permissions=["clipboard-read", "clipboard-write"])
-        pg = ctx.new_page()
-        errors = []
-        pg.on("pageerror", lambda e: errors.append(str(e)))
-        # the app must work under its own Content Security Policy: any violation fails the test
-        pg.on("console", lambda m: errors.append(m.text) if "Content Security Policy" in m.text else None)
-        pg.goto(running["base"] + "/")
-        pg.running = running
-        pg.errors = errors
-        yield pg
-        assert not errors, errors
-        browser.close()
+def page(running, new_context):
+    ctx = new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True,
+                      permissions=["clipboard-read", "clipboard-write"])
+    pg = ctx.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    # the app must work under its own Content Security Policy: any violation fails the test
+    pg.on("console", lambda m: errors.append(m.text) if "Content Security Policy" in m.text else None)
+    pg.goto(running["base"] + "/")
+    pg.running = running
+    pg.errors = errors
+    yield pg
+    assert not errors, errors
 
 
 def no_side_scroll(pg):
@@ -300,6 +295,9 @@ def test_ui_search_language_and_filters(page):
     pg.get_by_role("button", name="Tamil").click()
     expect(pg.locator("#results .list-item")).to_have_count(2)
     pg.get_by_role("button", name="All").first.click()
+    # the click re-renders the whole screen, search box included: wait for that (All is pressed only in the new screen)
+    # or the typing below can land in the old box just as it is replaced, and is lost
+    expect(pg.get_by_role("button", name="All").first).to_have_attribute("aria-pressed", "true")
     pg.fill("#q", "idiots")
     expect(pg.locator("#results .list-item")).to_have_count(1)
     expect(pg.locator("#results .title")).to_have_text("3 Idiots")
@@ -368,7 +366,7 @@ def test_ui_same_name_switch(page):
 def test_ui_check_identify_and_read(page):
     pg = page
     pg.get_by_text("2 unsure guesses to confirm").click()
-    pg.get_by_role("heading", name="Check this").wait_for()
+    pg.get_by_role("heading", name="Possible matches").wait_for()
     pg.get_by_role("button", name="Not Berserk").click()
     pg.get_by_text("Removed").wait_for()
     pg.locator("[data-ok]").first.click()
@@ -394,7 +392,7 @@ def test_ui_check_identify_and_read(page):
     Image.new("RGB", (90, 160), (10, 120, 200)).save(img)
     pg.set_input_files("#pic", str(img))
     pg.wait_for_url("**#/item/*")
-    pg.get_by_role("heading", name="No match yet").wait_for(timeout=20000)  # offline + no AI: nothing to confirm
+    pg.get_by_role("heading", name="Not found").wait_for(timeout=20000)  # offline + no AI: nothing to confirm
     pg.get_by_role("button", name="Type the name myself").wait_for()
 
     pg.goto(pg.running["base"] + "/#/c/Movies")
@@ -414,13 +412,13 @@ def test_ui_no_match_shows_steps_retry_and_type_name(page):
     Image.new("RGB", (90, 160), (200, 30, 30)).save(img)
     pg.set_input_files("#pic", str(img))
     pg.wait_for_url("**#/item/*")
-    pg.get_by_role("heading", name="No match yet").wait_for(timeout=20000)
+    pg.get_by_role("heading", name="Not found").wait_for(timeout=20000)
     pg.get_by_text("What was tried").wait_for()
     pg.get_by_text("Read text", exact=True).wait_for()
     pg.get_by_text("no text in the picture").wait_for()
     pg.get_by_role("button", name="Try again").click()
     pg.get_by_text("Trying again").wait_for()
-    pg.get_by_role("heading", name="No match yet").wait_for(timeout=20000)
+    pg.get_by_role("heading", name="Not found").wait_for(timeout=20000)
     pg.get_by_role("button", name="Type the name myself").click()
     pg.fill("#rn", "Scene")
     pg.select_option("#rt", "movie")
@@ -497,7 +495,72 @@ def test_ui_import_and_settings(page):
     pg.get_by_text("Online lookups on").wait_for()
     assert pg.running["app"].settings()["online"] is True
     pg.get_by_text("Updates: run the setup command again.").wait_for()  # test server has no restart hook
+    from reel_watcher import checks
+
+    def fake_checks(data_dir=None, progress=None):
+        rows = [{"name": "Text reader (OCR)", "ok": True, "detail": "read: 'VINLAND SAGA'", "hint": "", "seconds": 0.1},
+                {"name": "AI model (Ollama)", "ok": False, "detail": "Ollama: HTTP 500: out of memory", "hint": "Optional.", "seconds": 0.1}]
+        for i in range(len(rows) + 1):
+            progress(rows[i]["name"] if i < len(rows) else "", rows[:i])
+            time.sleep(0.4)
+        return rows
+    real, checks.run_checks = checks.run_checks, fake_checks
+    try:
+        pg.get_by_role("button", name="Run self-check").click()
+        pg.get_by_text("1 of 2 passed").wait_for(timeout=10000)
+        pg.get_by_text("Ollama: HTTP 500: out of memory").wait_for()
+    finally:
+        checks.run_checks = real
     assert Path(pg.running["lib"].dir / "settings.json").exists()
+
+
+HOLD_SELFCHECK = """(() => {
+  const real = window.fetch.bind(window);
+  window.__held = [];
+  window.fetch = (url, opts) => {
+    if (String(url).endsWith("/api/selfcheck") && !(opts && opts.method === "POST"))
+      return new Promise((done) => {
+        window.__held.push(() => done(real(url, opts)));
+        document.documentElement.dataset.held = window.__held.length;  // visible to the test (a script string cannot be polled: CSP)
+      });
+    return real(url, opts);
+  };
+})()"""
+RELEASE_AND_SETTLE = """async () => {
+  window.__held.splice(0).forEach((go) => go());
+  delete document.documentElement.dataset.held;
+  await (await fetch("/api/version")).json();  // a later round trip: the answers released above were handled first
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+}"""
+
+
+def test_ui_settings_work_before_the_selfcheck_answers(page):
+    """A setting changed while the self-check status is still on its way is saved (it used to be dropped), and a late
+    answer neither undoes the change nor draws into another screen. The status request is held inside the page
+    (its fetch promise stays pending), which is deterministic: the test waits for the held request, not for time."""
+    pg = page
+    pg.evaluate(HOLD_SELFCHECK)
+    pg.goto(pg.running["base"] + "/#/settings")
+    pg.locator("html[data-held='1']").wait_for(state="attached")  # the page has asked for the status and is waiting for it
+    pg.locator("#region").wait_for()
+    pg.select_option("#region", "US")
+    pg.get_by_role("switch", name="Online lookups").click()
+    pg.get_by_text("Online lookups on").wait_for(timeout=10000)  # saved although the status answer is held back
+    assert pg.running["app"].settings()["region"] == "US"
+    assert pg.running["app"].settings()["online"] is True
+    pg.evaluate(RELEASE_AND_SETTLE)
+    pg.get_by_role("button", name="Run self-check").wait_for()  # the late answer filled in its own part
+    assert pg.input_value("#region") == "US"
+    assert pg.get_by_role("switch", name="Online lookups").get_attribute("aria-checked") == "true"
+    # leaving before the answer arrives: the late answer must not throw or draw into the next screen
+    pg.goto(pg.running["base"] + "/#/")
+    pg.goto(pg.running["base"] + "/#/settings")
+    pg.locator("html[data-held='1']").wait_for(state="attached")
+    pg.goto(pg.running["base"] + "/#/identify")
+    pg.get_by_role("heading", name="Identify").wait_for()
+    pg.evaluate(RELEASE_AND_SETTLE)
+    assert pg.get_by_role("button", name="Run self-check").count() == 0
+    assert pg.get_by_role("heading", name="Identify").is_visible()
 
 
 def test_api_version_and_self_update(tmp_path, monkeypatch):
@@ -522,8 +585,10 @@ def test_api_version_and_self_update(tmp_path, monkeypatch):
     (tmp_path / "dev" / "f.txt").write_text("2", encoding="utf-8")
     git("-C", str(tmp_path / "dev"), "commit", "-qam", "two")
     git("-C", str(tmp_path / "dev"), "push", "-q", "origin", "HEAD")
+    assert app.check_for_update() == 1 and app.version()["update_available"] is True
     r = app.update()
     assert r["updated"] and r["from"] == v["version"] and r["version"] != v["version"] and restarts == [1]
+    assert app.check_for_update() == 0 and app.version()["update_available"] is False
     (tmp_path / "up.git").rename(tmp_path / "gone.git")  # no connection to the server
     with pytest.raises(server.ApiError, match="Update failed"):
         app.update()
@@ -649,3 +714,77 @@ def test_csv_export_neutralises_formulas(running):
     s, body = call(running["base"], "/api/export.csv")
     text = body.decode() if isinstance(body, bytes) else body
     assert s == 200 and "'=HYPERLINK" in text and "\n=HYPERLINK" not in text
+
+
+def test_debug_reports_image_for_lens_and_ai_setting(running):
+    b, lib, app = running["base"], running["lib"], running["app"]
+    shot = lib.one("SELECT id FROM items WHERE kind='image' LIMIT 1")["id"]
+    s, r = call(b, f"/api/items/{shot}/debug")
+    text = r["text"]
+    assert s == 200 and text.startswith(f"Reel Shelf debug report: item {shot}") and "version:" in text and "steps:" in text
+    assert str(running["tmp"]) not in text  # file names only, never full folder paths
+    s, r = call(b, "/api/debug")
+    assert s == 200 and "items: " in r["text"] and "recent problems:" in r["text"]
+    s, body = call(b, f"/api/items/{shot}/image")
+    assert s == 200 and body[:3] == b"\xff\xd8\xff"  # the original picture, for Google Lens
+    reel = lib.one("SELECT id FROM items WHERE kind='reel' LIMIT 1")["id"]
+    assert call(b, f"/api/items/{reel}/image")[0] == 404 and call(b, "/api/items/999999/debug")[0] == 404
+    assert app.settings()["ai"] is False                                   # AI guesses are off unless turned on
+    assert call(b, "/api/settings", "POST", {"ai": True})[1]["ai"] is True and app.engine.ai is True
+    call(b, "/api/settings", "POST", {"ai": False})
+    assert app.engine.ai is False
+
+
+def test_ui_not_found_offers_lens_and_debug_report(page):
+    pg = page
+    pg.goto(pg.running["base"] + "/#/identify")
+    img = pg.running["tmp"] / "plain.png"
+    Image.new("RGB", (90, 160), (30, 160, 60)).save(img)
+    pg.set_input_files("#pic", str(img))
+    pg.wait_for_url("**#/item/*")
+    pg.get_by_role("heading", name="Not found").wait_for(timeout=20000)
+    pg.get_by_role("button", name="Search with Google Lens").wait_for()
+    pg.get_by_role("button", name="Copy debug report").click()
+    pg.get_by_text("Debug report copied").wait_for()
+    copied = pg.evaluate("navigator.clipboard.readText()")
+    assert copied.startswith("Reel Shelf debug report: item") and "Read text" in copied
+    pg.goto(pg.running["base"] + "/#/settings")
+    pg.get_by_role("switch", name="AI guesses").wait_for()
+    assert pg.get_by_role("switch", name="AI guesses").get_attribute("aria-checked") == "false"
+
+
+def test_auto_update_waits_for_idle_then_updates(tmp_path, monkeypatch):
+    app = server.App(demo.build(tmp_path / "lib"))
+    app.repo, restarts, calls = tmp_path, [], []
+    app.restart = lambda: restarts.append(1)
+    monkeypatch.setattr(app, "check_for_update", lambda: calls.append("check") or 2)
+    monkeypatch.setattr(app, "update", lambda: calls.append("update") or {"updated": True, "version": "new"})
+    iid = app.lib.one("SELECT id FROM items LIMIT 1")["id"]
+    app.lib.update_item(iid, status="working")
+    stop = threading.Event()
+    t = threading.Thread(target=app.auto_update_loop, kwargs={"first_wait": 0.01, "every": 3600, "stop": stop}, daemon=True)
+    import reel_watcher.server as srvmod
+    real_wait = threading.Event.wait
+    monkeypatch.setattr(threading.Event, "wait", lambda self, timeout=None: real_wait(self, min(timeout or 0, 0.05)))
+    t.start()
+    time.sleep(0.3)
+    assert calls == ["check"]  # an item is being read: no update yet
+    app.lib.update_item(iid, status="done")
+    time.sleep(0.3)
+    stop.set()
+    assert calls[:2] == ["check", "update"]
+    app.save_settings({"auto_update": False})
+    assert app.version()["auto_update"] is False
+    del srvmod
+
+
+def test_old_answers_are_checked_again_once_after_an_upgrade(tmp_path):
+    lib = demo.build(tmp_path / "lib")
+    app = server.App(lib)
+    unsure = lib.one("SELECT id FROM items WHERE key='img:demo-unsure'")["id"]
+    good = lib.one("SELECT id FROM items WHERE key='img:demo-shot'")["id"]
+    mine, _ = lib.add_item("img:mine", "image", str(tmp_path / "x.jpg"), ["Screenshots"], status="check")
+    lib.add_find(mine, "title", name_raw="Mine", source="user", confidence="confirmed")
+    assert app.recheck_after_upgrade() == 1
+    assert lib.item(unsure)["status"] == "waiting" and lib.item(good)["status"] == "done" and lib.item(mine)["status"] == "check"
+    assert app.recheck_after_upgrade() == 0  # only once

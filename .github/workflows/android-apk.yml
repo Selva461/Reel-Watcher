@@ -1,7 +1,9 @@
 name: Android APK
 
 on:
+  # only the install branch builds the APK, to save GitHub Actions minutes; other branches are tested by tests.yml
   push:
+    branches: [ccr-d0c0b070-bdpssy]
     paths:
       - "android/app-shell/**"
       - ".github/workflows/android-apk.yml"
@@ -24,10 +26,10 @@ jobs:
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3  # v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a  # v4
         with:
-          gradle-version: "8.9"
+          gradle-version: "8.13"
       - name: Build the APK (release, not debuggable; free GitHub runner, Android SDK preinstalled)
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -39,19 +41,39 @@ jobs:
             echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
             export RS_KEYSTORE="$RUNNER_TEMP/release.jks"
           fi
-          gradle -p android/app-shell assembleRelease --no-daemon --stacktrace
+          gradle -p android/app-shell testReleaseUnitTest assembleRelease --no-daemon --stacktrace
           rm -f "$RUNNER_TEMP/release.jks"
           cp android/app-shell/app/build/outputs/apk/release/app-release.apk ReelShelf.apk
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: ReelShelf-apk
           path: ReelShelf.apk
-      - name: Publish to the "apk-latest" release (direct download link for your phone)
+      - name: Publish the version release and "apk-latest" (direct download link for your phone)
+        # Publishing is a decision of the owner: a merge only builds and tests (the APK stays available as the workflow
+        # artifact above). To publish, run this workflow by hand on the install branch (Actions > Android APK > Run workflow).
+        # Only builds of the branch phones install from are published; other branches can never replace the APK.
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ccr-d0c0b070-bdpssy'
         env:
           GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         run: |
+          VER=$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" android/app-shell/app/build.gradle | head -1)
+          # the CHANGELOG.md section for this version becomes the release notes
+          awk -v v="## $VER" '$0==v{on=1;next} /^## /{if(on)exit} on' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "Reel Shelf $VER" > notes.md
+          if [ "$SIGNED" != "true" ]; then
+            printf '\n**Signed with a temporary key:** this build cannot update an installed copy. Add the signing secrets (see CHANGELOG.md).\n' >> notes.md
+          fi
+          cp ReelShelf.apk "ReelShelf-$VER.apk"
+          if gh release view "v$VER" >/dev/null 2>&1; then
+            gh release upload "v$VER" "ReelShelf-$VER.apk" --clobber
+            gh release edit "v$VER" --notes-file notes.md
+          else
+            gh release create "v$VER" "ReelShelf-$VER.apk" --target "$GITHUB_SHA" --title "Reel Shelf $VER" --notes-file notes.md
+          fi
           if ! gh release view apk-latest >/dev/null 2>&1; then
-            gh release create apk-latest --prerelease --target "$GITHUB_SHA" --title "Reel Shelf for Android (latest build)" \
-              --notes "Download ReelShelf.apk on your Android phone and open it to install. Built automatically from branch $GITHUB_REF_NAME."
+            gh release create apk-latest --prerelease --target "$GITHUB_SHA" --title "Reel Shelf for Android (latest build)" --notes "latest"
           fi
           gh release upload apk-latest ReelShelf.apk --clobber
+          gh release edit apk-latest --target "$GITHUB_SHA" \
+            --notes "Reel Shelf $VER. Download ReelShelf.apk on your phone and open it: it updates the installed app. Changes: see release v$VER."

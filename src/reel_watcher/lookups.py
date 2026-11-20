@@ -626,14 +626,24 @@ def result_work(r: dict) -> dict | None:
 
 def web_identify(query: str, name_hint: str = "", kind_hint: str = "", year: int | None = None) -> tuple[dict | None, list[str]]:
     """Search the web and pick the work most results agree on. Returns (work or None, notes).
-    work: {name, year, type, site, url, wikipedia_title, evidence, agree, sure}."""
+    work: {name, year, type, site, url, wikipedia_title, evidence, agree, sure, same_name_other_years}.
+    Results are grouped by name AND year, so two works with the same name never merge into one."""
     results, notes = web_search(query)
     works = [w for w in (result_work(r) for r in results[:10]) if w]
     if not works:
         return None, notes + (["no title pages among the results"] if results else [])
-    groups: dict[str, list[tuple[int, dict]]] = {}
+    by_name: dict[str, list[tuple[int, dict]]] = {}
     for i, w in enumerate(works):
-        groups.setdefault(norm(w["name"]), []).append((i, w))
+        by_name.setdefault(norm(w["name"]), []).append((i, w))
+    groups: list[list[tuple[int, dict]]] = []
+    for items in by_name.values():
+        years = sorted({w["year"] for _, w in items if w["year"]})
+        if len(years) <= 1:
+            groups.append(items)
+            continue
+        for y in years:  # results without a year join the year that fits the clue, else the first one
+            keep_none = y == (min(years, key=lambda v: abs(v - year)) if year else years[0])
+            groups.append([(i, w) for i, w in items if (w["year"] and abs(w["year"] - y) <= 1) or (not w["year"] and keep_none)])
 
     def score(items):
         i0, w0 = items[0]
@@ -649,14 +659,17 @@ def web_identify(query: str, name_hint: str = "", kind_hint: str = "", year: int
         if not kinds:
             s -= 0.3
         return s
-    best_items = max(groups.values(), key=score)
+    best_items = max(groups, key=score)
     best = dict(best_items[0][1])
     for _, w in best_items:  # fill gaps from the other results about the same work
         for k in ("year", "type", "wikipedia_title"):
             best[k] = best.get(k) or w.get(k)
     best["agree"] = len({w["site"] for _, w in best_items})
+    best["same_name_other_years"] = sorted({w["year"] for g in groups if g is not best_items for _, w in g
+                                           if w["year"] and norm(w["name"]) == norm(best["name"])
+                                           and (not best["year"] or abs(w["year"] - best["year"]) > 1)})
     hint_ok = bool(name_hint) and similarity(name_hint, best["name"]) >= 0.85 and (not year or not best["year"] or abs(best["year"] - year) <= 1)
-    best["sure"] = hint_ok or best["agree"] >= 2
+    best["sure"] = (hint_ok or best["agree"] >= 2) and not (best["same_name_other_years"] and not year)
     return best, notes + [f"best: {best['evidence']} ({best['site']})"]
 
 

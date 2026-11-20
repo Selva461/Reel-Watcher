@@ -143,7 +143,7 @@ def test_ocr_sorts_rows_and_redacts(tmp_path, monkeypatch):
     rows = [[box(0, 90), "bottom line", 0.9], [box(60, 10), "world", 0.95], [box(0, 10), "hello", 0.99],
             [box(0, 50), "noise", 0.2], [box(0, 70), "sk-" + "a" * 20, 0.9]]
     monkeypatch.setattr(rs, "_OCR_ENGINE", lambda path: (rows, 0.01))
-    assert rs.ocr_image(tmp_path / "x.jpg") == "hello world [redacted] bottom line"
+    assert rs.ocr_image(tmp_path / "x.jpg") == "hello\nworld\n[redacted]\nbottom line"  # one line per text row
     monkeypatch.setattr(rs, "_OCR_ENGINE", lambda path: (None, 0.01))
     assert rs.ocr_image(tmp_path / "x.jpg") == ""
 
@@ -185,7 +185,7 @@ def test_prepare_ytdlp_ok_and_errors(tmp_path, monkeypatch):
     assert u["media"] == [tmp_path / "A1" / "A1_01.mp4"] and u["meta"]["caption"] == "hi" and "error" not in u
 
     monkeypatch.setattr(rs, "ytdlp_download", lambda url, work: {})
-    assert rs.prepare_ytdlp(item, tmp_path)["error"].startswith("ytdlp_no_video")
+    assert rs.prepare_ytdlp(item, tmp_path)["error"].startswith("ytdlp_no_media")  # no video and no pictures
 
     def boom(url, work):
         raise RuntimeError("\x1b[0;31mERROR:\x1b[0m Requested content is not available, rate-limit reached or login required")
@@ -220,4 +220,4 @@ def test_whisper_cpp_json_and_tesseract_fallback(monkeypatch, tmp_path):
     class P:
         stdout = "VINLAND SAGA\n\nx\nEpisode 12\n"
     monkeypatch.setattr(rs.subprocess, "run", lambda *a, **k: P())
-    assert rs.ocr_tesseract(tmp_path / "a.png") == "VINLAND SAGA Episode 12"
+    assert rs.ocr_tesseract(tmp_path / "a.png") == "VINLAND SAGA\nEpisode 12"  # line breaks are kept

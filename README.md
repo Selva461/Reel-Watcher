@@ -21,7 +21,49 @@ tricks, any "comment WORD and I'll send you X" giveaway, and a one-line verdict 
 one searchable JSON file per reel. Everything except the media download runs on your machine, and nothing costs money:
 no account, no API key, no credit card.
 
-## Reel Shelf: the app
+## Reel Shelf on Android: reel notes, nothing else to install
+
+The Android app now works on its own: no Termux, no PC, no account. It turns the reels you share into notes in
+this format: **TOPIC, POINTS, MEANING, USE IT FOR, TOOLS, TAKEAWAY, TAGS**.
+
+1. Install `ReelShelf.apk` (see below) and open it once.
+2. In Instagram (or YouTube, for Shorts), tap the share arrow on a reel and pick **Reel Shelf**. It is only saved (you stay in the app).
+3. When you want the notes, open Reel Shelf and tap **Start**. Two ways to get them:
+   - **On-phone AI**: Settings, **Download model** (Qwen2.5 1.5B, about 1.6 GB, free, Apache 2.0). Start then reads
+     each reel's public caption and the model writes the notes on the phone (GPU, falls back to CPU).
+     Answer length, style, extra instructions and your own `.litertlm` model file can be set in Settings.
+   - **Ask Meta AI** on a reel: your prompt plus the reel link go to Meta AI in one tap. Share Meta AI's answer
+     back to Reel Shelf and it is filed under that reel. Best quality, because Meta AI watches the whole reel.
+   - **Without any AI**: Start still makes quick notes from the caption (the key sentences, keywords as tags), so
+     every reel can be found in the library. The AI can redo them later.
+   - **Ask Meta AI about 5 reels at once** (on the Shelf): one message, and its one answer is split back per reel.
+   - **YouTube Shorts**: Start reads the title, description and the spoken words (YouTube's captions), with no key
+     and no login, and the notes are written from what is actually said.
+4. **Ask** is a search engine over what you learned: ranked results (BM25), typos and similar words allowed,
+   the lines that answer you, related reels, and optionally a short answer from the on-phone AI that cites the reels.
+   None of it needs AI except that last button. Type `"exact words"`, `-word` to leave a word out, and `#tag` to keep
+   one tag; a misspelt word gets a "Did you mean" from the words in your own library, and matching words are marked.
+   With nothing typed, Ask shows **Topics you learned** (reels grouped by the words they share, using TF-IDF and cosine
+   similarity) and the tools you saw most. A topic page lists its reels, their takeaways and tools. The search index is
+   kept in memory until a reel changes, so typing stays fast with thousands of reels (`assets/local/library.js`).
+5. **Add** takes many reel links at once, pasted Meta AI answers (several are split up), or Instagram's
+   "Download your information" export (collections become labels). **Get my saved reels from Instagram** opens
+   Instagram's own export page inside the app: you sign in and tap the buttons yourself (the app never clicks,
+   scrolls or reads your password), and when the file is ready, tapping Download brings the saved reels straight in.
+   Until it comes back, Shelf and Add show a "check now" reminder (Meta keeps a finished export for 4 days). If
+   Instagram will not sign you in there, **Chrome** at the top does the same steps in your browser; then choose the
+   downloaded ZIP in Add (big and ZIP64 exports are fine).
+6. **Settings, Export** saves everything to Downloads/ReelShelf as JSON (to analyze with Claude) or Markdown.
+
+Battery: nothing starts by itself. Sharing only saves. A job you start (Start, screenshots, online check, the
+Instagram export download) keeps going if you leave the app, always with a notification showing its progress and a
+Stop button, and the notification goes away as soon as the job ends. With no job running, leaving the app stops everything.
+Limit: without a server the app reads a reel's caption and the text on its cover picture (read on the phone), not its
+speech, so the on-phone AI works from those plus anything you type under "What the reel says". Meta AI has no such limit.
+Instagram is read logged out, one reel every 4 to 7 seconds, and the app waits when Instagram asks it to slow down.
+The older engine below (Termux or PC) is separate now: the app no longer starts it.
+
+## Reel Shelf: the app (PC, or Termux on the phone)
 
 `reel-watcher app` is a phone-friendly app on top of the reel reader. Everything in it is free.
 
@@ -31,8 +73,12 @@ no account, no API key, no credit card.
   mentions: from on-screen text, speech, the caption and the **comments** (creator's comments and repeated answers
   count most). Names are checked in AniList and Wikidata, so you get the official title, year, original language and genres.
 - **Screenshots too.** Pick one screenshot, or **scan whole folders** (thousands of images) in the background.
-  Text in the image is read first; images with no readable name use free scene search (trace.moe for anime,
-  SauceNAO for manga). The AI's guess is shown right away, marked **Check this**, until something confirms it.
+  The text in the image is read first and checked in the databases and on the web; then free picture matching
+  (SauceNAO for manga, movies and shows; trace.moe for anime). When nothing is found: **Search with Google Lens**
+  (hands the picture to the Lens app) or type the name. No AI is needed; optional AI guesses can be turned on.
+- **Verified means two sources agree.** A find is Verified only when two independent sources agree on the same work
+  (the name on screen or in the reel, plus a database or web pages; or two picture matches). Anything less is shown
+  as a **Possible match** with the reason and the evidence, so the app does not present a guess as a fact.
 - **Motivation clips.** For motivation/quote collections it cuts the motivating line out of the reel as a GIF with
   word-by-word captions (Bold, Clean or Typewriter) or as a short video with sound. Save, share or copy the text.
 - **Search with filters.** Title, creator or genre; title language, the language spoken in the reel, type, genre,
@@ -50,30 +96,27 @@ uv run reel-watcher app --lan            # also usable from your phone on the sa
 
 ### Run it on an Android phone, no PC needed
 
-The easy way: the Reel Shelf app walks you through it and shows the setup progress.
+Since app version 1.2.0 the APK no longer starts Termux (that permission made Play Protect block the app). To use
+this older engine, install Termux from F-Droid, paste the setup command below, then open http://localhost:8765 in Chrome.
 
-1. On your phone open https://github.com/Selva461/Reel-Watcher/releases/tag/apk-latest , download `ReelShelf.apk`
-   and install it (allow installing from your browser when Android asks).
-2. Open Reel Shelf and follow the two steps it shows:
-   - **Install Termux** from F-Droid (free). Not the Play Store version: that build is different and Reel Shelf cannot use it.
-   - **Set up once**: tap *Copy setup command and open Termux*, then in Termux long-press, Paste, Enter.
-     Come back to Reel Shelf to watch the progress; it opens by itself when it is ready (15-30 minutes, about 4 GB, use Wi-Fi).
-3. Android Settings, Apps, Termux, Battery: **Unrestricted**, so scans keep running with the screen off.
-
-Later, tap **Start Reel Shelf** in the app. If Android does not let the app start Termux, it opens Termux instead,
-which starts Reel Shelf and brings you back. Opening Termux yourself does the same; `reel-shelf-stop` stops it.
-
-Setup command, if you want to paste it yourself:
+Setup command:
 
 ```bash
 pkg install -y git && { git -C ~/Reel-Watcher pull -q --ff-only 2>/dev/null || git clone -b ccr-d0c0b070-bdpssy https://github.com/Selva461/Reel-Watcher.git ~/Reel-Watcher; } && bash ~/Reel-Watcher/android/termux-setup.sh
 ```
 
 It installs Python, FFmpeg, Tesseract (text), whisper.cpp (speech) and a small AI vision model (`qwen2.5vl:3b`, about 3 GB).
-A newer APK is signed differently, so uninstall the old Reel Shelf app before installing a new one (your library lives in Termux and is kept).
-
 Without the APK you can also open http://localhost:8765 in Chrome and choose **Add to Home screen**.
 On a phone, a reel takes longer than on a PC (a few minutes each); connect your PC with `--lan` for speed.
+
+### Testing and security
+
+- **Settings > Self-check** (or `reel-watcher check`) tries every feature on your device for real and says what to
+  fix. **Settings > Update now** installs the latest fixes.
+- [TESTING.md](TESTING.md): step-by-step test cases with the expected result for each, to check on your phone.
+- Security: the app only answers this device (or, with `--lan`, devices that have the access code), refuses
+  requests made by other web sites, shows all outside text as text, and stays inside your storage folders.
+  Dependencies are scanned for known vulnerabilities on every change and weekly.
 
 ### How accurate names and details are found
 
@@ -87,7 +130,7 @@ Each name is checked against real databases before it is called **Confirmed**:
 | Movies | Wikidata | Wikipedia story, director, cast, language, runtime, IMDb link |
 
 Same name, different work ("Monster" 2004 vs 2023, "Vikram Vedha" 2017 vs 2022): the year in the reel, its
-type, its language and popularity decide; if two are still too close the find is marked **Check this** and the
+type, its language and popularity decide; if two are still too close the find is marked **Possible match** and the
 app offers **Could also be** buttons. Single everyday words ("Dark", "Up") need a strong clue before they are confirmed.
 
 Real free limits the app respects (it paces itself and waits instead of failing):

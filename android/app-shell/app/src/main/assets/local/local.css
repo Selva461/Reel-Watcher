@@ -1,0 +1,49 @@
+/* Extra pieces for the built-in (no Termux) Reel Shelf. Everything else comes from app.css, the same look as before. */
+.note-block { display: flex; flex-direction: column; gap: 6px; }
+.note-block p { margin: 0; line-height: 1.5; }
+.note-block ol, .note-block ul { margin: 0; padding-left: 22px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px; }
+.pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; margin: 0; }
+.clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tagrow { display: flex; flex-wrap: wrap; gap: 6px; }
+details > summary { cursor: pointer; list-style-position: inside; }
+textarea.input.tall { min-height: 160px; }
+.hint { font-size: 13px; color: var(--muted); line-height: 1.45; margin: 0; }
+/* Watchlist */
+.poster-ph { display: flex; align-items: center; justify-content: center; font-family: "Space Grotesk", sans-serif; font-weight: 700; font-size: 20px;
+             color: var(--ph); background: var(--surface2); border: 1px solid var(--line); }
+.thumb.big.poster-ph { font-size: 44px; }
+.small-field { font-size: 13px; gap: 4px; }
+.small-field select.input { min-height: 44px; font-size: 14px; padding: 0 10px; }
+nav.tabs a { min-width: 52px; }
+.seg button { font-size: 14px; }
+.thumb.big.poster { aspect-ratio: 2/3; width: 120px; }
+mark { background: rgba(242, 181, 68, 0.28); color: inherit; border-radius: 3px; padding: 0 1px; }
+a.chip { display: inline-flex; align-items: center; text-decoration: none; }
+/* Top bar, two tabs, Inbox tiles (1.3.0) */
+.top { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 10px 16px 6px; }
+.top .inner { max-width: 560px; margin: 0 auto; display: flex; gap: 8px; align-items: center; }
+.top .search { min-height: 46px; padding: 0 6px 0 12px; gap: 6px; }
+.top .search input { min-height: 44px; min-width: 0; }
+.top .search input::-webkit-search-cancel-button { display: none; }
+.top .icon-btn { position: relative; flex-shrink: 0; color: var(--soft); }
+.grow { flex: 1; min-width: 0; }
+button.bare { border: 0; background: transparent; color: var(--muted); width: 36px; height: 40px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
+#tq:placeholder-shown ~ #tclear { display: none; }
+.dot { position: absolute; top: 9px; right: 9px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+body.with-top #app { padding-top: 8px; }
+nav.tabs .ico { position: relative; display: inline-flex; }
+.badge { position: absolute; top: -4px; right: -10px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: var(--on-accent);
+         font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; line-height: 1; }
+.badge[hidden], .dot[hidden] { display: none; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 8px; }
+.tile-btn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-height: 80px; padding: 10px 4px; border-radius: 16px;
+            border: 0; background: var(--surface); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; text-align: center; }
+.tile-btn svg { color: var(--accent); }
+.tile-btn#start, .tile-btn#goRun { background: var(--accent); color: var(--on-accent); }
+.tile-btn#start svg, .tile-btn#goRun svg { color: var(--on-accent); }
+#understood:empty { display: none; }
+
+/* a title's rating and seasons, like a movie app */
+.rating{display:flex;align-items:baseline;gap:6px}
+.rating strong{font-size:18px;color:var(--accent,#F2B544)}
+.list-item.season strong{min-width:34px}
