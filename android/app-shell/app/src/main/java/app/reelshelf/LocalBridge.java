@@ -1166,7 +1166,7 @@ final class LocalBridge {
         done(id, true, dest.getName());
     }
 
-    /** Runs the model once. opts: {"file", "gpu", "system", "maxTokens", "temperature"}. */
+    /** Runs the model once. opts: {"file", "gpu", "system", "maxTokens", "temperature"}. Answers {"text", "backend", "tokens", "ms"}. */
     @JavascriptInterface
     public void generate(int id, String prompt, String opts) {
         if (!ok()) return;
@@ -1200,6 +1200,7 @@ final class LocalBridge {
                 JSONObject r = new JSONObject();
                 r.put("text", out);
                 r.put("backend", model.backendInUse());
+                r.put("tokens", model.lastTokens());  // -1 when the engine did not say; the page does not store it
                 r.put("ms", System.currentTimeMillis() - t0);
                 done(id, true, r.toString());
             } catch (InterruptedIOException e) {

@@ -36,6 +36,7 @@ final class LocalModel {
     private String enginePath = "";
     private String engineBackend = "";
     private volatile Conversation current;
+    private volatile int lastTokens = -1;
 
     LocalModel(Context ctx) {
         this.ctx = ctx;
@@ -118,6 +119,7 @@ final class LocalModel {
                     java.util.List<File> frames, File sound) throws Exception {
         if (!model.isFile()) throw new IOException("The AI model is not downloaded yet (Settings, Download model).");
         stop = false;
+        lastTokens = -1;
         Conversation conv;
         synchronized (this) {
             ensureEngine(model, gpu, multimodal(model) && ((frames != null && !frames.isEmpty()) || sound != null));
@@ -142,6 +144,11 @@ final class LocalModel {
                 m = conv.sendMessage(prompt, Collections.emptyMap(), null, null, null,
                         Math.max(64, Math.min(maxTokens, 3000)));
             }
+            try {
+                lastTokens = conv.getTokenCount();  // what the engine counted, to compare with the page's estimate; not checked on a phone yet
+            } catch (Throwable t) {
+                lastTokens = -1;
+            }
             if (stop) throw new InterruptedIOException("stopped");
             return m.toString();
         } finally {
@@ -157,6 +164,11 @@ final class LocalModel {
                 }
             }
         }
+    }
+
+    /** The token count the engine reported after the last answer, or -1 when it did not say. */
+    int lastTokens() {
+        return lastTokens;
     }
 
     /** "gpu" or "cpu": what the loaded model actually runs on (GPU can fall back to CPU). */
