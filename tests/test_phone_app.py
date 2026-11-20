@@ -61,8 +61,10 @@ window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting betw
       st.player ? rnDone(id, true, JSON.stringify(st.player)) : rnDone(id, false, "YouTube answered 403"); }); },
     openInstagram: () => { st.opened.push("instagram-export"); keep(); },
     readReelVideo: (id, url) => { st.calls.push(["video", url]); keep(); later(() => st.video ? rnDone(id, true, JSON.stringify(st.video)) : rnDone(id, false, "Instagram answered 403 for the video")); },
-    speechInfo: () => JSON.stringify({ ready: !!st.speech, downloading: false, size: 40e6 }),
-    downloadSpeech: (id) => { st.calls.push(["speechDownload"]); keep(); later(() => rnProgress("speech", 20e6, 40e6)); later(() => { st.speech = true; keep(); rnDone(id, true, "ready"); }); },
+    speechInfo: () => JSON.stringify({ ready: !!st.speech, downloading: false, size: 40e6, partial: st.speechPartial || 0 }),
+    downloadSpeech: (id, ...extra) => { st.calls.push(["speechDownload", ...extra]); keep(); later(() => rnProgress("speech", 20e6, 40e6)); later(() => {
+      if (st.speechFail) { rnDone(id, false, st.speechFail); return; }  // Java refused it (st.speechFail is its message): nothing is installed
+      st.speech = true; st.speechPartial = 0; keep(); rnDone(id, true, "ready"); }); },
     deleteSpeech: () => { st.speech = false; keep(); },
     addShotPictures: (id) => later(() => rnDone(id, false, "cancelled")),
     webSearch: (id, q) => { st.calls.push(["webSearch", q]); keep(); later(() => st.web ? rnDone(id, true, JSON.stringify(st.web)) : rnDone(id, false, "No internet, or the search services did not answer")); },
@@ -629,7 +631,39 @@ def test_try_on_five_reels_and_speech_model_download(phone):
     phone.goto(phone.url.split("#")[0] + "#/settings")
     phone.get_by_role("button", name="Download speech to text").click()
     phone.get_by_text("Speech to text is ready").wait_for()
-    assert ["speechDownload"] in phone.rn()["calls"]
+    assert ["speechDownload"] in phone.rn()["calls"]  # the page names no address: Java knows the pinned one
+
+
+def test_a_speech_download_that_fails_the_check_is_told_honestly_and_never_shown_as_ready(phone):
+    msg = "The download was damaged or changed on the way (check failed). Nothing was installed. Tap Download to try again."
+    phone.open_with({"speechFail": msg}, "#/settings")
+    assert phone.locator(".tag").first.inner_text() == "Not downloaded"
+    phone.get_by_role("button", name="Download speech to text").click()
+    phone.get_by_text(msg).wait_for()
+    phone.get_by_role("button", name="Download speech to text").wait_for()  # still offered: nothing was installed, try again
+    assert phone.locator(".tag").first.inner_text() == "Not downloaded"
+    assert phone.get_by_role("button", name="Delete the speech model").count() == 0 and not phone.rn().get("speech")
+    assert phone.get_by_text("Speech to text is ready").count() == 0
+
+
+def test_a_paused_speech_download_is_shown_as_paused_and_continued(phone):
+    phone.open_with({"speechPartial": 20000000}, "#/settings")
+    assert phone.locator(".tag").first.inner_text() == "Paused"
+    assert phone.get_by_role("button", name="Download speech to text").count() == 0  # the same button now continues
+    assert phone.locator("#dlsp").inner_text() == "Continue download"
+    phone.locator("#dlsp").click()
+    phone.get_by_text("Speech to text is ready").wait_for()
+    phone.get_by_role("button", name="Delete the speech model").wait_for()
+    assert phone.locator(".tag").first.inner_text() == "Ready"
+    assert [c for c in phone.rn()["calls"] if c[0] == "speechDownload"] == [["speechDownload"]]
+
+
+def test_the_page_asks_for_the_speech_model_without_an_address_and_says_it_is_checked():
+    import re
+    js = (LOCAL / "local.js").read_text(encoding="utf-8")
+    assert "alphacephei" not in js  # the address, size and fingerprints live in Java (ModelCatalog.SPEECH)
+    assert re.findall(r'phone\("downloadSpeech"([^)]*)\)', js) == [""]
+    assert "It is checked against the published file before it is installed." in js
 
 
 def test_useful_reels_go_first_then_memes(phone):

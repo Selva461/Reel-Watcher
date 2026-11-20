@@ -109,6 +109,31 @@ notes and points `apk-latest` at it. Builds signed with the stable key (GitHub s
   longer calls it a backup and points to Back up now.
 - Checked with automatic tests on a computer (the page, and the parts of the backup that need no phone). The part that
   talks to Android (saving into Downloads, the free-space check, the read-back) is not tried on a phone yet.
+## 1.3.23
+- The speech model you download in Settings (Speech to text, about 40 MB) is now checked like the AI models. Reel Shelf
+  knows the exact size of the published file and two fingerprints of it (its MD5, which the publisher lists, and a
+  SHA-256), and it only takes the file from alphacephei.com itself: an answer that sends the download somewhere else is
+  refused. The file is unpacked only after all three match. If the check fails (a cut-off connection, a Wi-Fi sign-in
+  page, a damaged or changed file), nothing is installed, only the unfinished download is removed, and a message tells
+  you what happened.
+- The unpacking is careful too. The download is unpacked into a temporary folder first and refused if it holds anything
+  that could write outside the model's own folder (a path that climbs out, a link, a repeated name), more files than
+  the published model has, or far more data than it. Only a finished, complete model folder is moved into place in one
+  step, so a model can no longer show "Ready" after an unpack that was cut off. A speech model that is already
+  installed is set aside first and deleted only when the new one is in place; if anything goes wrong it stays exactly as
+  it was.
+- A paused speech download is kept and shows **Paused** with **Continue download**; it continues from where it stopped.
+  The unfinished download is now kept in the app's own storage (next to the AI models) instead of the cache, so Android
+  cannot clear it. A speech download left in the cache by an older version is not used again (Android clears it when it
+  needs the room).
+- Only one download runs at a time, the speech model or an AI model (they used to be able to run together and stop each
+  other). A second tap now says which download is running.
+- The page no longer holds anything about where the speech model comes from; the app's own list does. Models already
+  on your phone are untouched. The AI model path is unchanged.
+- Checked with automatic tests on a computer, including a local test server that sends damaged, cut-off, wrong-size and
+  redirected files, and ZIP files built to write outside their folder. The published speech file was also downloaded
+  once on a computer: its size and MD5 match what the publisher lists, and its SHA-256 (measured there) is the one in
+  the app's list. Not tried on a phone.
 
 ## 1.3.19
 - The AI models you download in Settings (Qwen2.5 1.5B, Gemma 4 E2B and Gemma 4 E4B) are now checked. Reel Shelf knows the

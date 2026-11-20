@@ -956,7 +956,7 @@ final class LocalBridge {
             o.put("ready", f.isFile());
             o.put("bytes", f.isFile() ? f.length() : 0);
             o.put("partial", part.isFile() ? part.length() : 0);
-            o.put("downloading", downloading);
+            o.put("downloading", downloading && !speechDownloading);  // the speech model's download is not the AI model's
             o.put("backend", model.backendInUse());
             o.put("free", model.dir().getUsableSpace());
             JSONArray all = new JSONArray();
@@ -979,7 +979,7 @@ final class LocalBridge {
             return;
         }
         if (downloading) {
-            done(id, false, "Already downloading");
+            done(id, false, speechDownloading ? "Speech to text is downloading. Wait until it is done, then download the model." : "Already downloading");
             return;
         }
         downloading = true;
@@ -1165,38 +1165,47 @@ final class LocalBridge {
 
     // ------------------------------------------------------------------ what a reel shows and says (its video)
 
+    /** True while the one running download (the shared "downloading" flag) is the speech model: only what the page shows for it. */
     private volatile boolean speechDownloading;
 
-    /** {ready, downloading, size} for the offline speech model. */
+    /** {ready, downloading, size, partial} for the offline speech model (partial: bytes of an unfinished download). */
     @JavascriptInterface
     public String speechInfo() {
         if (!ok()) return "{}";
         JSONObject o = new JSONObject();
         try {
+            File part = new File(speechZip().getPath() + ".part");
             o.put("ready", SpeechModel.dir(act.ctx()) != null);
             o.put("downloading", speechDownloading);
             o.put("size", SpeechModel.SIZE);
+            o.put("partial", part.isFile() ? part.length() : 0);
         } catch (JSONException ignored) {
         }
         return o.toString();
     }
 
-    /** Downloads (resuming) and unpacks the offline speech model. Progress as "speech". */
+    /** The speech model's ZIP while it is downloaded (and for a moment while it is unpacked): in the app's own storage, next to the AI models. */
+    private File speechZip() {
+        return new File(model.dir(), ModelCatalog.SPEECH.file);
+    }
+
+    /**
+     * Downloads (resuming) the offline speech model, checks its size, SHA-256 and MD5 against ModelCatalog.SPEECH, and only
+     * then unpacks it (ModelZip). One download at a time, the same flag as the AI model. Progress as "speech".
+     */
     @JavascriptInterface
     public void downloadSpeech(int id) {
         if (!ok()) return;
-        if (speechDownloading) {
-            done(id, false, "Already downloading");
+        if (downloading) {
+            done(id, false, speechDownloading ? "Already downloading" : "The AI model is downloading. Wait until it is done, then download speech to text.");
             return;
         }
         speechDownloading = true;
+        downloading = true;
         net.execute(() -> {
-            File zip = new File(act.ctx().getCacheDir(), SpeechModel.NAME + ".zip");
             try {
-                model.download(SpeechModel.URL, zip, (d, t) -> progress("speech", d, t));
-                File root = SpeechModel.root(act.ctx());
-                root.mkdirs();
-                SpeechModel.unpack(zip, root);
+                ModelZip.fetch(model.verifier(), ModelCatalog.SPEECH, speechZip(), SpeechModel.root(act.ctx()), ModelCatalog.SPEECH_ZIP,
+                        (d, t) -> progress("speech", d, t));
                 if (SpeechModel.dir(act.ctx()) == null) throw new IOException("The speech model did not unpack");
                 done(id, true, "ready");
             } catch (InterruptedIOException e) {
@@ -1204,8 +1213,8 @@ final class LocalBridge {
             } catch (Exception e) {
                 done(id, false, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             } finally {
-                zip.delete();
-                speechDownloading = false;
+                speechDownloading = false;  // first: once "downloading" is free, a new download may start and set its own label
+                downloading = false;
             }
         });
     }
