@@ -6,6 +6,24 @@ section here. A merge builds and tests the APK (kept as the workflow artifact); 
 notes and points `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.19
+- The AI models you download in Settings (Qwen2.5 1.5B, Gemma 4 E2B and Gemma 4 E4B) are now checked. Reel Shelf knows the
+  exact size and the fingerprint (SHA-256) of each published file and the exact version to fetch, so it no longer follows
+  whatever Hugging Face shows as the newest file. A download is installed only when it has exactly the published size and
+  the matching fingerprint. If the check fails (a cut-off connection, a Wi-Fi sign-in page, a damaged or changed file),
+  nothing is installed, only the unfinished download is removed, and a message tells you what happened. Tap Download to
+  try again.
+- Pausing and continuing works as before. When you continue, the part that was already saved is read once more to check it
+  (a few seconds), and a download paused by an older version is checked the same way at the end.
+- Models are only taken from Hugging Face (huggingface.co and its own download hosts) over https, and a model that is
+  already installed is never deleted because a new download failed. The page no longer sends a download address: the app
+  uses its own list.
+- Models already on your phone are untouched: this version does not check, move or delete them, and a model file you pick
+  yourself works as before. The speech model download is unchanged.
+- Checked with automatic tests on a computer, including a local test server that sends damaged, cut-off, wrong-size and
+  redirected files. The three published files were also downloaded once on a computer: their size and fingerprint match
+  the list. Not tried on a phone.
+
 ## 1.3.18
 - Reel Shelf now cleans up its own leftover temporary files after a crash or a force-stop. It does this once each time
   the app starts, about 20 seconds after you open it, and only if no job and no nightly run is running at that moment.

@@ -257,12 +257,24 @@ def test_custom_prompt_and_model_settings_are_used(phone):
     dl = [c for c in phone.rn()["calls"] if c[0] == "download"][0]
     assert ["update", "Downloading the AI model"] in phone.rn()["work"]  # keeps going after leaving the app, with Stop
     phone.wait_for_function("() => (window.__rn.work || []).slice(-1)[0][0] === 'end'")
-    assert dl[1].startswith("https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/") and dl[2].endswith(".litertlm")
+    assert dl[1] == "" and dl[2] == "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm"  # the page names the model; Java knows the pinned address
     phone.get_by_text("running on GPU").wait_for()
     phone.evaluate("() => { const s = window.__rn; s.shared.push('https://www.instagram.com/reel/CCC333/'); sessionStorage.setItem('rn', JSON.stringify(s)); onAppResume(); }")
     phone.goto(phone.url.split("#")[0] + "#/r/CCC333")
     phone.get_by_role("button", name="Ask Meta AI").click()
     assert phone.rn()["copied"] == "My master prompt for https://www.instagram.com/reel/CCC333/ please"
+
+
+def test_the_page_names_models_but_never_an_address():
+    """Java picks the pinned address from its own table (ModelCatalog); the page only names the model."""
+    import re
+    js = (LOCAL / "local.js").read_text(encoding="utf-8")
+    assert "resolve/main" not in js and "huggingface.co" not in js
+    models = js[js.index("const MODELS = ["):js.index("\n];", js.index("const MODELS = ["))]
+    assert len(re.findall(r"\bfile: \"[^\"]+\.litertlm\"", models)) == 3
+    assert not re.search(r"\burl\s*:", models)  # no address field in MODELS
+    sent = re.findall(r"phone\(\"downloadModel\",\s*([^,]*),", js)
+    assert len(sent) == 2 and all(a.strip() == '""' for a in sent)  # every download call sends an empty address
 
 
 def test_bulk_paste_links_and_old_answers(phone):

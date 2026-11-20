@@ -581,12 +581,13 @@ final class LocalBridge {
         return o.toString();
     }
 
+    /** Downloads one of the models in ModelCatalog by its file name. The address the page sends (url) is ignored: Java knows the pinned one. */
     @JavascriptInterface
     public void downloadModel(int id, String url, String name) {
         if (!ok()) return;
-        String u = url == null || url.isEmpty() ? LocalModel.DEFAULT_URL : url;
-        if (!u.startsWith("https://huggingface.co/")) {
-            done(id, false, "Models can only be downloaded from huggingface.co");
+        ModelCatalog.Entry entry = ModelCatalog.lookup(name);
+        if (entry == null) {
+            done(id, false, ModelCatalog.UNKNOWN);
             return;
         }
         if (downloading) {
@@ -596,7 +597,7 @@ final class LocalBridge {
         downloading = true;
         net.execute(() -> {
             try {
-                model.download(u, model.file(name), (d, t) -> progress("download", d, t));
+                model.download(entry, (d, t) -> progress("download", d, t));
                 done(id, true, "ready");
             } catch (InterruptedIOException e) {
                 done(id, false, "paused");
