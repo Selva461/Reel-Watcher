@@ -821,23 +821,59 @@ const Notes = (() => {
     return { topic, points: best, meaning: "", use: [], tools, takeaway: ranked.slice().sort((a, b) => b.v - a.v)[0].s.slice(0, 300), tags };
   }
 
-  /** A question answered only from your own notes, citing them as [1], [2]... */
-  function answerPrompt(question, results) {
-    const src = results.map((x, i) => `[${i + 1}] ${format(x.reel.notes || {}) || (x.reel.caption || "").slice(0, 800)}`).join("\n\n");
-    return `Answer my question using only my notes below (from reels I watched). Be specific: give the steps, names, numbers ` +
-      `and tools from the notes. After each fact, write the note number like [1]. If the notes do not answer it, say so.\n\n` +
-      `Question: ${question}\n\nMy notes:\n\n${src}`;
+  // ---------------------------------------------------------------- the Ask prompts, and their budget
+  // What the phone's AI is told besides the prompt (LocalModel's system text): counted in the budget, so the page uses these.
+  const ASK_SYSTEM = "You answer only from the notes you are given, briefly, citing them like [1].";
+  const WEB_ASK_SYSTEM = "You answer only from the notes and web results you are given, briefly, citing them like [1] or [W1].";
+
+  /** The note as the Ask prompts show it: its number and its notes (a reel with no notes: the start of its caption). */
+  const askNote = (x, i) => `[${i + 1}] ${format(x.reel.notes || {}) || (x.reel.caption || "").slice(0, 800)}`;
+
+  const askText = (question, notes) =>
+    `Answer my question using only my notes below (from reels I watched). Be specific: give the steps, names, numbers ` +
+    `and tools from the notes. After each fact, write the note number like [1]. If the notes do not answer it, say so.\n\n` +
+    `Question: ${question}\n\nMy notes:\n\n${notes.join("\n\n")}`;
+
+  const webAskText = (question, notes, found) =>
+    `Answer my question briefly and accurately. Use my notes first; use the web results only for what my notes do not ` +
+    `cover. After each fact, write where it came from, like [1] or [W1]. A fact from the web needs two web results that both ` +
+    `say it: cite both, like [W1][W2]. If only one says it, still cite it. If neither answers it, say so; do not guess.\n\n` +
+    `Question: ${question}\n\n${notes.length ? `My notes:\n\n${notes.join("\n\n")}\n\n` : ""}Web results:\n\n${found.join("\n\n")}`;
+
+  /** Fills an Ask prompt for `budget` tokens (no budget: no limit). `build(question, notes, found)` makes the text from the question,
+   *  the notes ("[1] ...") and the web results ("[W1] ..."). A prompt that already fits is built whole, exactly as it was before
+   *  there was a budget. Otherwise the instructions are kept; the question is cut (at a word, ending " [shortened]") only when it does
+   *  not fit with them; then the notes go in WHOLE, in the order given (best match first), while the next one fits (a note that does
+   *  not fit whole is left out, and so are all after it, so the numbers [1].. stay those of the screen); then the web results the same
+   *  way in what is left. Nothing is cut in the middle. When not even a word of the question fits, it is kept whole. */
+  function askFill(build, question, notes, found, budget) {
+    const limit = Number.isFinite(budget) ? budget : Infinity;
+    const full = build(question, notes, found);
+    const done = (q, n, w) => ({ prompt: n === notes.length && w === found.length && q === question ? full : build(q, notes.slice(0, n), found.slice(0, w)),
+      used: n, total: notes.length, webUsed: w, webTotal: found.length, questionCut: q !== question });
+    if (!(estTokens(full) > limit)) return done(question, notes.length, found.length);
+    let q = question;
+    if (estTokens(build(q, [], [])) > limit) {
+      const [ba, bo] = counts(build("", [], [])), [ma, mo] = counts(SHORT);
+      q = cutStart(question, (a, o) => tokensOf(ba + ma + a, bo + mo + o) <= limit) || question;
+    }
+    let n = 0, w = 0;
+    while (n < notes.length && !(estTokens(build(q, notes.slice(0, n + 1), [])) > limit)) n++;
+    while (w < found.length && !(estTokens(build(q, notes.slice(0, n), found.slice(0, w + 1))) > limit)) w++;
+    return done(q, n, w);
   }
 
-  /** The question with your notes [1].. and what the web lookup found [W1].. (Wikipedia, DuckDuckGo). */
-  function webAnswerPrompt(question, results, web) {
-    const notes = results.map((x, i) => `[${i + 1}] ${format(x.reel.notes || {}) || (x.reel.caption || "").slice(0, 800)}`).join("\n\n");
-    const found = web.map((w, i) => `[W${i + 1}] ${w.title} (${w.source}): ${w.text}`).join("\n\n");
-    return `Answer my question briefly and accurately. Use my notes first; use the web results only for what my notes do not ` +
-      `cover. After each fact, write where it came from, like [1] or [W1]. A fact from the web needs two web results that both ` +
-      `say it: cite both, like [W1][W2]. If only one says it, still cite it. If neither answers it, say so; do not guess.\n\n` +
-      `Question: ${question}\n\n${notes ? `My notes:\n\n${notes}\n\n` : ""}Web results:\n\n${found}`;
+  /** A question answered only from your own notes, citing them as [1], [2]... With `opts.budget` (tokens) the prompt and what went in. */
+  function answerPromptInfo(question, results, opts = {}) {
+    return askFill((q, notes) => askText(q, notes), question, results.map(askNote), [], opts.budget);
   }
+  function answerPrompt(question, results) { return answerPromptInfo(question, results).prompt; }
+
+  /** The question with your notes [1].. and what the web lookup found [W1].. (Wikipedia, DuckDuckGo). */
+  function webAnswerPromptInfo(question, results, web, opts = {}) {
+    return askFill(webAskText, question, results.map(askNote), web.map((w, i) => `[W${i + 1}] ${w.title} (${w.source}): ${w.text}`), opts.budget);
+  }
+  function webAnswerPrompt(question, results, web) { return webAnswerPromptInfo(question, results, web).prompt; }
 
   /** Each sentence of a web answer that rests on a single web page (one [Wn], no note [n]) is marked "(one source)". */
   function markOneSource(text, web) {
@@ -1080,6 +1116,6 @@ const Notes = (() => {
 
   return { keepBacked, username, reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, localPromptInfo, estTokens, promptBudget, material, RETRY_CAP, retryAfter, embedUrl, readPage,
     ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
-    YT_CLIENTS, condense, search, answerPrompt, webAnswerPrompt, markOneSource, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
+    YT_CLIENTS, condense, search, answerPrompt, answerPromptInfo, webAnswerPrompt, webAnswerPromptInfo, ASK_SYSTEM, WEB_ASK_SYSTEM, markOneSource, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
     exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS };
 })();
