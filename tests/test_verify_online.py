@@ -94,7 +94,7 @@ def test_tmdb_key_and_nightly_switch_in_settings(phone):
     phone.get_by_role("switch", name="Check new titles every night").wait_for()
     assert phone.get_by_role("switch", name="Check new titles every night").get_attribute("aria-checked") == "true"
     # the key never goes into the exports
-    phone.get_by_role("button", name="Save JSON").click()
+    phone.get_by_role("button", name="Export notes (JSON, cannot be restored)").click()
     phone.wait_for_function("window.__rn.saved.length > 0")
     assert "my-own-key" not in json.dumps(phone.rn()["saved"])
 

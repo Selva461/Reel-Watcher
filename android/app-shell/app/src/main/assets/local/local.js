@@ -127,13 +127,10 @@ function reel(code) { return db.reels.find((r) => r.code === code || r.ig_code =
 
 const MODELS = [
   { id: "qwen", name: "Qwen2.5 1.5B", file: "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
-    url: "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
     size: 1.6e9, note: "Free, about 1.6 GB, good for English notes. Needs a phone with 6 GB of RAM or more." },
   { id: "gemma4", name: "Gemma 4 E2B (watches the reel)", file: "gemma-4-E2B-it.litertlm",
-    url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
     size: 2.59e9, note: "Recommended. Free, about 2.6 GB. Looks at key frames and listens to the sound of each reel, plus the text on screen and what is said, then writes the intent, tone and points. About a minute per reel: best at night on the charger." },
   { id: "gemma4e4", name: "Gemma 4 E4B (best quality, slower)", file: "gemma-4-E4B-it.litertlm",
-    url: "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm",
     size: 3.66e9, note: "Free, about 3.7 GB. Same as E2B but more accurate, about twice as slow. Needs 8 GB of RAM or more." },
 ];
 const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en", tmdbKey: "", omdbKey: "", metaAi: false, webLookup: false };
@@ -628,7 +625,8 @@ function stopRun() {
 
 // ------------------------------------------------------------------ overnight run: everything in one go (stops below 40% battery)
 // 1. the on-phone AI model (downloaded if missing), 2. Start on every reel waiting, 3. screenshots, 4. titles checked
-// online, 5. a JSON backup in Downloads/ReelShelf. One notification with Stop the whole time. Never starts by itself.
+// online, 5. the notes saved as JSON in Downloads/ReelShelf (an export that cannot be restored, not a backup: that is Back up now in Settings).
+// One notification with Stop the whole time. Never starts by itself.
 let night = null;
 function nightText() {
   if (!night) return "";
@@ -655,7 +653,7 @@ async function overnightRun(auto) {
     else if (!mi.ready) {  // at night only a download you already started is continued
       const m = MODELS.find((x) => x.file === settings.modelFile) || MODELS[0];
       onProgress.download = (d, t) => { night.detail = `Downloading the AI model: ${mb(d)} of ${mb(t > 0 ? t : m.size)}`; };
-      try { await phone("downloadModel", m.url, m.file); say("AI model downloaded"); }
+      try { await phone("downloadModel", "", m.file); say("AI model downloaded"); }
       catch (e) { say("AI model not downloaded (" + e.message + "): notes are written without AI"); }
     } else say("AI model ready");
     if (!night.stop) {
@@ -680,9 +678,9 @@ async function overnightRun(auto) {
       say("Titles checked online");
     }
     if (!night.stop && !auto) {
-      night.step = "backup"; night.detail = "Saving a JSON copy";
+      night.step = "export"; night.detail = "Saving your notes as JSON";
       const where = await phone("saveFile", `reel-notes-${new Date().toISOString().slice(0, 10)}.json`, "application/json", Notes.exportJson(db.reels)).catch(() => "");
-      if (where) say("Backup saved to " + where);
+      if (where) say("Notes exported to " + where + ". This is not a backup you can restore: use Back up now in Settings.");
     }
   } finally {
     if (night.stop) say("Stopped");
@@ -1187,7 +1185,7 @@ function runScreen() {
       <p class="hint">Start reads each reel: its caption, the text shown on screen and${speechInfo().ready ? "" : " (after you download the speech model in Settings)"} what is said. Instagram is asked gently, one reel every few seconds, with no account.</p>
       <a class="btn block" href="#/shots" id="shotsbtn">${ICON.search} Read my screenshots</a>
       <div class="card stack"><strong>Overnight run</strong>
-        <span class="hint">Plug in the charger, tap this and leave the phone. In one go: downloads the on-phone AI if needed, writes notes for every reel waiting, reads your screenshots, checks titles online and saves a backup to Downloads/ReelShelf. A notification shows it, with Stop.</span>
+        <span class="hint">Plug in the charger, tap this and leave the phone. In one go: downloads the on-phone AI if needed, writes notes for every reel waiting, reads your screenshots, checks titles online and saves your notes as a JSON file to Downloads/ReelShelf (an export, not a backup you can restore: use Back up now in Settings for that). A notification shows it, with Stop.</span>
         ${night && !night.finished ? `<strong>${esc("Now: " + night.step)}</strong><span class="small muted">${esc(nightText())}</span>`
           : `<button class="btn block" id="night">Run everything overnight</button>`}
         ${night && night.log.length ? `<span class="small muted">${night.log.map(esc).join("<br>")}</span>` : ""}
@@ -1247,6 +1245,45 @@ function bindSpeech() {
   bind("#delsp", "click", () => { if (confirm("Delete the speech model? Reels will then be read without their spoken words.")) { sync("deleteSpeech"); settingsScreen(); } });
 }
 
+// ------------------------------------------------------------------ Back up now (Settings): one ZIP with the whole library
+// The phone makes it, checks it can be read back, and saves it to Downloads/ReelShelf (RN.backupLibrary). The page only passes the counts to show.
+// Restoring a backup is not here yet. Library locked or newer: the locked screens show instead of Settings, so there is no button.
+let backup = { running: false, result: null };  // result: {ok: true, name, where, bytes, counts, uninstall_warning, shots_skipped} or {ok: false, text}
+function backupSize(n) { return n < 1048576 ? Math.max(1, Math.round(n / 1024)) + " KB" : mb(n); }
+function backupInner() {
+  const r = backup.result;
+  const status = backup.running ? `<span class="small" role="status">Making the backup. A big library can take a minute. Please keep the app open.</span>`
+    : !r ? ""
+    : r.ok ? `<span class="small" role="status"><strong>Saved to ${esc(r.where)}</strong> (${esc(plural(Number(r.counts.reels) || 0, "reel"))}, ${esc(plural(Number(r.counts.titles) || 0, "title"))}, ${esc(backupSize(Number(r.bytes) || 0))})</span>
+      ${r.uninstall_warning ? `<span class="small"><strong>This file is in the app's own folder on this version of Android, so it is deleted if you uninstall Reel Shelf.</strong> Copy it somewhere else (for example with a file manager) to keep it.</span>` : ""}
+      ${r.shots_skipped ? `<span class="small">The list of read screenshots could not be read, so it is not in this backup. It can be made again from your pictures.</span>` : ""}`
+    : `<span class="small" role="alert"><strong>${esc(r.text)}</strong></span>`;
+  return `<h2>Backup and restore</h2>
+    <div class="card stack">
+      <button class="btn primary block" id="backupnow" ${backup.running ? "disabled" : ""}>${backup.running ? "Backing up..." : "Back up now"}</button>
+      ${status}
+      <p class="hint">The backup contains all your reels, notes, watchlist, quotes and products. Anyone who gets the file can read them. It does not contain your settings, API keys, AI models, pictures or videos. It also holds a short part of the text read from each of your screenshots, and their file names.</p>
+      <p class="hint">It is saved in Downloads/ReelShelf. Keep it somewhere safe, or delete it when you no longer need it: Reel Shelf never deletes old backups for you. Restoring a backup is not in this version yet.</p>
+    </div>`;
+}
+function paintBackup() {
+  const el = document.getElementById("backup");
+  if (!el) return;  // left Settings meanwhile: the result is shown when you come back
+  el.innerHTML = backupInner();
+  bind("#backupnow", "click", backupNow);
+}
+function backupNow() {
+  if (backup.running) return;
+  backup = { running: true, result: null };
+  paintBackup();
+  const counts = { reels: db.reels.length, titles: (db.media || []).length, screenshots: typeof Shots !== "undefined" ? Shots.total() : 0 };
+  phone("backupLibrary", JSON.stringify(counts)).then((t) => {
+    let r = null;
+    try { r = JSON.parse(t); } catch (e) { /* the sentence below */ }
+    backup = { running: false, result: r && typeof r === "object" && r.counts && typeof r.counts === "object" ? { ...r, ok: true } : { ok: false, text: "The backup could not be saved. Your library was not changed." } };
+  }, (e) => { backup = { running: false, result: { ok: false, text: e.message } }; }).then(paintBackup);
+}
+
 function settingsScreen() {
   const info = modelInfo();
   const m = MODELS.find((x) => x.file === settings.modelFile);
@@ -1288,11 +1325,13 @@ function settingsScreen() {
     </div>
     ${nightSettingsHtml()}
     ${Verify.settingsHtml()}
+    <div class="stack" id="backup">${backupInner()}</div>
     <div class="stack"><h2>Export (${plural(db.reels.length, "reel")})</h2>
-      <div class="grid2"><button class="btn" id="exjson">Save JSON</button><button class="btn" id="exmd">Save Markdown</button></div>
+      <button class="btn block" id="exjson">Export notes (JSON, cannot be restored)</button>
+      <button class="btn block" id="exmd">Save Markdown</button>
       <div class="grid2"><button class="btn" id="exshare">Share notes</button><button class="btn" id="excopy">Copy all</button></div>
       <button class="btn block" id="excsv">Save watchlist (${plural((db.media || []).length, "title")}, CSV)</button>
-      <p class="hint">Files go to Downloads/ReelShelf. Send the JSON to Claude to analyze all your reels together.</p>
+      <p class="hint">Files go to Downloads/ReelShelf. Send the JSON to Claude to analyze all your reels together. An export keeps only your notes and cannot be restored: to keep everything, use Back up now.</p>
     </div>
     <p class="hint">Sharing a reel only saves it. Work starts only when you tap Start (or Process); it can keep going after you leave the app, always with a notification and a Stop button, and ends when done.</p>
     <button class="btn block danger" id="wipe">Delete all reels and notes</button>`;
@@ -1310,7 +1349,7 @@ function settingsScreen() {
     };
     modelDl = { d: 0, t: m.size };
     workTick();
-    phone("downloadModel", m.url, m.file).then(() => { modelDl = null; toast("The AI model is ready"); if (location.hash === "#/settings") settingsScreen(); })
+    phone("downloadModel", "", m.file).then(() => { modelDl = null; toast("The AI model is ready"); if (location.hash === "#/settings") settingsScreen(); })
       .catch((err) => { modelDl = null; if (err.message !== "paused") toast(err.message); if (location.hash === "#/settings") settingsScreen(); });
     setTimeout(() => { if (location.hash === "#/settings") settingsScreen(); }, 300);
   });
@@ -1329,6 +1368,7 @@ function settingsScreen() {
   bind("#savep", "click", () => { settings.prompt = document.getElementById("prompt").value.slice(0, 8000) || Notes.META_PROMPT; saveSettings(); toast("Prompt saved"); });
   bind("#resetp", "click", () => { settings.prompt = Notes.META_PROMPT; saveSettings(); settingsScreen(); toast("Prompt reset"); });
   const stamp = () => new Date().toISOString().slice(0, 10);
+  bind("#backupnow", "click", backupNow);
   bind("#exjson", "click", () => phone("saveFile", `reel-notes-${stamp()}.json`, "application/json", Notes.exportJson(db.reels)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#exmd", "click", () => phone("saveFile", `reel-notes-${stamp()}.md`, "text/markdown", Notes.exportMarkdown(db.reels)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#excsv", "click", () => phone("saveFile", `watchlist-${stamp()}.csv`, "text/csv", Catalog.exportCsv(db)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
