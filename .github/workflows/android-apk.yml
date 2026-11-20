@@ -49,8 +49,10 @@ jobs:
           name: ReelShelf-apk
           path: ReelShelf.apk
       - name: Publish the version release and "apk-latest" (direct download link for your phone)
-        # only builds of the branch phones install from are published; other branches can never replace the APK
-        if: github.ref == 'refs/heads/ccr-d0c0b070-bdpssy' && github.event_name != 'pull_request'
+        # Publishing is a decision of the owner: a merge only builds and tests (the APK stays available as the workflow
+        # artifact above). To publish, run this workflow by hand on the install branch (Actions > Android APK > Run workflow).
+        # Only builds of the branch phones install from are published; other branches can never replace the APK.
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ccr-d0c0b070-bdpssy'
         env:
           GH_TOKEN: ${{ github.token }}
           SIGNED: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}

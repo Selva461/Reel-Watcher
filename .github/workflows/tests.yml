@@ -22,7 +22,23 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # A runner network fault used to hang this step until the 30 minute job limit (seen twice in one hour on PR
+      # #71 and #72, before any test ran). Each apt command now has its own time limit and the whole step is
+      # retried; the step as a whole is capped at 10 minutes so a bad runner fails fast and can be re-run.
+      - name: Install ffmpeg (bounded, retried)
+        timeout-minutes: 10
+        run: |
+          APT="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60"
+          for attempt in 1 2 3; do
+            if timeout -k 15 150 $APT update && timeout -k 15 200 $APT install -y ffmpeg; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            # a kill during an install can leave dpkg half-configured: repair it before the next attempt
+            sudo dpkg --configure -a || true
+            if [ "$attempt" -lt 3 ]; then sleep 10; fi
+          done
+          exit 1
       - run: uv sync --locked
       - run: uv run pytest -q
 
