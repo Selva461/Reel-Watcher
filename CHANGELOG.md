@@ -20,6 +20,15 @@ notes and points `apk-latest` at it. Builds signed with the stable key (GitHub s
   nightly limit the old ones are no longer left behind forever. Start by hand is unchanged (useful reels first).
 - Your library file gets four optional fields on a reel that failed (`tries`, `last_fail_at`, `last_fail`,
   `next_try_at`); older versions keep them. Nothing was tried on a phone yet.
+## 1.3.17
+- Groundwork for backing up and restoring your library. Nothing changes for you yet: there is no button, no screen
+  and nothing in the app uses it, so Reel Shelf looks and works exactly as before. The next versions add "Back up now"
+  and "Restore from a backup" on top of it.
+- What is in place: the code that packs your library into one backup file and that checks a backup file very carefully
+  before it could ever be used (it refuses a damaged, cut, unrecognised or newer-than-this-version file and changes
+  nothing), and the library file's way of being replaced by a backup without deleting anything: the library it
+  replaces is kept next to it under a new name, and a library saved by a newer Reel Shelf is never replaced.
+- Checked with automatic tests on a computer. Not tried on a phone.
 
 ## 1.3.15
 - Your library now carries a small version number (`"schema_version": 1` in the library file), and Reel Shelf checks it
