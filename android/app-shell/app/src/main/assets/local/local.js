@@ -1601,11 +1601,71 @@ function keptGo() {
   });
 }
 
+// ------------------------------------------------------------------ is the model file on the phone the published one?
+// "ready" only means the file exists. info.verified says more: "yes" (it is the published file), "no" (it is not: it may be damaged;
+// it is kept and still works, and you may download it again), "own" (a file you picked yourself), "checking", "unknown".
+let checkOff = new Set();  // models whose check you stopped: not started again until you tap Check now
+function verifyHtml(info, m) {
+  if (!info.verified) return "";
+  if (info.verified === "checking") return `<span class="small muted">Checking this model file against the published one. It can take a minute; the model keeps working meanwhile.</span><button class="btn block" id="vstop">Stop checking</button>`;
+  if (info.verified === "yes") return `<span class="small muted">Verified: this is the published model file.</span>`;
+  if (info.verified === "own") return `<span class="small muted">Your own file, not verified.</span>`;
+  if (info.verified === "no") {
+    const again = m ? `<button class="btn primary" id="redl">${info.partial ? "Continue download" : `Download again (${mb(m.size)})`}</button>` : "";
+    if (info.kept) return `<span class="small muted">Not the published file (you chose to keep using it).</span>${again ? `<div class="grid2">${again}</div>` : ""}`;
+    return `<span class="tag warn">Not the published file</span><span class="small">This model file is not the published one. It may be damaged.</span>
+      <div class="grid2">${again}<button class="btn" id="vkeep">Keep using it</button></div>`;
+  }
+  return `<span class="small muted">Not checked yet.</span><button class="btn block" id="vnow">Check now</button>`;
+}
+/** Draws only the check's own lines again (a check ended, was stopped, or you chose something): never the whole screen, which would wipe a half-typed box. */
+function redrawVerify() {
+  const box = document.getElementById("mverify");
+  if (!box || location.hash !== "#/settings") return;
+  box.innerHTML = verifyHtml(modelInfo(), MODELS.find((x) => x.file === settings.modelFile));
+  bindVerify();
+}
+function bindVerify() {
+  const m = MODELS.find((x) => x.file === settings.modelFile);
+  bind("#vstop", "click", () => { checkOff.add(settings.modelFile); sync("stopCheck"); redrawVerify(); });
+  bind("#vnow", "click", () => {
+    checkOff.delete(settings.modelFile);
+    sync("checkModel", settings.modelFile);
+    if (modelInfo().verified === "unknown") toast("Not now: the check needs the app open, no download or job running, and a battery that is not low.");
+    redrawVerify();
+  });
+  bind("#vkeep", "click", () => { sync("keepModel", settings.modelFile); toast("Kept. Notes keep using this model file."); redrawVerify(); });
+  bind("#redl", "click", () => { if (m) startModelDownload(m); });
+}
+
+/** Downloads (or continues, or downloads again over a file that is not the published one) the model m from Settings. The old file stays until the new one is complete and verified. */
+function startModelDownload(m) {
+  onProgress.download = (d, t) => {
+    const bar = document.getElementById("mbar");
+    const txt = document.getElementById("mtext");
+    const tot = t > 0 ? t : m.size;
+    if (bar) bar.style.width = Math.round((d / tot) * 100) + "%";
+    if (txt) txt.textContent = `${mb(d)} of ${mb(tot)}`;
+    modelDl = { d, t: tot, file: m.file };
+  };
+  modelDl = { d: 0, t: m.size, file: m.file };  // which model: the phone has one download flag, so another model's card must not look like it downloads
+  workTick();
+  phone("downloadModel", "", m.file).then(() => { modelDl = null; toast("The AI model is ready"); if (location.hash === "#/settings") settingsScreen(); })
+    .catch((err) => { modelDl = null; if (err.message !== "paused") toast(err.message); if (location.hash === "#/settings") settingsScreen(); });
+  setTimeout(() => { if (location.hash === "#/settings") settingsScreen(); }, 300);
+}
+
 function settingsScreen() {
-  const info = modelInfo();
+  let info = modelInfo();
+  if (info.ready && info.verified === "unknown" && !checkOff.has(settings.modelFile)) {  // the one-time check of a model already on the phone (Java decides if it may start now)
+    sync("checkModel", settings.modelFile);
+    info = modelInfo();
+  }
+  onProgress.check = redrawVerify;
   const m = MODELS.find((x) => x.file === settings.modelFile);
   const others = (info.installed || []).filter((f) => !MODELS.some((x) => x.file === f));
   const dl = !!info.downloading;
+  const redl = !!(info.ready && dl && m && modelDl && modelDl.file === m.file);  // downloading again over a model file that is already there (this card's file, not another model's download)
   const pct = m && info.partial ? Math.round((info.partial / m.size) * 100) : 0;
   const seg = (key, opts) => `<div class="seg">${opts.map(([v, l]) => `<button data-set="${key}" data-val="${esc(JSON.stringify(v))}" aria-pressed="${settings[key] === v}">${l}</button>`).join("")}</div>`;
   $app.innerHTML = `${header("Settings", "#/")}
@@ -1615,11 +1675,12 @@ function settingsScreen() {
       <p class="hint">Only your question is sent (no notes, no account, no AI service). Answers show their links. Off by default.</p></div>
     <div class="stack"><h2>On-phone AI</h2>
       <div class="card stack">
-        <div class="row between"><strong>${esc(m ? m.name : settings.modelFile)}</strong><span class="tag ${info.ready ? "ok" : "warn"}" id="mstate">${info.ready ? "Ready" : dl ? "Downloading" : info.partial ? "Paused" : "Not downloaded"}</span></div>
+        <div class="row between"><strong>${esc(m ? m.name : settings.modelFile)}</strong><span class="tag ${info.ready ? "ok" : "warn"}" id="mstate">${redl ? "Downloading again" : info.ready ? "Ready" : dl ? "Downloading" : info.partial ? "Paused" : "Not downloaded"}</span></div>
         <span class="small muted">${esc(m ? m.note : "Your own model file")}</span>
-        ${!info.ready && m ? `<span class="bar"><span id="mbar" style="width:${pct}%"></span></span><span class="small muted" id="mtext">${info.partial ? `${mb(info.partial)} of ${mb(m.size)}` : `${mb(m.size)} to download. Use Wi-Fi.`}</span>` : ""}
+        ${(!info.ready || redl) && m ? `<span class="bar"><span id="mbar" style="width:${pct}%"></span></span><span class="small muted" id="mtext">${info.partial ? `${mb(info.partial)} of ${mb(m.size)}` : `${mb(m.size)} to download. Use Wi-Fi.`}</span>` : ""}
         ${info.ready ? `<span class="small muted">${mb(info.bytes)} on this phone${info.backend ? ` · running on ${info.backend.toUpperCase()}` : ""}</span>` : ""}
-        ${!info.ready && m ? (dl ? `<button class="btn block" id="pause">Pause download</button>` : `<button class="btn primary block" id="dl">${info.partial ? "Continue download" : "Download model"}</button>`) : ""}
+        ${info.ready && !redl && info.verified ? `<div class="stack" id="mverify">${verifyHtml(info, m)}</div>` : ""}
+        ${(!info.ready || redl) && m ? (dl ? `<button class="btn block" id="pause">Pause download</button>` : `<button class="btn primary block" id="dl">${info.partial ? "Continue download" : "Download model"}</button>`) : ""}
         ${info.ready || info.partial ? `<button class="btn block danger" id="delm">Delete the model</button>` : ""}
         <p class="hint">The download keeps going if you leave the app, with a notification and a Stop button. If it stops, it continues from where it stopped (also during the nightly run).</p>
       </div>
@@ -1655,21 +1716,8 @@ function settingsScreen() {
   Verify.bindSettings(settingsScreen);
   bindSpeech();
   bind("[data-set]", "click", (e, b) => { settings[b.dataset.set] = JSON.parse(b.dataset.val); saveSettings(); settingsScreen(); });
-  bind("#dl", "click", () => {
-    onProgress.download = (d, t) => {
-      const bar = document.getElementById("mbar");
-      const txt = document.getElementById("mtext");
-      const tot = t > 0 ? t : m.size;
-      if (bar) bar.style.width = Math.round((d / tot) * 100) + "%";
-      if (txt) txt.textContent = `${mb(d)} of ${mb(tot)}`;
-      modelDl = { d, t: tot };
-    };
-    modelDl = { d: 0, t: m.size };
-    workTick();
-    phone("downloadModel", "", m.file).then(() => { modelDl = null; toast("The AI model is ready"); if (location.hash === "#/settings") settingsScreen(); })
-      .catch((err) => { modelDl = null; if (err.message !== "paused") toast(err.message); if (location.hash === "#/settings") settingsScreen(); });
-    setTimeout(() => { if (location.hash === "#/settings") settingsScreen(); }, 300);
-  });
+  bind("#dl", "click", () => startModelDownload(m));
+  bindVerify();
   bind("#pause", "click", () => { sync("stopModel"); modelDl = null; workTick(); setTimeout(settingsScreen, 400); });
   bind("#delm", "click", () => { if (confirm("Delete the AI model from this phone? You can download it again later.")) { sync("deleteModel", settings.modelFile); settingsScreen(); } });
   bind("#own", "click", () => {

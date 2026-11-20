@@ -298,6 +298,7 @@ public class MainActivity extends Activity implements Host {
     @Override
     protected void onResume() {
         super.onResume();
+        if (local != null) local.screen(true);  // a model check may run while the app is on screen
         web.onResume();
         callPage("window.onAppResume && onAppResume()");
     }
@@ -314,6 +315,7 @@ public class MainActivity extends Activity implements Host {
      */
     @Override
     protected void onStop() {
+        if (local != null) local.screen(false);  // a model check stops here even when a job you started goes on
         if (!working) {
             callPage("window.onAppPause && onAppPause()");
             if (local != null) local.pause();
