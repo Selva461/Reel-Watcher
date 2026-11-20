@@ -30,8 +30,7 @@ import java.util.Collections;
  */
 final class LocalModel {
     /** Default model: Qwen2.5 1.5B Instruct, 8-bit, Apache 2.0, about 1.6 GB, free to download without an account. */
-    static final String DEFAULT_FILE = "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm";
-    static final String DEFAULT_URL = "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/" + DEFAULT_FILE;
+    static final String DEFAULT_FILE = ModelCatalog.DEFAULT.file;
 
     interface Progress {
         void on(long done, long total);
@@ -84,7 +83,16 @@ final class LocalModel {
 
     // ------------------------------------------------------------------ download (only while the app is open)
 
-    /** Downloads url into dest, resuming a partial download. Throws InterruptedIOException("paused") when stopped. */
+    /**
+     * Downloads a catalog model into the models folder, resuming a partial download, and installs it only when its size
+     * and SHA-256 are the catalog's (see ModelVerifier). Throws InterruptedIOException("paused") when stopped.
+     */
+    void download(ModelCatalog.Entry e, ModelVerifier.Progress p) throws IOException {
+        stop = false;
+        new ModelVerifier(() -> stop).download(e, file(e.file), p);
+    }
+
+    /** Downloads url into dest, resuming a partial download, with no check of the content (the speech model only). Throws InterruptedIOException("paused") when stopped. */
     void download(String url, File dest, Progress p) throws IOException {
         stop = false;
         File part = new File(dest.getPath() + ".part");
