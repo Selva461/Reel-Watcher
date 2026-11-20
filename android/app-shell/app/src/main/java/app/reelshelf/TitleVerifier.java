@@ -1,0 +1,1360 @@
+package app.reelshelf;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * Checks watchlist titles against free online databases and fills in year, language, genres and poster.
+ * Movies and series: TMDB (with your own free key) or Wikidata (no key). Anime: AniList and Jikan (MyAnimeList).
+ * Manga: AniList and MangaDex. When none of them finds it, Wikipedia's search (which forgives misspelt names) is
+ * asked, and its pages are read through Wikidata. Matching is plain maths (TitleMatch), no AI.
+ * Nothing is left for you to check: the best match is picked automatically and its official name replaces the one
+ * read from the screenshot. It is "verified" only when two independent sources agree on it (name, year and kind,
+ * or a shared database id); close calls (remakes, an anime and its manga) go to the one more sources agree on.
+ * Anything only one source has is "not_found" and is tried again later; nothing is renamed on a guess.
+ * Pure Java (no Android classes) so it is tested on a computer; the network is behind {@link Http}.
+ */
+final class TitleVerifier {
+    static final double REVIEW = 0.55;
+    /** Below this best score, Wikipedia's search (which forgives misspellings) is asked as well. */
+    static final double AUTO = 0.75;
+
+    // ------------------------------------------------------------------ network
+
+    static final class Res {
+        final int code;
+        final String body;
+        final long retryAfterMs;
+
+        Res(int code, String body, long retryAfterMs) {
+            this.code = code;
+            this.body = body == null ? "" : body;
+            this.retryAfterMs = retryAfterMs;
+        }
+    }
+
+    interface Http {
+        /** body null for GET. */
+        Res send(String url, String body, Map<String, String> headers) throws IOException;
+    }
+
+    /** The real network: plain HTTPS, no cookies, no account. */
+    static final Http NET = (url, body, headers) -> {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        try {
+            c.setConnectTimeout(15000);
+            c.setReadTimeout(20000);
+            c.setRequestProperty("User-Agent", "ReelShelf/0.5 (personal watchlist app)");
+            c.setRequestProperty("Accept", "application/json");
+            for (Map.Entry<String, String> h : headers.entrySet()) c.setRequestProperty(h.getKey(), h.getValue());
+            if (body != null) {
+                c.setRequestMethod("POST");
+                c.setDoOutput(true);
+                c.setRequestProperty("Content-Type", "application/json");
+                try (OutputStream out = c.getOutputStream()) {
+                    out.write(body.getBytes(StandardCharsets.UTF_8));
+                }
+            }
+            int code = c.getResponseCode();
+            long retry = 0;
+            String ra = c.getHeaderField("Retry-After");
+            if (ra != null) try {
+                retry = Long.parseLong(ra.trim()) * 1000;
+            } catch (NumberFormatException ignored) {
+                retry = 5000;
+            }
+            InputStream in = code < 400 ? c.getInputStream() : c.getErrorStream();
+            ByteArrayOutputStream b = new ByteArrayOutputStream();
+            if (in != null) try (InputStream s = in) {
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = s.read(buf)) > 0 && b.size() < 2_000_000) b.write(buf, 0, n);
+            }
+            return new Res(code, b.toString("UTF-8"), retry);
+        } finally {
+            c.disconnect();
+        }
+    };
+
+    /** Sleeping, replaceable in tests so they run instantly. */
+    interface Clock {
+        long now();
+
+        void sleep(long ms) throws InterruptedException;
+    }
+
+    static final Clock REAL_CLOCK = new Clock() {
+        public long now() {
+            return System.currentTimeMillis();
+        }
+
+        public void sleep(long ms) throws InterruptedException {
+            Thread.sleep(ms);
+        }
+    };
+
+    /**
+     * Polite gaps between calls to each service (their published limits, with room to spare). Shared by every title
+     * being checked at the same time, so 10 at once never go faster than this: AniList 90 a minute (it says 30 when
+     * busy), Jikan 3 a second and 60 a minute, MangaDex 5 a second, TMDB about 40 a second, Wikimedia asks for calm.
+     */
+    private static final Map<String, Long> GAP = new HashMap<>();
+
+    static {
+        GAP.put("api.jikan.moe", 1200L);
+        GAP.put("graphql.anilist.co", 2100L);
+        GAP.put("api.mangadex.org", 250L);
+        GAP.put("www.wikidata.org", 150L);
+        GAP.put("en.wikipedia.org", 150L);
+        GAP.put("www.omdbapi.com", 200L);
+        GAP.put("api.themoviedb.org", 50L);
+    }
+
+    private final Http http;
+    private final Clock clock;
+    private final String tmdbKey;
+    /** Your own free OMDb key (Settings), for IMDb ratings; empty = no IMDb rating. Sent only to omdbapi.com. */
+    String omdbKey = "";
+    private final AtomicBoolean stop;
+    /** The next moment each service may be called (a queue of slots, safe for several titles checked at once). */
+    private final Map<String, Long> nextSlot = new HashMap<>();
+    /** Services that failed for network reasons in this run (so one title's failure is not a "not found"). */
+    int networkFailures;
+
+    TitleVerifier(Http http, Clock clock, String tmdbKey, AtomicBoolean stop) {
+        this.http = http;
+        this.clock = clock;
+        this.tmdbKey = tmdbKey == null ? "" : tmdbKey.trim();
+        this.stop = stop == null ? new AtomicBoolean(false) : stop;
+    }
+
+    static final class Stopped extends IOException {
+        Stopped() {
+            super("stopped");
+        }
+    }
+
+    private String call(String url, String body, Map<String, String> headers) throws IOException {
+        String host = url.replaceFirst("^https?://", "").split("[/?:]", 2)[0];
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (stop.get()) throw new Stopped();
+            long gap = GAP.containsKey(host) ? GAP.get(host) : 300L;
+            long wait;
+            synchronized (nextSlot) {  // take the next free slot for this service
+                long now = clock.now();
+                Long next = nextSlot.get(host);
+                long at = next == null ? now : Math.max(now, next);
+                nextSlot.put(host, at + gap);
+                wait = at - now;
+            }
+            try {
+                if (wait > 0) clock.sleep(wait);
+            } catch (InterruptedException e) {
+                throw new Stopped();
+            }
+            Res r = http.send(url, body, headers == null ? new HashMap<>() : headers);
+            if (r.code == 200) return r.body;
+            if (r.code == 404) return "";
+            if (r.code == 429 || r.code >= 500) {  // busy: everyone waits as asked (at most 30 s), then this one tries again
+                long back = Math.min(30000, Math.max(r.retryAfterMs, 2000L * (attempt + 1)));
+                synchronized (nextSlot) {
+                    long until = clock.now() + back;
+                    Long next = nextSlot.get(host);
+                    if (next == null || next < until) nextSlot.put(host, until);
+                }
+                try {
+                    clock.sleep(back);
+                } catch (InterruptedException e) {
+                    throw new Stopped();
+                }
+                continue;
+            }
+            throw new IOException(host + " answered " + r.code);
+        }
+        throw new IOException(host + " is busy");
+    }
+
+    private static String q(String s) {
+        try {
+            return URLEncoder.encode(s, "UTF-8");
+        } catch (java.io.UnsupportedEncodingException e) {
+            return s;
+        }
+    }
+
+    // ------------------------------------------------------------------ what a source says
+
+    /** One possible title from one source. */
+    static final class Match {
+        String source = "";
+        String id = "";
+        String type = "";     // a watchlist category id (movie, series, kdrama, anime, manga, ...)
+        String title = "";
+        String original = "";
+        List<String> names = new ArrayList<>();
+        int year;
+        String lang = "";
+        String country = "";
+        List<String> genres = new ArrayList<>();
+        String poster = "";
+        String overview = "";
+        String url = "";
+        Map<String, String> ext = new HashMap<>();
+        int rank;             // position in the source's own answer (0 = its best guess)
+        boolean adult;
+        int runtime;          // minutes (a movie's length, or one episode's)
+        int episodes;
+        double rating;        // 0..10, from ratingBy (IMDb, MyAnimeList, TMDB or AniList)
+        String ratingBy = "";
+        int votes;
+        JSONArray seasons;    // [{n, episodes, year, title}] for series and anime with more than one season
+        String seasonsBy = "";  // where the seasons came from, and who agreed ("TMDB, checked with Wikidata")
+        int sources = 1;      // independent services that agree on it (set for choices)
+        double score;
+        double titleScore;
+
+        String group() {
+            return groupOf(type);
+        }
+
+        JSONObject facts() throws JSONException {
+            JSONObject f = new JSONObject();
+            f.put("title", title);
+            if (!original.isEmpty() && !TitleMatch.norm(original).equals(TitleMatch.norm(title))) f.put("original_title", original);
+            f.put("type", type);
+            if (year > 0) f.put("year", year);
+            if (!lang.isEmpty()) f.put("language", lang);
+            if (!country.isEmpty()) f.put("country", country);
+            if (!genres.isEmpty()) f.put("genres", new JSONArray(genres));
+            if (!poster.isEmpty()) f.put("poster", poster);
+            if (!overview.isEmpty()) f.put("overview", overview.length() > 1500 ? overview.substring(0, 1500) : overview);
+            if (runtime > 0) f.put("runtime", runtime);
+            if (episodes > 0) f.put("episodes", episodes);
+            if (rating > 0) f.put("rating", new JSONObject().put("score", rating).put("by", ratingBy).put("votes", votes));
+            if (seasons != null && seasons.length() > 0) f.put("seasons", seasons);
+            if (seasons != null && seasons.length() > 0 && !seasonsBy.isEmpty()) f.put("seasons_by", seasonsBy);
+            JSONArray aka = new JSONArray();
+            for (String n : names) if (!TitleMatch.norm(n).equals(TitleMatch.norm(title)) && aka.length() < 8) aka.put(n);
+            if (aka.length() > 0) f.put("aka", aka);
+            JSONObject e = new JSONObject();
+            for (Map.Entry<String, String> x : ext.entrySet()) if (x.getValue() != null && !x.getValue().isEmpty()) e.put(x.getKey(), x.getValue());
+            f.put("ext", e);
+            return f;
+        }
+
+        JSONObject choice() throws JSONException {
+            JSONObject c = new JSONObject();
+            c.put("source", source);
+            c.put("title", title);
+            c.put("type", type);
+            c.put("year", year);
+            c.put("language", lang);
+            c.put("poster", poster);
+            c.put("url", url);
+            c.put("score", Math.round(score * 100) / 100.0);
+            c.put("sources", sources);  // independent services that have it (2 or more = it really exists)
+            c.put("facts", facts());
+            return c;
+        }
+    }
+
+    static String groupOf(String type) {
+        switch (type == null ? "" : type) {
+            case "manga": case "manhwa": case "manhua": case "webtoon": case "comic": case "light_novel": case "book":
+                return "read";
+            case "game": case "other": case "":
+                return "other";
+            default:
+                return "watch";
+        }
+    }
+
+    // ------------------------------------------------------------------ TMDB (movies and series; needs your free key)
+
+    private static final Map<Integer, String> TMDB_GENRES = new HashMap<>();
+
+    static {
+        Object[][] g = {{28, "Action"}, {12, "Adventure"}, {16, "Animation"}, {35, "Comedy"}, {80, "Crime"}, {99, "Documentary"},
+                {18, "Drama"}, {10751, "Family"}, {14, "Fantasy"}, {36, "History"}, {27, "Horror"}, {10402, "Music"}, {9648, "Mystery"},
+                {10749, "Romance"}, {878, "Science fiction"}, {10770, "TV movie"}, {53, "Thriller"}, {10752, "War"}, {37, "Western"},
+                {10759, "Action and adventure"}, {10762, "Kids"}, {10763, "News"}, {10764, "Reality"}, {10765, "Science fiction"},
+                {10766, "Soap"}, {10767, "Talk"}, {10768, "War and politics"}};
+        for (Object[] x : g) TMDB_GENRES.put((Integer) x[0], (String) x[1]);
+    }
+
+    static String tmdbType(boolean tv, String lang, Set<Integer> genres) {
+        boolean anim = genres.contains(16);
+        if (anim && "ja".equals(lang)) return tv ? "anime" : "anime_movie";
+        if (anim) return "animation";
+        if (genres.contains(99)) return "documentary";
+        if (tv && genres.contains(10764)) return "reality";
+        if (tv && "ko".equals(lang)) return "kdrama";
+        if (tv && Arrays.asList("zh", "ja", "th", "tr", "cn").contains(lang)) return "drama";
+        return tv ? "series" : "movie";
+    }
+
+    List<Match> tmdb(String query) throws IOException, JSONException {
+        List<Match> out = new ArrayList<>();
+        if (tmdbKey.isEmpty()) return out;
+        Map<String, String> h = new HashMap<>();
+        String url = "https://api.themoviedb.org/3/search/multi?include_adult=false&language=en-US&page=1&query=" + q(query);
+        if (tmdbKey.startsWith("eyJ")) h.put("Authorization", "Bearer " + tmdbKey);  // a "read access token"
+        else url += "&api_key=" + q(tmdbKey);                                        // a short "API key"
+        String body = call(url, null, h);
+        if (body.isEmpty()) return out;
+        JSONArray a = new JSONObject(body).optJSONArray("results");
+        if (a == null) return out;
+        int rank = 0;
+        for (int i = 0; i < a.length() && out.size() < 6; i++) {
+            JSONObject o = a.getJSONObject(i);
+            String mt = o.optString("media_type");
+            if (!mt.equals("movie") && !mt.equals("tv")) continue;
+            boolean tv = mt.equals("tv");
+            Match m = new Match();
+            m.source = "tmdb";
+            m.id = String.valueOf(o.optLong("id"));
+            m.title = o.optString(tv ? "name" : "title");
+            m.original = o.optString(tv ? "original_name" : "original_title");
+            m.names.add(m.title);
+            if (!m.original.isEmpty()) m.names.add(m.original);
+            m.year = TitleMatch.yearIn(o.optString(tv ? "first_air_date" : "release_date"));
+            m.lang = o.optString("original_language");
+            JSONArray oc = o.optJSONArray("origin_country");
+            if (oc != null && oc.length() > 0) m.country = oc.optString(0);
+            Set<Integer> gids = new LinkedHashSet<>();
+            JSONArray gi = o.optJSONArray("genre_ids");
+            if (gi != null) for (int j = 0; j < gi.length(); j++) gids.add(gi.optInt(j));
+            for (int gid : gids) if (TMDB_GENRES.containsKey(gid) && !m.genres.contains(TMDB_GENRES.get(gid))) m.genres.add(TMDB_GENRES.get(gid));
+            m.type = tmdbType(tv, m.lang, gids);
+            String pp = o.optString("poster_path");
+            if (!pp.isEmpty() && !pp.equals("null")) m.poster = "https://image.tmdb.org/t/p/w342" + pp;
+            m.overview = o.optString("overview");
+            m.url = "https://www.themoviedb.org/" + mt + "/" + m.id;
+            m.ext.put("tmdb", mt + "/" + m.id);
+            m.adult = o.optBoolean("adult");
+            m.rank = rank++;
+            out.add(m);
+        }
+        return out;
+    }
+
+    // ------------------------------------------------------------------ Wikidata (movies and series without a key)
+
+    /** Wikidata "instance of" ids that mean a title, as a watchlist category. */
+    private static final Map<String, String> WD_KIND = new HashMap<>();
+    /** Wikidata language ids to ISO 639-1. */
+    private static final Map<String, String> WD_LANG = new HashMap<>();
+
+    static {
+        String[][] k = {{"Q11424", "movie"}, {"Q24869", "movie"}, {"Q506240", "movie"}, {"Q229390", "movie"}, {"Q93204", "documentary"},
+                {"Q5398426", "series"}, {"Q1259759", "series"}, {"Q526877", "series"}, {"Q15416", "series"}, {"Q21191270", "series"},
+                {"Q202866", "animation"}, {"Q581714", "animation"}, {"Q117467246", "animation"},
+                {"Q63952888", "anime"}, {"Q1107", "anime"}, {"Q20650540", "anime_movie"}, {"Q220898", "anime"},
+                {"Q21198342", "manga"}, {"Q8274", "manga"}, {"Q74262765", "manhwa"}, {"Q562214", "manhwa"}, {"Q754669", "manhua"},
+                {"Q105543609", "series"}, {"Q7725634", "book"}, {"Q8261", "book"}, {"Q747381", "light_novel"}, {"Q7889", "game"}};
+        for (String[] x : k) WD_KIND.put(x[0], x[1]);
+        String[][] l = {{"Q1860", "en"}, {"Q5287", "ja"}, {"Q9176", "ko"}, {"Q7850", "zh"}, {"Q727694", "zh"}, {"Q9186", "zh"},
+                {"Q1568", "hi"}, {"Q5885", "ta"}, {"Q8097", "te"}, {"Q36236", "ml"}, {"Q33673", "kn"}, {"Q9610", "bn"}, {"Q1571", "mr"},
+                {"Q58635", "pa"}, {"Q5137", "gu"}, {"Q1617", "ur"}, {"Q1321", "es"}, {"Q150", "fr"}, {"Q188", "de"}, {"Q652", "it"},
+                {"Q5146", "pt"}, {"Q7737", "ru"}, {"Q256", "tr"}, {"Q13955", "ar"}, {"Q9168", "fa"}, {"Q9217", "th"}, {"Q9240", "id"},
+                {"Q9237", "ms"}, {"Q34057", "tl"}, {"Q9199", "vi"}, {"Q809", "pl"}, {"Q7411", "nl"}, {"Q9027", "sv"}, {"Q9035", "da"},
+                {"Q9043", "no"}, {"Q1412", "fi"}, {"Q9288", "he"}, {"Q9129", "el"}, {"Q9056", "cs"}, {"Q9067", "hu"}, {"Q7913", "ro"},
+                {"Q8798", "uk"}};
+        for (String[] x : l) WD_LANG.put(x[0], x[1]);
+    }
+
+    private static String wdFirstId(JSONObject claims, String prop) {
+        JSONArray a = claims.optJSONArray(prop);
+        if (a == null) return "";
+        for (int i = 0; i < a.length(); i++) {
+            JSONObject v = a.optJSONObject(i).optJSONObject("mainsnak");
+            if (v == null) continue;
+            JSONObject dv = v.optJSONObject("datavalue");
+            if (dv == null) continue;
+            Object val = dv.opt("value");
+            if (val instanceof JSONObject) {
+                JSONObject vo = (JSONObject) val;
+                if (vo.has("id")) return vo.optString("id");
+                if (vo.has("time")) return vo.optString("time");
+            } else if (val != null) return String.valueOf(val);
+        }
+        return "";
+    }
+
+    /** Wikidata "duration" (P2047) in minutes, or 0. */
+    static int wdMinutes(JSONObject claims) {
+        JSONArray a = claims.optJSONArray("P2047");
+        if (a == null) return 0;
+        for (int i = 0; i < a.length(); i++) {
+            JSONObject v = a.optJSONObject(i) == null ? null : a.optJSONObject(i).optJSONObject("mainsnak");
+            JSONObject dv = v == null ? null : v.optJSONObject("datavalue");
+            JSONObject vo = dv == null ? null : dv.optJSONObject("value");
+            if (vo == null) continue;
+            double n;
+            try {
+                n = Double.parseDouble(vo.optString("amount").replace("+", ""));
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            String unit = vo.optString("unit");
+            if (unit.endsWith("/Q7727")) return (int) Math.round(n);          // minutes
+            if (unit.endsWith("/Q25235")) return (int) Math.round(n * 60);    // hours
+            if (unit.endsWith("/Q11574")) return (int) Math.round(n / 60);    // seconds
+        }
+        return 0;
+    }
+
+    private static List<String> wdIds(JSONObject claims, String prop) {
+        List<String> out = new ArrayList<>();
+        JSONArray a = claims.optJSONArray(prop);
+        if (a == null) return out;
+        for (int i = 0; i < a.length(); i++) {
+            JSONObject v = a.optJSONObject(i).optJSONObject("mainsnak");
+            JSONObject dv = v == null ? null : v.optJSONObject("datavalue");
+            JSONObject vo = dv == null ? null : dv.optJSONObject("value");
+            if (vo != null && vo.has("id")) out.add(vo.optString("id"));
+        }
+        return out;
+    }
+
+    List<Match> wikidata(String query) throws IOException, JSONException {
+        List<Match> out = new ArrayList<>();
+        String s = call("https://www.wikidata.org/w/api.php?action=wbsearchentities&format=json&type=item&language=en&uselang=en&limit=8&search="
+                + q(query), null, null);
+        JSONArray hits = s.isEmpty() ? null : new JSONObject(s).optJSONArray("search");
+        if (hits == null || hits.length() == 0) return out;
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < hits.length(); i++) ids.add(hits.getJSONObject(i).optString("id"));
+        return wdEntities(ids, query, "wikidata", new HashMap<>());
+    }
+
+    /**
+     * Wikipedia's own search, for names Wikidata's label search misses (misspelt or partly read). Its best pages are
+     * read through their Wikidata items, so the facts are the same; the link points to the Wikipedia article.
+     */
+    List<Match> wikipedia(String query) throws IOException, JSONException {
+        String s = call("https://en.wikipedia.org/w/api.php?action=query&format=json&redirects=1&generator=search&gsrlimit=5&gsrsearch="
+                + q(query) + "&prop=pageprops%7Cinfo&ppprop=wikibase_item&inprop=url", null, null);
+        JSONObject qo = s.isEmpty() ? null : new JSONObject(s).optJSONObject("query");
+        JSONObject pages = qo == null ? null : qo.optJSONObject("pages");
+        if (pages == null) return new ArrayList<>();
+        List<JSONObject> list = new ArrayList<>();
+        for (Iterator<String> it = pages.keys(); it.hasNext(); ) list.add(pages.getJSONObject(it.next()));
+        list.sort((a, b) -> Integer.compare(a.optInt("index", 99), b.optInt("index", 99)));
+        List<String> ids = new ArrayList<>();
+        Map<String, String> links = new HashMap<>();
+        for (JSONObject p : list) {
+            JSONObject pp = p.optJSONObject("pageprops");
+            String id = pp == null ? "" : pp.optString("wikibase_item");
+            if (!id.matches("Q\\d+") || ids.contains(id)) continue;
+            ids.add(id);
+            String link = p.optString("fullurl");
+            if (link.startsWith("https://en.wikipedia.org/")) links.put(id, link);
+        }
+        if (ids.isEmpty()) return new ArrayList<>();
+        return wdEntities(ids, query, "wikipedia", links);
+    }
+
+    /** Reads Wikidata items (in this order) into matches; items that are not a title (a person, a city) are skipped. */
+    private List<Match> wdEntities(List<String> ids, String query, String source, Map<String, String> links) throws IOException, JSONException {
+        List<Match> out = new ArrayList<>();
+        String e = call("https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=labels|aliases|claims&languages=en&ids="
+                + q(String.join("|", ids)), null, null);
+        JSONObject ents = e.isEmpty() ? null : new JSONObject(e).optJSONObject("entities");
+        if (ents == null) return out;
+        int rank = 0;
+        for (String id : ids) {
+            JSONObject en = ents.optJSONObject(id);
+            if (en == null) continue;
+            JSONObject claims = en.optJSONObject("claims");
+            if (claims == null) continue;
+            String kind = "";
+            for (String inst : wdIds(claims, "P31")) if (WD_KIND.containsKey(inst)) { kind = WD_KIND.get(inst); break; }
+            if (kind.isEmpty()) continue;  // a person, a song, a city...: not a title
+            Match m = new Match();
+            m.source = source;
+            m.id = id;
+            m.type = kind;
+            JSONObject lab = en.optJSONObject("labels");
+            m.title = lab != null && lab.optJSONObject("en") != null ? lab.optJSONObject("en").optString("value") : query;
+            m.names.add(m.title);
+            JSONObject al = en.optJSONObject("aliases");
+            JSONArray ae = al == null ? null : al.optJSONArray("en");
+            if (ae != null) for (int i = 0; i < ae.length() && i < 6; i++) m.names.add(ae.getJSONObject(i).optString("value"));
+            String date = wdFirstId(claims, "P577");
+            if (date.isEmpty()) date = wdFirstId(claims, "P580");
+            m.year = TitleMatch.yearIn(date);
+            String lang = wdFirstId(claims, "P364");
+            if (lang.isEmpty()) lang = wdFirstId(claims, "P407");
+            m.lang = WD_LANG.containsKey(lang) ? WD_LANG.get(lang) : "";
+            if (m.type.equals("series") && "ko".equals(m.lang)) m.type = "kdrama";
+            m.ext.put("wikidata", id);
+            String tm = wdFirstId(claims, "P4947");
+            if (!tm.isEmpty()) m.ext.put("tmdb", "movie/" + tm);
+            String tt = wdFirstId(claims, "P4983");
+            if (!tt.isEmpty()) m.ext.put("tmdb", "tv/" + tt);
+            String imdb = wdFirstId(claims, "P345");
+            if (!imdb.isEmpty()) m.ext.put("imdb", imdb);
+            String an = wdFirstId(claims, "P8729");
+            if (!an.isEmpty()) m.ext.put("anilist", an);
+            String mal = wdFirstId(claims, "P4086");
+            if (mal.isEmpty()) mal = wdFirstId(claims, "P4087");
+            if (!mal.isEmpty()) m.ext.put("mal", mal);
+            m.url = links.containsKey(id) ? links.get(id) : "https://www.wikidata.org/wiki/" + id;
+            if (links.containsKey(id)) m.ext.put("wikipedia", links.get(id));  // where the official name came from
+            m.runtime = wdMinutes(claims);
+            m.rank = rank++;
+            List<String> g = wdIds(claims, "P136");
+            m.ext.put("_genres", String.join("|", g.subList(0, Math.min(5, g.size()))));
+            out.add(m);
+        }
+        return out;
+    }
+
+    /** Wikidata genres are ids; their names are fetched only for the title that was picked. */
+    private void wikidataGenres(Match m) {
+        String ids = m.ext.remove("_genres");
+        if (ids == null || ids.isEmpty() || !m.genres.isEmpty()) return;
+        try {
+            String e = call("https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=labels&languages=en&ids=" + q(ids), null, null);
+            JSONObject ents = new JSONObject(e).optJSONObject("entities");
+            if (ents == null) return;
+            for (String id : ids.split("\\|")) {
+                JSONObject en = ents.optJSONObject(id);
+                JSONObject l = en == null ? null : en.optJSONObject("labels");
+                JSONObject l2 = l == null ? null : l.optJSONObject("en");
+                if (l2 == null) continue;
+                String name = l2.optString("value").replaceAll("(?i)\\s*(film|television series|anime|manga)$", "").trim();
+                if (!name.isEmpty()) m.genres.add(name.substring(0, 1).toUpperCase(Locale.ROOT) + name.substring(1));
+            }
+        } catch (Exception ignored) {
+            // genres are a nice extra
+        }
+    }
+
+    // ------------------------------------------------------------------ AniList (anime and manga, no key)
+
+    private static final String ANILIST_QUERY = "query($s:String){"
+            + "anime:Page(perPage:5){media(search:$s,type:ANIME,sort:SEARCH_MATCH){...f}}"
+            + "manga:Page(perPage:5){media(search:$s,type:MANGA,sort:SEARCH_MATCH){...f}}}"
+            + "fragment f on Media{id idMal type format title{romaji english native} synonyms startDate{year} countryOfOrigin "
+            + "genres coverImage{large} description(asHtml:false) siteUrl isAdult duration episodes}";
+
+    static String anilistType(String type, String format, String country) {
+        if ("ANIME".equals(type)) {
+            if (!"JP".equals(country) && !country.isEmpty()) return "animation";  // donghua and others
+            return "MOVIE".equals(format) ? "anime_movie" : "anime";
+        }
+        if ("NOVEL".equals(format)) return "light_novel";
+        if ("KR".equals(country)) return "manhwa";
+        if ("CN".equals(country) || "TW".equals(country)) return "manhua";
+        return "manga";
+    }
+
+    private static String countryLang(String c) {
+        switch (c) {
+            case "JP": return "ja";
+            case "KR": return "ko";
+            case "CN": case "TW": return "zh";
+            default: return "";
+        }
+    }
+
+    /** which: "anime", "manga" or "both" (one call either way). */
+    List<Match> anilist(String query, String which) throws IOException, JSONException {
+        List<Match> out = new ArrayList<>();
+        JSONObject body = new JSONObject();
+        body.put("query", ANILIST_QUERY);
+        body.put("variables", new JSONObject().put("s", query));
+        String s = call("https://graphql.anilist.co", body.toString(), null);
+        if (s.isEmpty()) return out;
+        JSONObject data = new JSONObject(s).optJSONObject("data");
+        if (data == null) return out;
+        for (String part : new String[]{"anime", "manga"}) {
+            if (!which.equals("both") && !which.equals(part)) continue;
+            JSONObject page = data.optJSONObject(part);
+            JSONArray media = page == null ? null : page.optJSONArray("media");
+            if (media == null) continue;
+            for (int i = 0; i < media.length(); i++) {
+                JSONObject o = media.getJSONObject(i);
+                Match m = new Match();
+                m.source = "anilist";
+                m.id = String.valueOf(o.optLong("id"));
+                JSONObject t = o.optJSONObject("title");
+                String en = t == null ? "" : t.optString("english");
+                String ro = t == null ? "" : t.optString("romaji");
+                String na = t == null ? "" : t.optString("native");
+                if (en.equals("null")) en = "";
+                if (na.equals("null")) na = "";
+                m.title = !en.isEmpty() ? en : ro;
+                m.original = !na.isEmpty() ? na : ro;
+                for (String n : new String[]{en, ro, na}) if (n != null && !n.isEmpty() && !n.equals("null")) m.names.add(n);
+                JSONArray syn = o.optJSONArray("synonyms");
+                if (syn != null) for (int j = 0; j < syn.length() && j < 6; j++) m.names.add(syn.optString(j));
+                JSONObject sd = o.optJSONObject("startDate");
+                m.year = sd == null ? 0 : sd.optInt("year", 0);
+                m.country = o.optString("countryOfOrigin");
+                if (m.country.equals("null")) m.country = "";
+                m.lang = countryLang(m.country);
+                m.type = anilistType(o.optString("type"), o.optString("format"), m.country);
+                JSONArray g = o.optJSONArray("genres");
+                if (g != null) for (int j = 0; j < g.length(); j++) m.genres.add(g.optString(j));
+                JSONObject cov = o.optJSONObject("coverImage");
+                if (cov != null && !cov.optString("large").isEmpty() && !cov.optString("large").equals("null")) m.poster = cov.optString("large");
+                String d = o.optString("description");
+                m.overview = d.equals("null") ? "" : d.replaceAll("<[^>]+>", "").trim();
+                m.url = o.optString("siteUrl");
+                m.adult = o.optBoolean("isAdult");
+                m.runtime = o.optInt("duration", 0);
+                m.episodes = o.optInt("episodes", 0);
+                m.ext.put("anilist", m.id);
+                long mal = o.optLong("idMal", 0);
+                if (mal > 0) m.ext.put("mal", String.valueOf(mal));
+                m.rank = i;
+                out.add(m);
+            }
+        }
+        return out;
+    }
+
+    // ------------------------------------------------------------------ length (runtime) of a known title
+
+    /**
+     * What a movie app shows about one title: length, episodes, seasons (S1 · 25 eps, S2 · 25 eps...) and a rating.
+     * Rating: IMDb (through OMDb, only with your own free OMDb key) for movies and series, MyAnimeList for anime, else
+     * TMDB, else AniList. Seasons: TMDB's season list, or for anime the AniList chain of prequels and sequels.
+     * Uses the ids found when the title was checked. Each service is optional: what one cannot give, the next may.
+     * Seasons are checked against a second service (Wikidata's number of seasons, or AniList / MyAnimeList's episodes
+     * of the first season) and seasonsBy says who agreed, who did not, or that only one service had them.
+     */
+    Details details(Map<String, String> ext, String type) throws IOException, JSONException {
+        Details d = new Details();
+        boolean anime = type != null && type.startsWith("anime");
+        String tm = ext.get("tmdb");
+        String imdb = ext.containsKey("imdb") ? ext.get("imdb") : "";
+        double tmdbScore = 0;
+        int tmdbVotes = 0;
+        if (tm != null && !tmdbKey.isEmpty() && tm.matches("(movie|tv)/\\d+")) {
+            Map<String, String> h = new HashMap<>();
+            String url = "https://api.themoviedb.org/3/" + tm + "?language=en-US&append_to_response=external_ids";
+            if (tmdbKey.startsWith("eyJ")) h.put("Authorization", "Bearer " + tmdbKey);
+            else url += "&api_key=" + q(tmdbKey);
+            String body = call(url, null, h);
+            if (!body.isEmpty()) {
+                JSONObject o = new JSONObject(body);
+                if (tm.startsWith("movie/")) d.runtime = o.optInt("runtime", 0);
+                else {
+                    JSONArray rt = o.optJSONArray("episode_run_time");
+                    if (rt != null && rt.length() > 0) d.runtime = rt.optInt(0, 0);
+                    JSONObject last = o.optJSONObject("last_episode_to_air");
+                    if (d.runtime == 0 && last != null) d.runtime = last.optInt("runtime", 0);
+                    d.episodes = o.optInt("number_of_episodes", 0);
+                    JSONArray ss = o.optJSONArray("seasons");
+                    if (ss != null) for (int i = 0; i < ss.length(); i++) {
+                        JSONObject x = ss.optJSONObject(i);
+                        if (x == null || x.optInt("season_number", 0) <= 0 || x.optInt("episode_count", 0) <= 0) continue;  // "Specials"
+                        d.seasons.put(season(x.optInt("season_number"), x.optInt("episode_count"), TitleMatch.yearIn(x.optString("air_date")), x.optString("name")));
+                    }
+                }
+                tmdbScore = o.optDouble("vote_average", 0);
+                tmdbVotes = o.optInt("vote_count", 0);
+                String id = o.optString("imdb_id");
+                JSONObject ex = o.optJSONObject("external_ids");
+                if (id.isEmpty() && ex != null) id = ex.optString("imdb_id");
+                if (id.matches("tt\\d+")) imdb = id;
+            }
+        }
+        boolean fromTmdb = d.seasons.length() > 0;
+        int anilistFirst = 0;  // AniList's episodes, when its entry is the first season
+        int anilistEps = 0;
+        String an = ext.get("anilist");
+        double anilistScore = 0;
+        if (an != null && an.matches("\\d+")) {
+            JSONObject md = anilistNode(Long.parseLong(an));
+            if (md != null) {
+                anilistEps = md.optInt("episodes", 0);
+                if (isSeason(md) && nextSeason(md, "PREQUEL") == 0) anilistFirst = anilistEps;
+                if (d.runtime == 0) d.runtime = md.optInt("duration", 0);
+                if (d.episodes == 0) d.episodes = md.optInt("episodes", 0);
+                anilistScore = md.optInt("averageScore", 0) / 10.0;
+                if (anime && d.seasons.length() == 0 && isSeason(md)) d.seasons = anilistSeasons(md);
+            }
+        }
+        String mal = ext.get("mal");
+        int malEps = 0;
+        if (mal != null && mal.matches("\\d+") && (anime || d.runtime == 0)) {
+            String s = call("https://api.jikan.moe/v4/anime/" + mal, null, null);
+            JSONObject o = s.isEmpty() ? null : new JSONObject(s).optJSONObject("data");
+            if (o != null) {
+                malEps = o.optInt("episodes", 0);
+                if (d.runtime == 0) d.runtime = jikanMinutes(o.optString("duration"));
+                if (d.episodes == 0) d.episodes = o.optInt("episodes", 0);
+                double sc = o.optDouble("score", 0);
+                if (anime && sc > 0) rate(d, sc, "MyAnimeList", o.optInt("scored_by", 0));
+            }
+        }
+        if (d.rating == 0 && !anime && !omdbKey.isEmpty() && imdb.matches("tt\\d+")) {
+            String s = call("https://www.omdbapi.com/?i=" + imdb + "&apikey=" + q(omdbKey), null, null);
+            JSONObject o = s.isEmpty() ? null : new JSONObject(s);
+            double sc = o == null ? 0 : parseNum(o.optString("imdbRating"));
+            if (sc > 0) rate(d, sc, "IMDb", (int) parseNum(o.optString("imdbVotes").replace(",", "")));
+        }
+        if (d.rating == 0 && tmdbScore > 0 && tmdbVotes >= 10) rate(d, tmdbScore, "TMDB", tmdbVotes);
+        if (d.rating == 0 && anilistScore > 0) rate(d, anilistScore, "AniList", 0);
+        if (!imdb.isEmpty()) d.imdb = imdb;
+        if (d.seasons.length() > 0) d.seasonsBy = seasonsCheck(d.seasons, fromTmdb, anime, anilistFirst, anilistEps, malEps, ext.get("wikidata"));
+        return d;
+    }
+
+    /**
+     * Avles: one source may be wrong. TMDB's seasons are compared with Wikidata's number of seasons (series) or with
+     * AniList / MyAnimeList's episodes of season 1 (anime); AniList's season chain with MyAnimeList's episodes of the
+     * same entry. Says who agreed, what the other one said, or "(one source)" when nobody else had it.
+     */
+    String seasonsCheck(JSONArray seasons, boolean fromTmdb, boolean anime, int anilistFirst, int anilistEps, int malEps, String wd)
+            throws IOException, JSONException {
+        String from = fromTmdb ? "TMDB" : "AniList";
+        String other = "";
+        int theirs = 0;
+        int ours = 0;
+        String what = "";
+        if (fromTmdb && anime && (anilistFirst > 0 || malEps > 0)) {
+            other = anilistFirst > 0 ? "AniList" : "MyAnimeList";
+            theirs = anilistFirst > 0 ? anilistFirst : malEps;
+            ours = seasons.optJSONObject(0).optInt("episodes", 0);
+            what = " episodes in season 1";
+        } else if (!fromTmdb && anilistEps > 0 && malEps > 0) {
+            other = "MyAnimeList";
+            theirs = malEps;
+            ours = anilistEps;
+            what = " episodes";
+        } else if (fromTmdb && wd != null && wd.matches("Q\\d+")) {
+            theirs = wikidataCount(wd, "P2437");
+            if (theirs > 0) {
+                other = "Wikidata";
+                ours = seasons.length();
+                what = theirs == 1 ? " season" : " seasons";
+            }
+        }
+        if (other.isEmpty()) return from + " (one source)";
+        if (theirs == ours) return from + ", checked with " + other;
+        return from + " (" + other + " says " + theirs + what + ")";
+    }
+
+    /** A whole-number fact of a Wikidata item (P2437 = number of seasons), or 0. */
+    private int wikidataCount(String id, String prop) throws IOException, JSONException {
+        String e = call("https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims&ids=" + q(id), null, null);
+        JSONObject ent = e.isEmpty() ? null : new JSONObject(e).optJSONObject("entities");
+        JSONObject it = ent == null ? null : ent.optJSONObject(id);
+        JSONObject claims = it == null ? null : it.optJSONObject("claims");
+        JSONArray c = claims == null ? null : claims.optJSONArray(prop);
+        if (c == null) return 0;
+        for (int i = 0; i < c.length(); i++) {
+            JSONObject v = c.optJSONObject(i).optJSONObject("mainsnak");
+            JSONObject dv = v == null ? null : v.optJSONObject("datavalue");
+            JSONObject val = dv == null ? null : dv.optJSONObject("value");
+            int n = val == null ? 0 : (int) parseNum(val.optString("amount").replace("+", ""));
+            if (n > 0) return n;
+        }
+        return 0;
+    }
+
+    static final class Details {
+        int runtime;
+        int episodes;
+        double rating;
+        String ratingBy = "";
+        int votes;
+        String imdb = "";
+        JSONArray seasons = new JSONArray();
+        String seasonsBy = "";
+    }
+
+    private static void rate(Details d, double score, String by, int votes) {
+        d.rating = Math.round(score * 10) / 10.0;
+        d.ratingBy = by;
+        d.votes = votes;
+    }
+
+    private static double parseNum(String s) {
+        try {
+            return Double.parseDouble(s);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private static JSONObject season(int n, int episodes, int year, String title) throws JSONException {
+        JSONObject o = new JSONObject().put("n", n).put("episodes", episodes);
+        if (year > 0) o.put("year", year);
+        if (title != null && !title.isEmpty()) o.put("title", title);
+        return o;
+    }
+
+    private static final String ANILIST_NODE = "query($i:Int){Media(id:$i){id format episodes duration averageScore seasonYear "
+            + "title{english romaji} relations{edges{relationType node{id type format}}}}}";
+
+    private JSONObject anilistNode(long id) throws IOException, JSONException {
+        JSONObject body = new JSONObject().put("query", ANILIST_NODE).put("variables", new JSONObject().put("i", id));
+        String s = call("https://graphql.anilist.co", body.toString(), null);
+        JSONObject data = s.isEmpty() ? null : new JSONObject(s).optJSONObject("data");
+        return data == null ? null : data.optJSONObject("Media");
+    }
+
+    /** A TV season (not a movie, special or recap). */
+    private static boolean isSeason(JSONObject md) {
+        String f = md.optString("format");
+        return f.equals("TV") || f.equals("ONA") || f.equals("TV_SHORT");
+    }
+
+    /** The id of the season before or after (relationType PREQUEL or SEQUEL), or 0. */
+    private static long nextSeason(JSONObject md, String rel) {
+        JSONObject r = md.optJSONObject("relations");
+        JSONArray edges = r == null ? null : r.optJSONArray("edges");
+        if (edges == null) return 0;
+        for (int i = 0; i < edges.length(); i++) {
+            JSONObject e = edges.optJSONObject(i);
+            JSONObject n = e == null ? null : e.optJSONObject("node");
+            if (n == null || !rel.equals(e.optString("relationType")) || !"ANIME".equals(n.optString("type")) || !isSeason(n)) continue;
+            return n.optLong("id");
+        }
+        return 0;
+    }
+
+    /** On AniList each anime season is its own entry: walks back to the first season, then forward (at most 8). */
+    private JSONArray anilistSeasons(JSONObject start) throws IOException, JSONException {
+        List<JSONObject> chain = new ArrayList<>();
+        chain.add(start);
+        Set<Long> seen = new LinkedHashSet<>();
+        seen.add(start.optLong("id"));
+        for (JSONObject cur = start; chain.size() < 8; ) {
+            long p = nextSeason(cur, "PREQUEL");
+            if (p == 0 || !seen.add(p)) break;
+            cur = anilistNode(p);
+            if (cur == null || !isSeason(cur)) break;
+            chain.add(0, cur);
+        }
+        for (JSONObject cur = start; chain.size() < 8; ) {
+            long n = nextSeason(cur, "SEQUEL");
+            if (n == 0 || !seen.add(n)) break;
+            cur = anilistNode(n);
+            if (cur == null || !isSeason(cur)) break;
+            chain.add(cur);
+        }
+        JSONArray out = new JSONArray();
+        for (int i = 0; i < chain.size(); i++) {
+            JSONObject c = chain.get(i);
+            JSONObject t = c.optJSONObject("title");
+            String name = t == null ? "" : t.optString("english", "");
+            if (name.isEmpty() || name.equals("null")) name = t == null ? "" : t.optString("romaji", "");
+            out.put(season(i + 1, c.optInt("episodes", 0), c.optInt("seasonYear", 0), name));
+        }
+        return out;
+    }
+
+    /** Jikan's "1 hr 30 min" or "24 min per ep" to minutes. */
+    static int jikanMinutes(String d) {
+        if (d == null) return 0;
+        java.util.regex.Matcher h = java.util.regex.Pattern.compile("(\\d+)\\s*hr").matcher(d);
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+)\\s*min").matcher(d);
+        int t = 0;
+        if (h.find()) t += Integer.parseInt(h.group(1)) * 60;
+        if (m.find()) t += Integer.parseInt(m.group(1));
+        return t;
+    }
+
+    // ------------------------------------------------------------------ Jikan (MyAnimeList, no key)
+
+    List<Match> jikan(String query, String which) throws IOException, JSONException {
+        List<Match> out = new ArrayList<>();
+        boolean manga = which.equals("manga");
+        String s = call("https://api.jikan.moe/v4/" + (manga ? "manga" : "anime") + "?sfw=true&limit=5&q=" + q(query), null, null);
+        JSONArray a = s.isEmpty() ? null : new JSONObject(s).optJSONArray("data");
+        if (a == null) return out;
+        for (int i = 0; i < a.length(); i++) {
+            JSONObject o = a.getJSONObject(i);
+            Match m = new Match();
+            m.source = "jikan";
+            m.id = String.valueOf(o.optLong("mal_id"));
+            String en = o.optString("title_english");
+            m.title = !en.isEmpty() && !en.equals("null") ? en : o.optString("title");
+            m.original = o.optString("title_japanese").equals("null") ? "" : o.optString("title_japanese");
+            m.names.add(o.optString("title"));
+            if (!en.isEmpty() && !en.equals("null")) m.names.add(en);
+            if (!m.original.isEmpty()) m.names.add(m.original);
+            JSONArray ts = o.optJSONArray("titles");
+            if (ts != null) for (int j = 0; j < ts.length() && j < 8; j++) m.names.add(ts.getJSONObject(j).optString("title"));
+            m.year = o.optInt("year", 0);
+            if (m.year == 0) {
+                JSONObject when = o.optJSONObject(manga ? "published" : "aired");
+                JSONObject prop = when == null ? null : when.optJSONObject("prop");
+                JSONObject from = prop == null ? null : prop.optJSONObject("from");
+                if (from != null) m.year = from.optInt("year", 0);
+            }
+            String fmt = o.optString("type");
+            if (manga) m.type = fmt.equalsIgnoreCase("Manhwa") ? "manhwa" : fmt.equalsIgnoreCase("Manhua") ? "manhua"
+                    : fmt.toLowerCase(Locale.ROOT).contains("novel") ? "light_novel" : "manga";
+            else m.type = fmt.equalsIgnoreCase("Movie") ? "anime_movie" : "anime";
+            m.lang = m.type.equals("manhwa") ? "ko" : m.type.equals("manhua") ? "zh" : "ja";
+            JSONArray g = o.optJSONArray("genres");
+            if (g != null) for (int j = 0; j < g.length(); j++) m.genres.add(g.getJSONObject(j).optString("name"));
+            JSONObject img = o.optJSONObject("images");
+            JSONObject jpg = img == null ? null : img.optJSONObject("jpg");
+            if (jpg != null) m.poster = jpg.optString("large_image_url", jpg.optString("image_url"));
+            if (m.poster.equals("null")) m.poster = "";
+            m.overview = o.optString("synopsis").equals("null") ? "" : o.optString("synopsis");
+            m.url = o.optString("url");
+            m.ext.put("mal", m.id);
+            m.rank = i;
+            out.add(m);
+        }
+        return out;
+    }
+
+    // ------------------------------------------------------------------ MangaDex (manga, manhwa, manhua; no key)
+
+    List<Match> mangadex(String query) throws IOException, JSONException {
+        List<Match> out = new ArrayList<>();
+        String s = call("https://api.mangadex.org/manga?limit=5&includes[]=cover_art&order[relevance]=desc"
+                + "&contentRating[]=safe&contentRating[]=suggestive&title=" + q(query), null, null);
+        JSONArray a = s.isEmpty() ? null : new JSONObject(s).optJSONArray("data");
+        if (a == null) return out;
+        for (int i = 0; i < a.length(); i++) {
+            JSONObject o = a.getJSONObject(i);
+            JSONObject at = o.optJSONObject("attributes");
+            if (at == null) continue;
+            Match m = new Match();
+            m.source = "mangadex";
+            m.id = o.optString("id");
+            JSONObject t = at.optJSONObject("title");
+            if (t != null) {
+                m.title = t.optString("en", "");
+                java.util.Iterator<String> it = t.keys();
+                while (m.title.isEmpty() && it.hasNext()) m.title = t.optString(it.next());
+                m.names.add(m.title);
+            }
+            JSONArray alt = at.optJSONArray("altTitles");
+            String origLang = at.optString("originalLanguage");
+            if (alt != null) for (int j = 0; j < alt.length() && m.names.size() < 10; j++) {
+                JSONObject x = alt.getJSONObject(j);
+                java.util.Iterator<String> it = x.keys();
+                while (it.hasNext()) {
+                    String k = it.next();
+                    String v = x.optString(k);
+                    m.names.add(v);
+                    if (m.original.isEmpty() && k.equals(origLang)) m.original = v;
+                }
+            }
+            m.year = at.optInt("year", 0);
+            m.lang = origLang.startsWith("zh") ? "zh" : origLang.length() >= 2 ? origLang.substring(0, 2) : "";
+            m.type = m.lang.equals("ko") ? "manhwa" : m.lang.equals("zh") ? "manhua" : "manga";
+            JSONArray tags = at.optJSONArray("tags");
+            if (tags != null) for (int j = 0; j < tags.length(); j++) {
+                JSONObject ta = tags.getJSONObject(j).optJSONObject("attributes");
+                if (ta == null || !"genre".equals(ta.optString("group"))) continue;
+                JSONObject nm = ta.optJSONObject("name");
+                if (nm != null && !nm.optString("en").isEmpty()) m.genres.add(nm.optString("en"));
+            }
+            JSONObject desc = at.optJSONObject("description");
+            if (desc != null) m.overview = desc.optString("en", "");
+            JSONArray rel = o.optJSONArray("relationships");
+            if (rel != null) for (int j = 0; j < rel.length(); j++) {
+                JSONObject r = rel.getJSONObject(j);
+                JSONObject ra = r.optJSONObject("attributes");
+                if ("cover_art".equals(r.optString("type")) && ra != null && !ra.optString("fileName").isEmpty())
+                    m.poster = "https://uploads.mangadex.org/covers/" + m.id + "/" + ra.optString("fileName") + ".256.jpg";
+            }
+            JSONObject links = at.optJSONObject("links");
+            if (links != null) {
+                if (!links.optString("al").isEmpty()) m.ext.put("anilist", links.optString("al"));
+                if (!links.optString("mal").isEmpty()) m.ext.put("mal", links.optString("mal"));
+            }
+            m.ext.put("mangadex", m.id);
+            m.url = "https://mangadex.org/title/" + m.id;
+            m.rank = i;
+            out.add(m);
+        }
+        return out;
+    }
+
+    // ------------------------------------------------------------------ scoring
+
+    /** What was read for one watchlist entry. */
+    static final class Candidate {
+        String id = "";
+        long updatedAt;
+        String title = "";
+        List<String> aka = new ArrayList<>();
+        String type = "";
+        int year;
+        String lang = "";
+
+        static Candidate from(JSONObject o) {
+            Candidate c = new Candidate();
+            c.id = o.optString("id");
+            c.updatedAt = o.optLong("updated_at", 0);
+            c.title = o.optString("title");
+            JSONArray a = o.optJSONArray("aka");
+            if (a != null) for (int i = 0; i < a.length() && i < 6; i++) c.aka.add(a.optString(i));
+            c.type = o.optString("type");
+            c.year = o.optInt("year", 0);
+            if (c.year == 0) c.year = TitleMatch.yearIn(c.title);
+            c.lang = o.optString("language");
+            return c;
+        }
+
+        List<String> queries() {
+            LinkedHashSet<String> s = new LinkedHashSet<>();
+            for (String t : new ArrayList<String>() {{ add(title); addAll(aka); }}) {
+                String c = TitleMatch.clean(t);
+                if (c.length() >= 2) s.add(c);
+            }
+            return new ArrayList<>(s);
+        }
+
+        /** "anime", "manga", "screen" (movies and series) or "any", from the category the reading guessed. */
+        String plan() {
+            switch (type) {
+                case "anime": case "anime_movie": return "anime";
+                case "manga": case "manhwa": case "manhua": case "webtoon": case "light_novel": return "manga";
+                case "series": case "kdrama": case "drama": case "documentary": case "reality": case "animation": case "short":
+                case "standup": return "screen";
+                case "movie": return "screen+anime";   // "movie" is also the default when nothing was known
+                default: return "any";
+            }
+        }
+    }
+
+    static double score(Candidate c, Match m) {
+        double s = TitleMatch.bestSimilarity(c.queries(), m.names.isEmpty() ? Arrays.asList(m.title) : m.names);
+        m.titleScore = s;
+        if (c.year > 0 && m.year > 0) {
+            int d = Math.abs(c.year - m.year);
+            s += d == 0 ? 0.05 : d == 1 ? 0.02 : -Math.min(0.3, 0.06 * d);
+        }
+        if (!c.lang.isEmpty() && !m.lang.isEmpty()) s += c.lang.equals(m.lang) ? 0.03 : -0.05;
+        String cg = groupOf(c.type);
+        if (!cg.equals("other") && !m.group().equals("other") && !cg.equals(m.group())) s -= 0.2;  // a manga when a show was seen
+        else if (c.type.equals(m.type)) s += 0.02;
+        if (m.adult) s -= 0.1;
+        s += 0.02 * Math.max(0, 5 - m.rank) / 5.0;  // the source's own ranking breaks ties
+        m.score = Math.max(0, Math.min(1, s));
+        return m.score;
+    }
+
+    /** Two sources describe the same title: a shared database id, or the same name, a close year and the same kind. */
+    static boolean sameTitle(Match a, Match b) {
+        for (String k : new String[]{"tmdb", "imdb", "anilist", "mal", "wikidata"}) {
+            String x = a.ext.get(k);
+            String y = b.ext.get(k);
+            if (x != null && y != null && !x.isEmpty() && !y.isEmpty()) return x.equals(y);
+        }
+        if (!a.group().equals(b.group())) return false;
+        if (a.year > 0 && b.year > 0 && Math.abs(a.year - b.year) > 1) return false;
+        return TitleMatch.bestSimilarity(a.names.isEmpty() ? Arrays.asList(a.title) : a.names,
+                b.names.isEmpty() ? Arrays.asList(b.title) : b.names) >= 0.9;
+    }
+
+    private List<Match> ask(String source, String query) throws IOException, JSONException {
+        switch (source) {
+            case "tmdb": return tmdb(query);
+            case "wikidata": return wikidata(query);
+            case "wikipedia": return wikipedia(query);
+            case "anilist-anime": return anilist(query, "anime");
+            case "anilist-manga": return anilist(query, "manga");
+            case "anilist": return anilist(query, "both");
+            case "jikan-anime": return jikan(query, "anime");
+            case "jikan-manga": return jikan(query, "manga");
+            case "mangadex": return mangadex(query);
+            default: return new ArrayList<>();
+        }
+    }
+
+    private String screenSource() {
+        return tmdbKey.isEmpty() ? "wikidata" : "tmdb";
+    }
+
+    /** The services to ask first, from what the reading guessed. */
+    List<String> firstSources(Candidate c) {
+        switch (c.plan()) {
+            case "anime": return Arrays.asList("anilist-anime", "jikan-anime");
+            case "manga": return Arrays.asList("anilist-manga", "mangadex");
+            case "screen": return Arrays.asList(screenSource());
+            case "screen+anime": return Arrays.asList(screenSource(), "anilist-anime");
+            default: return Arrays.asList(screenSource(), "anilist");
+        }
+    }
+
+    /** Independent services that can confirm a title of this kind, best first (Wikipedia and Wikidata count as one). */
+    List<String> confirmers(Match best) {
+        boolean read = best.group().equals("read");
+        boolean anime = best.type.startsWith("anime");
+        List<String> out = new ArrayList<>();
+        switch (best.source) {
+            case "tmdb":
+                out.add("wikidata");
+                out.add("wikipedia");
+                if (anime) out.add("jikan-anime");
+                break;
+            case "wikidata":
+            case "wikipedia":
+                if (read) out.add("anilist-manga");
+                else if (anime) { out.add("jikan-anime"); out.add("anilist-anime"); }
+                if (!tmdbKey.isEmpty() && !read) out.add("tmdb");
+                break;
+            case "anilist":
+                if (read) out.add("mangadex");
+                else out.add("jikan-anime");
+                out.add("wikidata");
+                break;
+            case "jikan":
+                out.add(read ? "anilist-manga" : "anilist-anime");
+                out.add("wikidata");
+                break;
+            case "mangadex":
+                out.add("anilist-manga");
+                out.add("wikidata");
+                break;
+            default:
+                break;
+        }
+        return out;
+    }
+
+    /**
+     * Checks one entry. Returns {id, updated_at, verdict, confidence, by, facts, choices, note} or null when no
+     * service could be reached (so it is tried again later rather than marked as not found).
+     */
+    JSONObject verify(Candidate c) throws IOException, JSONException {
+        List<String> queries = c.queries();
+        JSONObject r = new JSONObject();
+        r.put("id", c.id);
+        r.put("updated_at", c.updatedAt);
+        r.put("checked_at", clock.now());
+        if (queries.isEmpty()) return verdict(r, "not_found", 0, "", null, new ArrayList<>(), "No readable title");
+        if (Arrays.asList("book", "comic", "game").contains(c.type))
+            return verdict(r, "not_found", 0, "", null, new ArrayList<>(), "No free database is used for this category yet");
+        List<Match> all = new ArrayList<>();
+        Set<String> asked = new LinkedHashSet<>();
+        Set<String> askedFor = new java.util.HashSet<>();  // "source|query": the same question is never asked twice
+        int failed = 0;
+        int tried = 0;
+        for (String src : firstSources(c)) {
+            for (String qy : queries.subList(0, Math.min(2, queries.size()))) {
+                if (clearlyFound(all)) break;  // a near-exact name with the right year and kind: no need to ask more
+                tried++;
+                askedFor.add(src + "|" + qy);
+                try {
+                    for (Match m : ask(src, qy)) { score(c, m); all.add(m); }
+                    asked.add(src);
+                } catch (Stopped e) {
+                    throw e;
+                } catch (Exception e) {  // offline, refused or an answer we could not read
+                    failed++;
+                }
+            }
+        }
+        if (tried > 0 && failed == tried) {
+            networkFailures++;
+            return null;
+        }
+        all.sort((a, b) -> Double.compare(b.score, a.score));
+        Match best = all.isEmpty() ? null : all.get(0);
+        if ((best == null || best.score < AUTO) && !asked.contains("wikipedia")) {  // last try: Wikipedia forgives misspellings
+            for (String qy : queries.subList(0, Math.min(2, queries.size()))) {
+                askedFor.add("wikipedia|" + qy);
+                try {
+                    for (Match m : ask("wikipedia", qy)) { score(c, m); all.add(m); }
+                    asked.add("wikipedia");
+                } catch (Stopped e) {
+                    throw e;
+                } catch (Exception ignored) {
+                    // Wikipedia down: the other answers still count
+                }
+            }
+            all.sort((a, b) -> Double.compare(b.score, a.score));
+            best = all.isEmpty() ? null : all.get(0);
+        }
+        // a second, independent source must agree (name, year and kind, or a shared database id): asked until one does
+        if (best != null && best.score >= REVIEW && agreeing(best, all).isEmpty()) {
+            String qy = best.title.isEmpty() ? queries.get(0) : best.title;
+            int extra = 0;
+            for (String conf : confirmers(best)) {
+                if (extra >= 2 || !agreeing(best, all).isEmpty()) break;
+                String base = conf.replace("-anime", "").replace("-manga", "");
+                if (askedFor.contains(conf + "|" + qy) || askedFor.contains(base + "|" + qy)) continue;
+                askedFor.add(conf + "|" + qy);
+                extra++;
+                try {
+                    for (Match m : ask(conf, qy)) { score(c, m); all.add(m); }
+                    asked.add(conf);
+                } catch (Stopped e) {
+                    throw e;
+                } catch (Exception ignored) {
+                    // that source is down: the next one may still confirm it
+                }
+            }
+            all.sort((a, b) -> Double.compare(b.score, a.score));
+            best = all.get(0);
+        }
+        if (best == null || best.score < REVIEW) {
+            return verdict(r, "not_found", best == null ? 0 : best.score, String.join("+", asked), null, top(all, null, 3),
+                    "Nothing online matched well enough");
+        }
+        // the best title, with what the agreeing sources add
+        List<Match> agree = agreeing(best, all);
+        Match rival = null;
+        for (Match m : all) {
+            if (m == best || agree.contains(m) || sameTitle(best, m)) continue;
+            if (m.score >= best.score - 0.05 && m.score >= 0.7) { rival = m; break; }
+        }
+        if (rival != null) {  // two titles fit about as well (a remake, an anime and its manga): more sources decide
+            List<Match> rivalAgree = agreeing(rival, all);
+            if (rivalAgree.size() > agree.size()) {
+                Match was = best;
+                best = rival;
+                agree = rivalAgree;
+                rival = was;
+            }
+        }
+        double conf = Math.min(1, best.score + (agree.isEmpty() ? 0 : 0.08));
+        Match merged = combine(best, agree);
+        if (family(merged.source).equals("wikidata") || merged.genres.isEmpty()) wikidataGenres(merged);
+        if (merged.group().equals("watch")) {  // length, seasons and rating, like a movie app
+            try {
+                Details d = details(merged.ext, merged.type);
+                if (merged.runtime == 0) merged.runtime = d.runtime;
+                if (merged.episodes == 0) merged.episodes = d.episodes;
+                merged.rating = d.rating;
+                merged.ratingBy = d.ratingBy;
+                merged.votes = d.votes;
+                merged.seasons = d.seasons;
+                merged.seasonsBy = d.seasonsBy;
+                if (!d.imdb.isEmpty()) merged.ext.putIfAbsent("imdb", d.imdb);
+            } catch (Stopped e) {
+                throw e;
+            } catch (Exception ignored) {
+                // no length: the title is still verified
+            }
+        }
+        Set<String> by = new LinkedHashSet<>();
+        by.add(best.source);
+        for (Match m : agree) by.add(m.source);
+        if (agree.isEmpty()) {  // Avles: one source may be wrong; it must exist in two independent places
+            return verdict(r, "not_found", conf, String.join("+", asked), null, top(all, best, 3),
+                    "Only " + best.source + " has " + best.title + (best.year > 0 ? " (" + best.year + ")" : "") + "; a second source has to agree");
+        }
+        String note = "Confirmed by " + String.join(" and ", by);
+        if (rival != null) note += "; picked over " + rival.title + (rival.year > 0 ? " (" + rival.year + ")" : "") + ", which fewer sources agree on";
+        return verdict(r, "verified", conf, String.join("+", by), merged, top(all, best, 4), note);
+    }
+
+    /** One answer is already a near-exact match: the other first sources and spellings are not asked (faster). */
+    private static boolean clearlyFound(List<Match> all) {
+        for (Match m : all) if (m.score >= 0.95 && m.titleScore >= 0.97) return true;
+        return false;
+    }
+
+    /** Matches from other services that describe the same title (Wikipedia and Wikidata count as one service). */
+    private static List<Match> agreeing(Match best, List<Match> all) {
+        List<Match> out = new ArrayList<>();
+        for (Match m : all) if (m != best && !family(m.source).equals(family(best.source)) && sameTitle(best, m)) out.add(m);
+        return out;
+    }
+
+    /** Wikipedia's answers are read through Wikidata, so the two are one source. */
+    static String family(String source) {
+        return "wikipedia".equals(source) ? "wikidata" : source;
+    }
+
+    /** The best match, with year, language, genres, poster and ids filled in from the sources that agree. */
+    static Match combine(Match best, List<Match> agree) {
+        Match m = new Match();
+        m.source = best.source;
+        m.id = best.id;
+        m.type = best.type;
+        m.title = best.title;
+        m.original = best.original;
+        m.names = new ArrayList<>(best.names);
+        m.year = best.year;
+        m.lang = best.lang;
+        m.country = best.country;
+        m.genres = new ArrayList<>(best.genres);
+        m.poster = best.poster;
+        m.overview = best.overview;
+        m.url = best.url;
+        m.ext = new HashMap<>(best.ext);
+        m.score = best.score;
+        m.titleScore = best.titleScore;
+        m.runtime = best.runtime;
+        m.episodes = best.episodes;
+        for (Match a : agree) {
+            if (m.runtime == 0) m.runtime = a.runtime;
+            if (m.episodes == 0) m.episodes = a.episodes;
+            if (m.year == 0) m.year = a.year;
+            if (m.lang.isEmpty()) m.lang = a.lang;
+            if (m.country.isEmpty()) m.country = a.country;
+            if (m.poster.isEmpty()) m.poster = a.poster;
+            if (m.overview.isEmpty()) m.overview = a.overview;
+            if (m.original.isEmpty()) m.original = a.original;
+            for (String g : a.genres) if (m.genres.size() < 8 && !m.genres.contains(g)) m.genres.add(g);
+            for (Map.Entry<String, String> e : a.ext.entrySet()) if (!e.getKey().startsWith("_")) m.ext.putIfAbsent(e.getKey(), e.getValue());
+            // Wikidata knows "film" or "series"; the movie databases know "anime" or "K-drama": keep the finer one
+            if (family(m.source).equals("wikidata") && !a.type.isEmpty()) m.type = a.type;
+        }
+        if (!m.ext.containsKey("_genres") && best.ext.containsKey("_genres")) m.ext.put("_genres", best.ext.get("_genres"));
+        return m;
+    }
+
+    private static List<Match> top(List<Match> all, Match best, int n) {
+        for (Match m : all) m.sources = 1 + agreeing(m, all).size();
+        List<Match> out = new ArrayList<>();
+        if (best != null) out.add(best);
+        for (Match m : all) {
+            if (out.size() >= n) break;
+            boolean dup = false;
+            for (Match o : out) if (o == m || (o.source.equals(m.source) && o.id.equals(m.id)) || sameTitle(o, m)) { dup = true; break; }
+            if (!dup && m.score >= 0.4) out.add(m);
+        }
+        return out;
+    }
+
+    private static JSONObject verdict(JSONObject r, String verdict, double conf, String by, Match facts, List<Match> choices, String note)
+            throws JSONException {
+        r.put("verdict", verdict);
+        r.put("confidence", Math.round(conf * 100) / 100.0);
+        r.put("by", by);
+        if (facts != null) {
+            facts.ext.remove("_genres");
+            r.put("facts", facts.facts());
+        }
+        JSONArray ch = new JSONArray();
+        for (Match m : choices) {
+            m.ext.remove("_genres");
+            ch.put(m.choice());
+        }
+        r.put("choices", ch);
+        r.put("note", note);
+        return r;
+    }
+}

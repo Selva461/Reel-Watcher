@@ -41,18 +41,27 @@ this format: **TOPIC, POINTS, MEANING, USE IT FOR, TOOLS, TAKEAWAY, TAGS**.
      and no login, and the notes are written from what is actually said.
 4. **Ask** is a search engine over what you learned: ranked results (BM25), typos and similar words allowed,
    the lines that answer you, related reels, and optionally a short answer from the on-phone AI that cites the reels.
-   None of it needs AI except that last button.
+   None of it needs AI except that last button. Type `"exact words"`, `-word` to leave a word out, and `#tag` to keep
+   one tag; a misspelt word gets a "Did you mean" from the words in your own library, and matching words are marked.
+   With nothing typed, Ask shows **Topics you learned** (reels grouped by the words they share, using TF-IDF and cosine
+   similarity) and the tools you saw most. A topic page lists its reels, their takeaways and tools. The search index is
+   kept in memory until a reel changes, so typing stays fast with thousands of reels (`assets/local/library.js`).
 5. **Add** takes many reel links at once, pasted Meta AI answers (several are split up), or Instagram's
    "Download your information" export (collections become labels). **Get my saved reels from Instagram** opens
    Instagram's own export page inside the app: you sign in and tap the buttons yourself (the app never clicks,
    scrolls or reads your password), and when the file is ready, tapping Download brings the saved reels straight in.
+   Until it comes back, Shelf and Add show a "check now" reminder (Meta keeps a finished export for 4 days). If
+   Instagram will not sign you in there, **Chrome** at the top does the same steps in your browser; then choose the
+   downloaded ZIP in Add (big and ZIP64 exports are fine).
 6. **Settings, Export** saves everything to Downloads/ReelShelf as JSON (to analyze with Claude) or Markdown.
 
-Battery: nothing runs in the background. Sharing only saves; the work and the model download run only while
-the app is open, and leaving the app stops them (the download continues from where it stopped).
-Limit: without a server the app can read a reel's link and caption, not its speech or on-screen text, so the
-on-phone AI works from the caption plus anything you type under "What the reel says". Meta AI has no such limit.
-The older engine below (Termux or PC) is still reachable from Settings.
+Battery: nothing starts by itself. Sharing only saves. A job you start (Start, screenshots, online check, the
+Instagram export download) keeps going if you leave the app, always with a notification showing its progress and a
+Stop button, and the notification goes away as soon as the job ends. With no job running, leaving the app stops everything.
+Limit: without a server the app reads a reel's caption and the text on its cover picture (read on the phone), not its
+speech, so the on-phone AI works from those plus anything you type under "What the reel says". Meta AI has no such limit.
+Instagram is read logged out, one reel every 4 to 7 seconds, and the app waits when Instagram asks it to slow down.
+The older engine below (Termux or PC) is separate now: the app no longer starts it.
 
 ## Reel Shelf: the app (PC, or Termux on the phone)
 
@@ -87,28 +96,16 @@ uv run reel-watcher app --lan            # also usable from your phone on the sa
 
 ### Run it on an Android phone, no PC needed
 
-The easy way: the Reel Shelf app walks you through it and shows the setup progress.
+Since app version 1.2.0 the APK no longer starts Termux (that permission made Play Protect block the app). To use
+this older engine, install Termux from F-Droid, paste the setup command below, then open http://localhost:8765 in Chrome.
 
-1. On your phone open https://github.com/Selva461/Reel-Watcher/releases/tag/apk-latest , download `ReelShelf.apk`
-   and install it (allow installing from your browser when Android asks).
-2. Open Reel Shelf and follow the two steps it shows:
-   - **Install Termux** from F-Droid (free). Not the Play Store version: that build is different and Reel Shelf cannot use it.
-   - **Set up once**: tap *Copy setup command and open Termux*, then in Termux long-press, Paste, Enter.
-     Come back to Reel Shelf to watch the progress; it opens by itself when it is ready (15-30 minutes, about 4 GB, use Wi-Fi).
-3. Android Settings, Apps, Termux, Battery: **Unrestricted**, so scans keep running with the screen off.
-
-Later, tap **Start Reel Shelf** in the app. If Android does not let the app start Termux, it opens Termux instead,
-which starts Reel Shelf and brings you back. Opening Termux yourself does the same; `reel-shelf-stop` stops it.
-
-Setup command, if you want to paste it yourself:
+Setup command:
 
 ```bash
 pkg install -y git && { git -C ~/Reel-Watcher pull -q --ff-only 2>/dev/null || git clone -b ccr-d0c0b070-bdpssy https://github.com/Selva461/Reel-Watcher.git ~/Reel-Watcher; } && bash ~/Reel-Watcher/android/termux-setup.sh
 ```
 
 It installs Python, FFmpeg, Tesseract (text), whisper.cpp (speech) and a small AI vision model (`qwen2.5vl:3b`, about 3 GB).
-A newer APK is signed differently, so uninstall the old Reel Shelf app before installing a new one (your library lives in Termux and is kept).
-
 Without the APK you can also open http://localhost:8765 in Chrome and choose **Add to Home screen**.
 On a phone, a reel takes longer than on a PC (a few minutes each); connect your PC with `--lan` for speed.
 

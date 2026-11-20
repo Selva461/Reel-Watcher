@@ -226,25 +226,19 @@ def test_security_rebinding_csrf_and_headers(running):
 # ---------------------------------------------------------------- UI in a real browser at phone size
 
 @pytest.fixture
-def page(running):
-    if not CHROME:
-        pytest.skip("Chromium not available")
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
-        ctx = browser.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True,
-                                  permissions=["clipboard-read", "clipboard-write"])
-        pg = ctx.new_page()
-        errors = []
-        pg.on("pageerror", lambda e: errors.append(str(e)))
-        # the app must work under its own Content Security Policy: any violation fails the test
-        pg.on("console", lambda m: errors.append(m.text) if "Content Security Policy" in m.text else None)
-        pg.goto(running["base"] + "/")
-        pg.running = running
-        pg.errors = errors
-        yield pg
-        assert not errors, errors
-        browser.close()
+def page(running, new_context):
+    ctx = new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True,
+                      permissions=["clipboard-read", "clipboard-write"])
+    pg = ctx.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    # the app must work under its own Content Security Policy: any violation fails the test
+    pg.on("console", lambda m: errors.append(m.text) if "Content Security Policy" in m.text else None)
+    pg.goto(running["base"] + "/")
+    pg.running = running
+    pg.errors = errors
+    yield pg
+    assert not errors, errors
 
 
 def no_side_scroll(pg):
@@ -301,6 +295,9 @@ def test_ui_search_language_and_filters(page):
     pg.get_by_role("button", name="Tamil").click()
     expect(pg.locator("#results .list-item")).to_have_count(2)
     pg.get_by_role("button", name="All").first.click()
+    # the click re-renders the whole screen, search box included: wait for that (All is pressed only in the new screen)
+    # or the typing below can land in the old box just as it is replaced, and is lost
+    expect(pg.get_by_role("button", name="All").first).to_have_attribute("aria-pressed", "true")
     pg.fill("#q", "idiots")
     expect(pg.locator("#results .list-item")).to_have_count(1)
     expect(pg.locator("#results .title")).to_have_text("3 Idiots")
@@ -515,6 +512,55 @@ def test_ui_import_and_settings(page):
     finally:
         checks.run_checks = real
     assert Path(pg.running["lib"].dir / "settings.json").exists()
+
+
+HOLD_SELFCHECK = """(() => {
+  const real = window.fetch.bind(window);
+  window.__held = [];
+  window.fetch = (url, opts) => {
+    if (String(url).endsWith("/api/selfcheck") && !(opts && opts.method === "POST"))
+      return new Promise((done) => {
+        window.__held.push(() => done(real(url, opts)));
+        document.documentElement.dataset.held = window.__held.length;  // visible to the test (a script string cannot be polled: CSP)
+      });
+    return real(url, opts);
+  };
+})()"""
+RELEASE_AND_SETTLE = """async () => {
+  window.__held.splice(0).forEach((go) => go());
+  delete document.documentElement.dataset.held;
+  await (await fetch("/api/version")).json();  // a later round trip: the answers released above were handled first
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+}"""
+
+
+def test_ui_settings_work_before_the_selfcheck_answers(page):
+    """A setting changed while the self-check status is still on its way is saved (it used to be dropped), and a late
+    answer neither undoes the change nor draws into another screen. The status request is held inside the page
+    (its fetch promise stays pending), which is deterministic: the test waits for the held request, not for time."""
+    pg = page
+    pg.evaluate(HOLD_SELFCHECK)
+    pg.goto(pg.running["base"] + "/#/settings")
+    pg.locator("html[data-held='1']").wait_for(state="attached")  # the page has asked for the status and is waiting for it
+    pg.locator("#region").wait_for()
+    pg.select_option("#region", "US")
+    pg.get_by_role("switch", name="Online lookups").click()
+    pg.get_by_text("Online lookups on").wait_for(timeout=10000)  # saved although the status answer is held back
+    assert pg.running["app"].settings()["region"] == "US"
+    assert pg.running["app"].settings()["online"] is True
+    pg.evaluate(RELEASE_AND_SETTLE)
+    pg.get_by_role("button", name="Run self-check").wait_for()  # the late answer filled in its own part
+    assert pg.input_value("#region") == "US"
+    assert pg.get_by_role("switch", name="Online lookups").get_attribute("aria-checked") == "true"
+    # leaving before the answer arrives: the late answer must not throw or draw into the next screen
+    pg.goto(pg.running["base"] + "/#/")
+    pg.goto(pg.running["base"] + "/#/settings")
+    pg.locator("html[data-held='1']").wait_for(state="attached")
+    pg.goto(pg.running["base"] + "/#/identify")
+    pg.get_by_role("heading", name="Identify").wait_for()
+    pg.evaluate(RELEASE_AND_SETTLE)
+    assert pg.get_by_role("button", name="Run self-check").count() == 0
+    assert pg.get_by_role("heading", name="Identify").is_visible()
 
 
 def test_api_version_and_self_update(tmp_path, monkeypatch):

@@ -1,0 +1,9 @@
+{
+  "extraKnownMarketplaces": {
+    "i-have-adhd": { "source": { "source": "github", "repo": "ayghri/i-have-adhd" } }
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "i-have-adhd@i-have-adhd": true
+  }
+}

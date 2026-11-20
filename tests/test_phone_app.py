@@ -18,6 +18,7 @@ LOCAL = Path(__file__).resolve().parents[1] / "android" / "app-shell" / "app" / 
 
 # The fake bridge. window.__rn holds its state so tests can set it up and look at it.
 FAKE_RN = r"""
+window.__igPace = { gap: 0, jitter: 0, backoff: [0, 0, 0] };  // no waiting between Instagram pages in tests
 (() => {
   const st = window.__rn = Object.assign({
     db: "", settings: "{}", shared: [], pages: {}, model: { ready: false, partial: 0, installed: [] },
@@ -25,37 +26,91 @@ FAKE_RN = r"""
   }, JSON.parse(sessionStorage.getItem("rn") || "{}"));
   const keep = () => sessionStorage.setItem("rn", JSON.stringify(st));
   const later = (fn) => setTimeout(fn, 5);
+  const page = { rev: st.rev || 0, shotsRev: st.shotsRev || 0 };  // what this page loaded
   window.RN = {
-    load: () => st.db,
-    store: (j) => { st.db = j; keep(); return true; },
-    takeShared: () => { const s = JSON.stringify(st.shared.map((t) => ({ text: t, at: 1 }))); st.shared = []; keep(); return s; },
+    // the library file has a revision: a page's save is refused when the file moved on since the page loaded (LibraryFile.java)
+    load: () => { page.rev = st.rev || 0; return st.db; },
+    store: (j) => { if (st.storeRefused || (st.rev || 0) !== page.rev) return false; st.db = j; st.rev = page.rev = (st.rev || 0) + 1; keep(); return true; },
+    libraryStale: (w) => (w === "shots" ? (st.shotsRev || 0) !== page.shotsRev : (st.rev || 0) !== page.rev),
+    // shared items stay listed until acknowledged by id (SharedQueue.java)
+    // st.rivalDb: another page saves this library right after this page loaded it (a stale page)
+    peekShared: () => { if (st.rivalDb) { st.db = st.rivalDb; st.rev = (st.rev || 0) + 1; st.rivalDb = null; keep(); }
+      return JSON.stringify(st.shared.map((t) => ({ id: "id-" + t, text: t, at: 1 }))); },
+    ackShared: (ids) => { const gone = JSON.parse(ids); st.shared = st.shared.filter((t) => !gone.includes("id-" + t)); keep(); },
     getSettings: () => st.settings,
     setSettings: (j) => { st.settings = j; keep(); },
+    patchSettings: (j) => { st.patches = (st.patches || []).concat([j]); const m = Object.assign(JSON.parse(st.settings || "{}"), JSON.parse(j)); st.settings = JSON.stringify(m); keep(); return st.settings; },
     copy: (t) => { st.copied = t; keep(); },
     shareText: (t, title) => { st.sharedOut.push([title, t]); keep(); },
     openUrl: (u) => { st.opened.push(u); keep(); },
-    openServerMode: () => { st.opened.push("server"); keep(); },
     allowWork: () => {},
     stopModel: () => { st.stopped++; keep(); },
-    modelInfo: (name) => JSON.stringify({ file: name, ready: st.model.ready, bytes: st.model.ready ? 1.6e9 : 0, partial: st.model.partial,
-      downloading: false, backend: st.model.ready ? "gpu" : "", installed: st.model.installed }),
-    deleteModel: () => { st.model.ready = false; keep(); return true; },
+    // st.model.verified is what Java reports for the file ("yes", "no", "unknown", "checking", "own"); st.model.kept: "Keep using it" was chosen
+    // st.model.byFile: what differs for one model file (for example {"x.litertlm": {ready: true}}); "downloading" is one flag for the whole phone, as in Java
+    modelInfo: (name) => { const m = Object.assign({}, st.model, (st.model.byFile || {})[name] || {});
+      return JSON.stringify({ file: name, ready: m.ready, bytes: m.ready ? 1.6e9 : 0, partial: m.partial,
+      downloading: !!st.model.downloading, backend: m.ready ? "gpu" : "", installed: m.installed,
+      verified: m.verified || "yes", kept: !!m.kept }); },
+    deleteModel: (name) => { st.calls.push(["deleteModel", name]); st.model.ready = false; keep(); return true; },
+    // the one-time check of a model already on the phone: it starts only for "unknown" and only when Java would allow it (st.checkRefused),
+    // and it ends by itself with st.model.checkResult unless st.checkHold keeps it running (the test calls window.__finishCheck())
+    checkModel: (name) => { st.calls.push(["checkModel", name]); const m = st.model;
+      if (m.ready && m.verified === "unknown" && !st.checkRefused) { m.verified = "checking"; if (!st.checkHold) later(() => window.__finishCheck()); }
+      keep(); return m.verified || "yes"; },
+    stopCheck: () => { st.calls.push(["stopCheck"]); if (st.model.verified === "checking") st.model.verified = "unknown"; keep(); later(() => rnProgress("check", 0, 0)); },
+    keepModel: (name) => { st.calls.push(["keepModel", name]); st.model.kept = st.model.verified === "no"; keep(); return st.model.kept; },
     fetchPage: (id, url) => { st.calls.push(["fetchPage", url]); keep(); later(() => {
       const p = Object.keys(st.pages).find((k) => url.includes(k));
-      p ? rnDone(id, true, st.pages[p]) : rnDone(id, false, "Instagram answered 429"); }); },
+      p ? rnDone(id, true, st.pages[p]) : rnDone(id, false, st.igStatus || "Instagram answered 404"); }); },
     generate: (id, prompt, opts) => { st.calls.push(["generate", prompt, JSON.parse(opts)]); keep(); later(() => {
       const a = st.answers.shift();
       a ? rnDone(id, true, JSON.stringify({ text: a, backend: "gpu", ms: 10 })) : rnDone(id, false, "The AI model failed: out of memory"); }); },
+    // st.holdDownload keeps a download running (the model shows "downloading") until the test calls window.__finishDownload()
     downloadModel: (id, url, name) => { st.calls.push(["download", url, name]); keep();
-      later(() => rnProgress("download", 800e6, 1.6e9)); later(() => { st.model.ready = true; keep(); rnDone(id, true, "ready"); }); },
-    pickModel: (id) => later(() => rnDone(id, false, "cancelled")),
+      if (st.holdDownload) { st.model.downloading = true; st.downloadId = id; keep(); return; }
+      later(() => rnProgress("download", 800e6, 1.6e9)); later(() => { st.model.ready = true; st.model.verified = "yes"; st.model.kept = false; keep(); rnDone(id, true, "ready"); }); },
+    // st.pickName is the file the user picks: Java keeps it under its own name, marked "own" (never "yes"), and never replaces a file
+    pickModel: (id) => later(() => { if (!st.pickName) { rnDone(id, false, "cancelled"); return; }
+      st.model.ready = true; st.model.verified = "own"; st.model.installed = (st.model.installed || []).concat([st.pickName]); keep(); rnDone(id, true, st.pickName); }),
     postJson: (id, url, body) => { st.calls.push(["postJson", url, JSON.parse(body)]); keep(); later(() => {
       st.player ? rnDone(id, true, JSON.stringify(st.player)) : rnDone(id, false, "YouTube answered 403"); }); },
     openInstagram: () => { st.opened.push("instagram-export"); keep(); },
-    takeInstagramExport: () => { const s = st.igExport ? JSON.stringify(st.igExport) : ""; st.igExport = null; keep(); return s; },
-    signOutInstagram: () => { st.opened.push("ig-signout"); keep(); },
+    readReelVideo: (id, url) => { st.calls.push(["video", url]); keep(); later(() => st.video ? rnDone(id, true, JSON.stringify(st.video)) : rnDone(id, false, "Instagram answered 403 for the video")); },
+    speechInfo: () => JSON.stringify({ ready: !!st.speech, downloading: false, size: 40e6, partial: st.speechPartial || 0 }),
+    downloadSpeech: (id, ...extra) => { st.calls.push(["speechDownload", ...extra]); keep(); later(() => rnProgress("speech", 20e6, 40e6)); later(() => {
+      if (st.speechFail) { rnDone(id, false, st.speechFail); return; }  // Java refused it (st.speechFail is its message): nothing is installed
+      st.speech = true; st.speechPartial = 0; keep(); rnDone(id, true, "ready"); }); },
+    deleteSpeech: () => { st.speech = false; keep(); },
+    addShotPictures: (id) => later(() => rnDone(id, false, "cancelled")),
+    webSearch: (id, q) => { st.calls.push(["webSearch", q]); keep(); later(() => st.web ? rnDone(id, true, JSON.stringify(st.web)) : rnDone(id, false, "No internet, or the search services did not answer")); },
+    listen: (id) => { st.calls.push(["listen"]); later(() => st.said ? rnDone(id, true, st.said) : rnDone(id, false, "cancelled")) },
+    readPictures: (id) => later(() => st.pictureText ? rnDone(id, true, st.pictureText) : rnDone(id, false, "cancelled")),
+    readCoverText: (id, url) => { st.calls.push(["cover", url]); keep(); later(() => rnDone(id, true, st.coverText || "")); },
+    workUpdate: (title, text, d, t) => { st.work = (st.work || []).concat([["update", title]]); keep(); },
+    workEnd: () => { st.work = (st.work || []).concat([["end"]]); keep(); },
+    isNight: () => !!st.night,
+    nightActive: () => !!st.nightActive,  // the app's page: a nightly run is still going (the phone is asking it to stop)
+    nightDone: () => { st.nightDone = (st.nightDone || 0) + 1; keep(); },
+    nightRunInfo: () => JSON.stringify(st.nightRun || { on: true, hour: 0, minBattery: 40, exact: true }),
+    setNightRun: (on, hour, bat) => { st.nightRun = { on, hour, minBattery: bat, exact: true }; keep(); },
+    instagramWaitingSince: () => st.igWaiting || 0,
+    dismissInstagramWaiting: () => { st.igWaiting = 0; keep(); },
+    // the watchlist's online check: st.verifyAnswers is what the phone "finds"; st.verifyPending waits to be taken
+    verifyNow: (id) => { st.calls.push(["verifyNow"]); keep(); later(() => rnProgress("verify", 1, 2)); later(() => {
+      st.verifyPending = Object.assign(st.verifyPending || {}, st.verifyAnswers || {}); keep();
+      rnDone(id, true, JSON.stringify({ checked: Object.keys(st.verifyAnswers || {}).length, offline: false, stopped: false })); }); },
+    stopVerify: () => { st.calls.push(["stopVerify"]); keep(); },
+    takeVerified: () => { const s = JSON.stringify(st.verifyPending || {}); st.verifyPending = {}; keep(); return s; },
+    setNightly: (on) => { st.nightly = on; keep(); },
+    nightlyInfo: () => JSON.stringify({ on: !!st.nightly, scheduled: !!st.nightly }),
     saveFile: (id, name, mime, text) => { st.saved.push({ name, mime, text }); keep(); later(() => rnDone(id, true, "Downloads/ReelShelf/" + name)); },
   };
+  window.__finishCheck = () => { st.model.verified = st.model.checkResult || "yes"; keep(); rnProgress("check", 0, 0); };
+  window.__finishDownload = () => { st.model.downloading = false; st.model.ready = true; st.model.verified = "yes"; st.model.kept = false; st.model.partial = 0; keep(); rnDone(st.downloadId, true, "ready"); };
+  if (st.ytApps) window.RN.postYoutube = (id, url, body, client) => {  // the newer app: asks as one of YouTube's apps
+    st.calls.push(["postYoutube", url, JSON.parse(body), client]); keep(); later(() => {
+      const a = st.ytApps[/get_transcript/.test(url) ? "transcript" : client];
+      a ? rnDone(id, true, JSON.stringify(a)) : rnDone(id, false, "YouTube answered 403"); }); };
 })();
 """
 
@@ -97,32 +152,26 @@ def site():
 
 
 @pytest.fixture
-def phone(site):
-    if not CHROME:
-        pytest.skip("Chromium not available")
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
-        ctx = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
-        ctx.add_init_script(FAKE_RN)
-        pg = ctx.new_page()
-        errors = []
-        pg.on("pageerror", lambda e: errors.append(str(e)))
-        pg.on("console", lambda m: errors.append(m.text) if "Content Security Policy" in m.text or m.type == "error" else None)
-        pg.on("dialog", lambda d: d.accept())
+def phone(site, new_context):
+    ctx = new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
+    ctx.add_init_script(FAKE_RN)
+    pg = ctx.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.on("console", lambda m: errors.append(m.text) if "Content Security Policy" in m.text or m.type == "error" else None)
+    pg.on("dialog", lambda d: d.accept())
 
-        def open_with(state=None, hash_="#/"):
-            pg.goto(site + "#/blank")
-            if state:
-                pg.evaluate("s => sessionStorage.setItem('rn', JSON.stringify(s))", state)
-            pg.goto(site + hash_)
-            pg.reload()
-            pg.wait_for_selector("#app > *")
-        pg.open_with = open_with
-        pg.rn = lambda: pg.evaluate("window.__rn")
-        yield pg
-        assert not errors, errors
-        browser.close()
+    def open_with(state=None, hash_="#/"):
+        pg.goto(site + "#/blank")
+        if state:
+            pg.evaluate("s => sessionStorage.setItem('rn', JSON.stringify(s))", state)
+        pg.goto(site + hash_)
+        pg.reload()
+        pg.wait_for_selector("#app > *")
+    pg.open_with = open_with
+    pg.rn = lambda: pg.evaluate("window.__rn")
+    yield pg
+    assert not errors, errors
 
 
 def db_of(pg):
@@ -174,7 +223,8 @@ def test_shared_reel_is_only_saved_then_start_reads_and_writes_notes(phone):
     st = phone.rn()
     assert not any(c[0] in ("fetchPage", "generate") for c in st["calls"])  # sharing only saves: no work until Start
     assert db_of(phone)["reels"][0]["status"] == "new"
-    phone.get_by_role("button", name="Start: 1 reel").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
     r = db_of(phone)["reels"][0]
     assert r["status"] == "done" and r["notes_by"] == "phone" and r["author"] == "creator_a"
@@ -182,6 +232,8 @@ def test_shared_reel_is_only_saved_then_start_reads_and_writes_notes(phone):
     gen = [c for c in phone.rn()["calls"] if c[0] == "generate"][0]
     assert "Obsidian" in gen[1] and "TOPIC:" in gen[1] and gen[2]["gpu"] is True and gen[2]["maxTokens"] == 800
     assert phone.rn()["stopped"] >= 1  # the model is freed as soon as the work is done
+    work = phone.rn()["work"]  # a notification (with Stop) while it runs, gone as soon as it is done
+    assert work[0] == ["update", "Writing reel notes"] and work[-1] == ["end"]
     phone.goto(phone.url.split("#")[0] + "#/")
     phone.get_by_text("Hardcoded secrets in mobile apps").click()
     phone.get_by_text("Notes by the on-phone AI (from the caption)").wait_for()
@@ -190,8 +242,9 @@ def test_shared_reel_is_only_saved_then_start_reads_and_writes_notes(phone):
 
 
 def test_without_the_model_start_reads_captions_and_ask_meta_ai_files_the_answer(phone):
-    phone.open_with({"shared": ["https://www.instagram.com/reel/BBB222/"], "pages": {"BBB222/embed": EMBED}})
-    phone.get_by_role("button", name="Start: 1 reel").click()
+    phone.open_with({"shared": ["https://www.instagram.com/reel/BBB222/"], "pages": {"BBB222/embed": EMBED}, "settings": json.dumps({"metaAi": True})})
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
     assert not any(c[0] == "generate" for c in phone.rn()["calls"])
     r = db_of(phone)["reels"][0]
@@ -214,6 +267,7 @@ def test_custom_prompt_and_model_settings_are_used(phone):
     phone.open_with(hash_="#/settings")
     phone.locator("#prompt").fill("My master prompt for {link} please")
     phone.get_by_role("button", name="Save prompt").click()
+    phone.locator("#metaon").check()  # Ask Meta AI is hidden on reels unless switched on
     phone.get_by_role("button", name="CPU").click()
     phone.get_by_role("button", name="Long").click()
     s = json.loads(phone.rn()["settings"])
@@ -221,12 +275,208 @@ def test_custom_prompt_and_model_settings_are_used(phone):
     phone.get_by_role("button", name="Download model").click()
     phone.get_by_text("The AI model is ready").wait_for()
     dl = [c for c in phone.rn()["calls"] if c[0] == "download"][0]
-    assert dl[1].startswith("https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/") and dl[2].endswith(".litertlm")
+    assert ["update", "Downloading the AI model"] in phone.rn()["work"]  # keeps going after leaving the app, with Stop
+    phone.wait_for_function("() => (window.__rn.work || []).slice(-1)[0][0] === 'end'")
+    assert dl[1] == "" and dl[2] == "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm"  # the page names the model; Java knows the pinned address
     phone.get_by_text("running on GPU").wait_for()
     phone.evaluate("() => { const s = window.__rn; s.shared.push('https://www.instagram.com/reel/CCC333/'); sessionStorage.setItem('rn', JSON.stringify(s)); onAppResume(); }")
     phone.goto(phone.url.split("#")[0] + "#/r/CCC333")
     phone.get_by_role("button", name="Ask Meta AI").click()
     assert phone.rn()["copied"] == "My master prompt for https://www.instagram.com/reel/CCC333/ please"
+
+
+def test_the_page_names_models_but_never_an_address():
+    """Java picks the pinned address from its own table (ModelCatalog); the page only names the model."""
+    import re
+    js = (LOCAL / "local.js").read_text(encoding="utf-8")
+    assert "resolve/main" not in js and "huggingface.co" not in js
+    models = js[js.index("const MODELS = ["):js.index("\n];", js.index("const MODELS = ["))]
+    assert len(re.findall(r"\bfile: \"[^\"]+\.litertlm\"", models)) == 3
+    assert not re.search(r"\burl\s*:", models)  # no address field in MODELS
+    sent = re.findall(r"phone\(\"downloadModel\",\s*([^,]*),", js)
+    assert len(sent) == 2 and all(a.strip() == '""' for a in sent)  # every download call sends an empty address
+
+
+# ---------------------------------------------------------------- models already on the phone, and models you picked (A2-3)
+
+QWEN_FILE = "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm"
+ON_PHONE = {"ready": True, "partial": 0, "installed": []}  # a model file that exists ("ready" only means that)
+
+
+def calls_named(pg, *names):
+    return [c for c in pg.rn()["calls"] if c[0] in names]
+
+
+def test_a_model_already_on_the_phone_is_checked_once_in_the_background_then_called_verified(phone):
+    phone.open_with({"model": {**ON_PHONE, "verified": "unknown", "checkResult": "yes"}, "checkHold": True}, "#/settings")
+    phone.get_by_text("Checking this model file against the published one.").wait_for()
+    assert phone.get_by_role("button", name="Stop checking").count() == 1
+    assert phone.locator("#mstate").inner_text() == "Ready"  # "ready" keeps its meaning: it exists and works while it is checked
+    assert phone.get_by_role("button", name="Delete the model").count() == 1
+    phone.evaluate("() => window.__finishCheck()")
+    phone.get_by_text("Verified: this is the published model file.").wait_for()
+    assert phone.get_by_role("button", name="Stop checking").count() == 0
+    phone.get_by_role("button", name="CPU").click()  # Settings is drawn again: no second check
+    phone.get_by_text("Verified: this is the published model file.").wait_for()
+    assert calls_named(phone, "checkModel") == [["checkModel", QWEN_FILE]]
+
+
+def test_a_model_that_is_not_the_published_file_is_kept_and_usable_with_a_warning_and_a_download_again_button(phone):
+    phone.open_with({"model": {**ON_PHONE, "verified": "no"}}, "#/settings")
+    phone.get_by_text("This model file is not the published one. It may be damaged.").wait_for()
+    assert phone.get_by_role("button", name="Download again (1.49 GB)").count() == 1
+    assert phone.get_by_role("button", name="Keep using it").count() == 1
+    assert phone.locator("#mstate").inner_text() == "Ready"  # still ready: notes keep using it
+    assert phone.get_by_text("Verified: this is the published model file.").count() == 0
+    assert not calls_named(phone, "deleteModel", "download", "checkModel")  # nothing is deleted, replaced or re-checked by itself
+    phone.get_by_role("button", name="Keep using it").click()
+    phone.get_by_text("Not the published file (you chose to keep using it).").wait_for()
+    assert phone.get_by_role("button", name="Keep using it").count() == 0 and phone.get_by_role("button", name="Download again (1.49 GB)").count() == 1
+    assert calls_named(phone, "keepModel") == [["keepModel", QWEN_FILE]]
+    phone.reload()
+    phone.wait_for_selector("#app > *")
+    phone.get_by_text("Not the published file (you chose to keep using it).").wait_for()  # remembered, not asked again
+    assert phone.get_by_text("It may be damaged.").count() == 0 and not calls_named(phone, "deleteModel", "download")
+
+
+def test_download_again_keeps_the_old_file_until_the_new_one_is_done_and_ends_verified(phone):
+    phone.open_with({"model": {**ON_PHONE, "verified": "no"}, "holdDownload": True}, "#/settings")
+    phone.get_by_role("button", name="Download again (1.49 GB)").click()
+    phone.get_by_text("Downloading again").wait_for()
+    assert phone.get_by_role("button", name="Pause download").count() == 1
+    assert phone.get_by_role("button", name="Delete the model").count() == 1  # the old file is still the model
+    assert calls_named(phone, "download") == [["download", "", QWEN_FILE]]  # the existing verified download: the page names the model only
+    phone.evaluate("() => window.__finishDownload()")
+    phone.get_by_text("Verified: this is the published model file.").wait_for()
+    assert not calls_named(phone, "deleteModel")
+
+
+def test_another_models_card_is_not_marked_downloading_again_while_a_different_model_downloads(phone):
+    """The phone has one download flag. A model that is ready must not look as if it were downloading again, with a Pause button,
+    only because another model (chosen in "Model to use") is the one downloading."""
+    gemma = "gemma-4-E4B-it.litertlm"
+    phone.open_with({"model": {"ready": False, "partial": 0, "installed": [], "byFile": {QWEN_FILE: {"ready": True, "verified": "yes"}}},
+                     "settings": json.dumps({"modelFile": gemma}), "holdDownload": True}, "#/settings")
+    phone.get_by_role("button", name="Download model").click()
+    phone.wait_for_function("() => document.getElementById('mstate').innerText === 'Downloading'")
+    assert phone.get_by_role("button", name="Pause download").count() == 1  # the model that downloads says so
+    phone.locator("#pickm").select_option(QWEN_FILE)  # now the card of a model that is ready and is not the one downloading
+    phone.wait_for_function("() => document.getElementById('mstate').innerText === 'Ready'")
+    assert phone.get_by_role("button", name="Pause download").count() == 0 and phone.get_by_text("Downloading again").count() == 0
+    phone.get_by_text("Verified: this is the published model file.").wait_for()
+    phone.locator("#pickm").select_option(gemma)  # and back: its own card still shows the download
+    phone.wait_for_function("() => document.getElementById('mstate').innerText === 'Downloading'")
+    assert phone.get_by_role("button", name="Pause download").count() == 1
+
+
+def test_a_model_file_you_picked_is_called_your_own_and_is_never_checked_or_called_verified(phone):
+    phone.open_with({"model": {**ON_PHONE, "installed": ["mine.litertlm"], "verified": "own"},
+                     "settings": json.dumps({"modelFile": "mine.litertlm"})}, "#/settings")
+    phone.get_by_text("Your own file, not verified.").wait_for()
+    assert phone.get_by_text("Verified: this is the published model file.").count() == 0
+    assert phone.get_by_role("button", name="Download again", exact=False).count() == 0
+    assert not calls_named(phone, "checkModel", "deleteModel")
+
+
+def test_picking_a_model_file_selects_it_as_your_own(phone):
+    phone.open_with({"pickName": "mine.litertlm"}, "#/settings")
+    phone.get_by_role("button", name="Use my own model file (.litertlm)").click()
+    phone.get_by_text("Your own file, not verified.").wait_for()
+    assert json.loads(phone.rn()["settings"])["modelFile"] == "mine.litertlm"
+    assert phone.get_by_text("Verified: this is the published model file.").count() == 0
+    assert not calls_named(phone, "checkModel", "deleteModel", "download")
+
+
+def test_a_check_that_cannot_start_now_says_not_checked_yet_and_check_now_tries_again(phone):
+    phone.open_with({"model": {**ON_PHONE, "verified": "unknown", "checkResult": "yes"}, "checkRefused": True}, "#/settings")
+    phone.get_by_text("Not checked yet.").wait_for()
+    assert len(calls_named(phone, "checkModel")) == 1  # Java was asked once, and said not now
+    phone.get_by_role("button", name="Check now").click()
+    phone.get_by_text("Not now: the check needs the app open").wait_for()
+    assert len(calls_named(phone, "checkModel")) == 2 and phone.get_by_text("Not checked yet.").count() == 1
+    phone.evaluate("() => { window.__rn.checkRefused = false; }")
+    phone.get_by_role("button", name="Check now").click()
+    phone.get_by_text("Verified: this is the published model file.").wait_for()
+
+
+def test_a_check_can_be_stopped_and_is_not_started_again_until_you_ask(phone):
+    phone.open_with({"model": {**ON_PHONE, "verified": "unknown", "checkResult": "no"}, "checkHold": True}, "#/settings")
+    phone.get_by_text("Checking this model file against the published one.").wait_for()
+    phone.get_by_role("button", name="Stop checking").click()
+    phone.get_by_text("Not checked yet.").wait_for()
+    assert calls_named(phone, "stopCheck") == [["stopCheck"]]
+    phone.get_by_role("button", name="CPU").click()  # Settings is drawn again: the check you stopped stays stopped
+    phone.get_by_text("Not checked yet.").wait_for()
+    assert len(calls_named(phone, "checkModel")) == 1
+    phone.get_by_role("button", name="Check now").click()
+    phone.get_by_text("Checking this model file against the published one.").wait_for()
+    assert len(calls_named(phone, "checkModel")) == 2
+    phone.evaluate("() => window.__finishCheck()")  # this time the answer is "no": warned, kept, never deleted
+    phone.get_by_text("This model file is not the published one. It may be damaged.").wait_for()
+    assert phone.locator("#mstate").inner_text() == "Ready" and not calls_named(phone, "deleteModel")
+
+
+def test_notes_are_still_written_with_a_model_that_is_not_the_published_file(phone):
+    """The check only labels a model: it keeps working (the owner's decision D1), and nothing starts a check or a download by itself."""
+    phone.open_with({"shared": ["https://www.instagram.com/reel/AAA111/"], "pages": {"AAA111/embed": EMBED},
+                     "model": {**ON_PHONE, "verified": "no"}, "answers": [ANSWER]})
+    phone.get_by_text("1 new reel saved").wait_for()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    r = db_of(phone)["reels"][0]
+    assert r["status"] == "done" and r["notes_by"] == "phone" and r["notes"]["topic"] == "Hardcoded secrets in mobile apps"
+    assert [c for c in phone.rn()["calls"] if c[0] == "generate"]
+    assert not calls_named(phone, "deleteModel", "download", "checkModel")
+
+
+def test_the_nightly_run_never_checks_a_model(phone):
+    phone.open_with({"night": True, "model": {**ON_PHONE, "verified": "unknown"}})
+    phone.wait_for_function("window.__rn.nightDone >= 1")
+    assert not calls_named(phone, "checkModel", "stopCheck", "keepModel", "deleteModel")
+
+
+def test_java_keeps_the_model_check_out_of_the_way():
+    """The Android classes cannot run on a computer, so the few lines that keep the check where it belongs are pinned here
+    (its rules and files are tested in ModelCheckTest): it starts only from checkModel and only through ModelCheck.refuse
+    (night, screen, download, job, battery), it stops with stopAll, a download, a copy, every job and leaving the screen,
+    a download that passed the check is recorded as verified, and picking a file never deletes or replaces one."""
+    app = LOCAL.parents[1] / "java" / "app" / "reelshelf"
+    model = (app / "LocalModel.java").read_text(encoding="utf-8")
+    bridge = (app / "LocalBridge.java").read_text(encoding="utf-8")
+    activity = (app / "MainActivity.java").read_text(encoding="utf-8")
+
+    def body(text, start, end):
+        a = text.index(start)
+        return text[a:text.index(end, a + len(start))]
+
+    assert "checks.cancel()" in body(model, "void stopAll()", "void allow()")
+    assert "ModelCheck.recordDownloaded(" in body(model, "void download(", "ModelVerifier verifier()")
+    assert 'o.put("ready", f.isFile());' in body(bridge, "public String modelInfo", "@JavascriptInterface")  # "ready" still only means the file exists
+    import re
+    assert set(re.findall(r"ModelCheck\.(\w+)", model)) == {"Runner", "recordDownloaded"}  # answers and downloads never ask whether a model was checked
+    check = body(bridge, "public String checkModel", "public void stopCheck")
+    assert "ModelCheck.refuse(onScreen, act.isNight(), downloading, jobs.get() > 0," in check
+    assert bridge.count("checks.start(") == 1 and bridge.index("checks.start(") > bridge.index("public String checkModel")
+    assert "() -> onScreen && jobs.get() == 0" in check  # asked again when the worker gets to the check: not off screen, not behind a job
+    # runWork counts the job and stops a model check. The S4 backup, restore and kept-files methods run on the same worker without
+    # that (they work on the library and the files kept for it, not on a model), so a check may run beside them: no other caller may.
+    owners = {re.findall(r"(?:public|private) void (\w+)\(", bridge[:m.start()])[-1] for m in re.finditer(r"work\.execute\(", bridge)}
+    assert owners == {"runWork", "backupLibrary", "chooseBackup", "restoreBackup", "saveKept", "deleteKept"} and bridge.count("work.execute(") == 6
+    run = body(bridge, "private void runWork", "work.execute(")
+    assert "model.checks.cancel()" in run and run.index("jobs.incrementAndGet()") < run.index("model.checks.cancel()")  # the job is counted first
+    for sig in ("public void downloadModel", "public void downloadSpeech", "public void pickModel"):
+        assert "model.checks.cancel()" in body(bridge, sig, "@JavascriptInterface"), sig
+    pick = body(bridge, "public void pickModel", "@JavascriptInterface")  # the lambda and savePicked
+    assert "ModelCheck.keepPicked(" in pick and "dest.delete()" not in pick and "renameTo(" not in pick
+    assert "ModelCheck.pickTemp(model.dir())" in pick and '"picked-model.tmp"' not in bridge  # never <name>.part: that is a paused catalog download
+    assert "catch (IOException | RuntimeException e)" in body(pick, "ModelCheck.keepPicked(", "done(id, true")  # an odd name never ends the app
+    # a copy that a killed app left behind is removed before the next copy starts, and by Delete only while no copy is running
+    assert pick.index("picking = true") < pick.index("ModelCheck.clearPickTemp(model.dir())") < pick.index("savePicked(id, uri, name)")
+    assert "picking = false" in pick[pick.index("savePicked(id, uri, name)"):]
+    assert "if (!picking) ModelCheck.clearPickTemp(model.dir())" in body(bridge, "public boolean deleteModel", "@JavascriptInterface")
+    stop = body(activity, "protected void onStop()", "super.onStop()")
+    assert stop.index("local.screen(false)") < stop.index("if (!working)")
 
 
 def test_bulk_paste_links_and_old_answers(phone):
@@ -240,8 +490,9 @@ def test_bulk_paste_links_and_old_answers(phone):
     phone.get_by_text("2 answers saved").wait_for()
     reels = db_of(phone)["reels"]
     assert len(reels) == 5 and sum(1 for r in reels if r.get("notes")) == 2
-    phone.get_by_role("button", name="#ideas").click()
-    assert phone.locator(".list-item").count() == 1
+    phone.goto(phone.url.split("#")[0] + "#/")
+    phone.locator("#tq").fill("#ideas")
+    phone.wait_for_function("() => document.querySelectorAll('#results a.list-item').length === 1")
 
 
 def test_instagram_export_zip_with_collections(phone, tmp_path):
@@ -266,10 +517,108 @@ def test_instagram_export_zip_with_collections(phone, tmp_path):
     assert by["EXP002"]["url"] == "https://www.instagram.com/p/EXP002/"
 
 
+def _as_zip64(data, patch_offset_of=None):
+    """Rewrites a small ZIP the way big exports are written: ZIP64 end records, and optionally one entry whose
+    offset sits in a ZIP64 extra field. Python only writes these past 4 GB, so the test builds them by hand."""
+    import struct
+    eocd = data.rindex(b"PK\x05\x06")
+    count, cd_size, cd_off = struct.unpack("<HII", data[eocd + 10:eocd + 20])
+    cd = data[cd_off:cd_off + cd_size]
+    out_cd = b""
+    p = 0
+    while p < len(cd):
+        nlen, elen, clen = struct.unpack("<HHH", cd[p + 28:p + 34])
+        head = bytearray(cd[p:p + 46])
+        name = cd[p + 46:p + 46 + nlen]
+        extra = cd[p + 46 + nlen:p + 46 + nlen + elen]
+        comment = cd[p + 46 + nlen + elen:p + 46 + nlen + elen + clen]
+        if patch_offset_of and name.decode().endswith(patch_offset_of):
+            (loff,) = struct.unpack("<I", head[42:46])
+            head[42:46] = struct.pack("<I", 0xFFFFFFFF)
+            extra = extra + struct.pack("<HHQ", 1, 8, loff)
+            head[30:32] = struct.pack("<H", len(extra))
+        out_cd += bytes(head) + name + extra + comment
+        p += 46 + nlen + elen + clen
+    body = data[:cd_off] + out_cd
+    rec_off = len(body)
+    rec = struct.pack("<IQHHIIQQQQ", 0x06064B50, 44, 45, 45, 0, 0, count, count, len(out_cd), cd_off)
+    loc = struct.pack("<IIQI", 0x07064B50, 0, rec_off, 1)
+    end = struct.pack("<IHHHHIIH", 0x06054B50, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0)
+    return body + rec + loc + end
+
+
+def test_big_zip64_export_is_read(phone, tmp_path):
+    posts = {"saved_saved_media": [
+        {"title": "creator_z", "string_map_data": {"Saved on": {"href": "https://www.instagram.com/reel/BIG001/", "timestamp": 1}}}]}
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as f:
+        f.writestr("media/big.jpg", b"x" * 5000)
+        f.writestr("your_instagram_activity/saved/saved_posts.json", json.dumps(posts))
+    data = _as_zip64(z.getvalue(), patch_offset_of="saved_posts.json")
+    with zipfile.ZipFile(io.BytesIO(data)) as check:  # still a valid ZIP for other readers
+        assert json.loads(check.read("your_instagram_activity/saved/saved_posts.json")) == posts
+    path = tmp_path / "big-export.zip"
+    path.write_bytes(data)
+    phone.open_with(hash_="#/add")
+    phone.locator("#zip").set_input_files(str(path))
+    phone.get_by_text("1 new reel saved").wait_for()
+    assert [r["code"] for r in db_of(phone)["reels"]] == ["BIG001"]
+
+
+def test_overnight_run_does_everything_then_ends_the_notification(phone):
+    phone.open_with({"shared": ["https://www.instagram.com/reel/NIG001/"], "pages": {"NIG001/embed": EMBED}, "answers": [ANSWER]}, "#/run")
+    phone.get_by_role("button", name="Run everything overnight").click()
+    phone.get_by_text("Notes exported to Downloads/ReelShelf/").wait_for()
+    st = phone.rn()
+    assert any(c[0] == "download" for c in st["calls"]) and any(c[0] == "generate" for c in st["calls"])
+    assert db_of(phone)["reels"][0]["status"] == "done" and st["saved"][-1]["name"].startswith("reel-notes-")
+    assert st["work"][0][1].startswith("Overnight run") and st["work"][-1] == ["end"]
+
+
+def test_nightly_run_files_the_day_and_skips_reels_already_known(phone):
+    done = {"code": "OLD001", "url": "https://www.instagram.com/reel/OLD001/", "status": "done", "added_at": 1,
+            "notes": {"topic": "Old"}, "notes_by": "meta", "collections": []}
+    phone.open_with({"night": True, "db": json.dumps({"reels": [done], "inbox": []}),
+                     "shared": ["https://www.instagram.com/reel/NEW001/", "https://www.instagram.com/reel/OLD001/",
+                                "https://www.instagram.com/reel/NEW001/"],
+                     "pages": {"NEW001/embed": EMBED}})
+    phone.wait_for_function("window.__rn.nightDone >= 1")
+    st = phone.rn()
+    reels = {r["code"]: r for r in db_of(phone)["reels"]}
+    assert sorted(reels) == ["NEW001", "OLD001"]  # shared twice, or already known: still one each
+    assert reels["OLD001"]["notes_by"] == "meta"  # already done: not touched
+    fetched = [c[1] for c in st["calls"] if c[0] == "fetchPage"]
+    assert fetched and all("NEW001" in u for u in fetched)
+    assert not any(c[0] == "download" for c in st["calls"])  # no big model download at night
+    assert st["work"][-1] == ["end"] and db_of(phone)["lastNight"]["log"]
+
+
+def test_nightly_run_settings(phone):
+    phone.open_with(hash_="#/settings")
+    phone.locator("#nrHour").select_option("1")
+    phone.locator("#nrBat").select_option("50")
+    assert phone.rn()["nightRun"] == {"on": True, "hour": 1, "minBattery": 50, "exact": True}
+
+
+def test_waiting_for_instagram_export_reminder(phone):
+    import time
+    phone.open_with({"igWaiting": int(time.time() * 1000) - 3 * 3600 * 1000}, "#/inbox")
+    card = phone.locator("#igwait")
+    card.get_by_text("3 hours ago").wait_for()
+    card.get_by_role("button", name="Check now").click()
+    assert "instagram-export" in phone.rn()["opened"]
+    phone.goto(phone.url.split("#")[0] + "#/add")
+    phone.locator("#igwait").get_by_role("button", name="Hide").click()
+    assert phone.locator("#igwait").count() == 0 and not phone.rn()["igWaiting"]
+    phone.goto(phone.url.split("#")[0] + "#/")
+    phone.locator("#results").wait_for()
+    assert phone.locator("#igwait").count() == 0
+
+
 def test_exports_and_leaving_the_app_stops_work(phone):
     phone.open_with({"shared": ["https://www.instagram.com/reel/DDD444/", ANSWER + "\nhttps://www.instagram.com/reel/DDD444/"]})
     phone.goto(phone.url.split("#")[0] + "#/settings")
-    phone.get_by_role("button", name="Save JSON").click()
+    phone.get_by_role("button", name="Export notes (JSON, cannot be restored)").click()
     phone.get_by_text("Saved to Downloads/ReelShelf/").wait_for()
     saved = phone.rn()["saved"][0]
     data = json.loads(saved["text"])
@@ -287,7 +636,8 @@ def test_exports_and_leaving_the_app_stops_work(phone):
         sessionStorage.setItem('rn', JSON.stringify(s)); onAppResume(); }""")
     phone.evaluate("""() => { RN.generate = (id) => { window.__genId = id; }; }""")  # the answer never comes back on its own
     phone.goto(phone.url.split("#")[0] + "#/run")
-    phone.get_by_role("button", name="Start: 1 reel").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     for _ in range(100):
         if phone.evaluate("() => !!window.__genId"):
             break
@@ -337,7 +687,8 @@ TIMED = """<?xml version="1.0" encoding="utf-8" ?><transcript>
 def test_youtube_short_reads_the_spoken_words_and_writes_notes(phone):
     phone.open_with({"shared": ["look https://youtube.com/shorts/dQw4w9WgXcQ?si=abc"], "model": {"ready": True, "partial": 0, "installed": []},
                      "pages": {"youtube.com/watch": WATCH, "api/timedtext": TIMED}, "player": PLAYER, "answers": [ANSWER]})
-    phone.get_by_role("button", name="Start: 1 reel").click()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
     st = phone.rn()
     post = next(c for c in st["calls"] if c[0] == "postJson")
@@ -356,8 +707,10 @@ def test_youtube_short_reads_the_spoken_words_and_writes_notes(phone):
 def test_ask_meta_ai_about_several_reels_in_one_message(phone):
     codes = ["AAA111", "BBB222", "CCC333"]
     db = {"reels": [{"code": c, "url": f"https://www.instagram.com/reel/{c}/", "status": "new", "added_at": 1} for c in codes], "inbox": []}
-    phone.open_with({"db": json.dumps(db)})
-    phone.get_by_role("button", name="Ask Meta AI about 3 reels at once").click()
+    phone.open_with({"db": json.dumps(db)}, "#/inbox")
+    assert phone.get_by_role("button", name="Ask Meta AI · 3").count() == 0  # off unless you switch it on
+    phone.open_with({"db": json.dumps(db), "settings": json.dumps({"metaAi": True})}, "#/inbox")
+    phone.get_by_role("button", name="Ask Meta AI · 3").click()
     title, text = phone.rn()["sharedOut"][0]
     assert title == "Ask Meta AI" and all(f"https://www.instagram.com/reel/{c}/" in text for c in codes) and "REEL:" in text
     # Meta AI answers all three in one message; sharing it back files each part under its own reel
@@ -392,8 +745,8 @@ def test_library_search_ranks_allows_typos_and_similar_words(phone):
     related = phone.evaluate("() => { const rs = JSON.parse(window.__rn.db).reels; return Notes.related(rs, rs[1]).map(x => x.reel.code); }")
     assert related[:1] == ["SEC002"]
     # the shelf search box uses the same ranking
-    phone.fill("#q", "pasword")
-    assert phone.locator("#list .list-item").count() == 1
+    phone.fill("#tq", "pasword")
+    phone.wait_for_function("() => document.querySelectorAll('#results a.list-item').length === 1")
     phone.goto(phone.url.split("#")[0] + "#/r/SEC001")
     phone.get_by_role("heading", name="Related reels").wait_for()
 
@@ -413,16 +766,244 @@ def test_ask_your_library_answers_from_your_notes(phone):
     assert phone.locator('.pre a[href="#/r/SEC002"]', has_text="[1]").count() == 1
 
 
-def test_saved_reels_come_back_from_the_in_app_instagram_page(phone):
-    phone.open_with(hash_="#/add")
+def test_instagram_export_opens_in_chrome_and_the_reminder_goes_once_a_zip_is_chosen(phone, tmp_path):
+    import time
+    phone.open_with({"igWaiting": int(time.time() * 1000) - 3600 * 1000}, "#/add")
     phone.get_by_role("button", name="Get my saved reels from Instagram").click()
     assert phone.rn()["opened"] == ["instagram-export"]
+    phone.locator("#igwait").wait_for()
     saved = {"saved_saved_media": [{"title": "creator_a", "string_map_data": {"Saved on": {"href": "https://www.instagram.com/reel/IGX001/", "timestamp": 1}}}]}
-    colls = {"saved_saved_collections": [{"title": "Collection", "string_map_data": {"Name": {"value": "Tech"}}},
-                                         {"title": "creator_a", "string_map_data": {"Name": {"value": "creator_a", "href": "https://www.instagram.com/reel/IGX001/"}}}]}
-    parts = [{"name": "saved_collections.json", "text": json.dumps(colls)}, {"name": "saved_posts.json", "text": json.dumps(saved)}]
-    phone.evaluate("p => { const s = window.__rn; s.igExport = p; sessionStorage.setItem('rn', JSON.stringify(s)); onAppResume(); }", parts)
-    phone.get_by_text("From Instagram: 1 new reel saved").wait_for()
+    f = tmp_path / "saved_posts.json"
+    f.write_text(json.dumps(saved))
+    phone.locator("#zip").set_input_files(str(f))
+    phone.get_by_text("1 new reel saved").wait_for()
+    assert phone.locator("#igwait").count() == 0 and not phone.rn()["igWaiting"]
     r = db_of(phone)["reels"][0]
-    assert r["code"] == "IGX001" and r["added_by"] == "export" and r["collections"] == ["Tech"]
+    assert r["code"] == "IGX001" and r["added_by"] == "export"
     assert not any(c[0] in ("fetchPage", "generate") for c in phone.rn()["calls"])  # importing does no other work
+
+
+def test_text_on_the_cover_picture_and_its_description_count_for_notes(phone):
+    embed = ('<html><body><div class="Embed"><img class="EmbeddedMediaImage" src="https://scontent-a.cdninstagram.com/v/cover.jpg" '
+             'alt="Photo by creator_b on May 1, 2024. May be an image of text that says \'Stop hardcoding passwords\'."> '
+             '<div class="Caption"><a class="CaptionUsername" href="#">creator_b</a>Part 2 #tech</div></div></body></html>')
+    phone.open_with({"shared": ["https://www.instagram.com/reel/COV001/"], "pages": {"COV001/embed": embed},
+                     "coverText": "Keep secrets on the server, rotate any leaked key and scan code before shipping"})
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    r = db_of(phone)["reels"][0]
+    assert ["cover", "https://scontent-a.cdninstagram.com/v/cover.jpg"] in phone.rn()["calls"]
+    assert r["onscreen"].startswith("Stop hardcoding passwords\nKeep secrets on the server")
+    assert r["status"] == "done" and r["notes_by"] == "auto"  # enough text for quick notes now, not just "Part 2"
+
+
+VIDEO_EMBED = ('<html><body><script>window.__additionalDataLoaded("x", {"shortcode_media": {"video_url": '
+               '"https:\\/\\/scontent-b.cdninstagram.com\\/v\\/reel.mp4?a=1\\u0026b=2"}})</script>'
+               '<div class="Caption"><a class="CaptionUsername" href="#">creator_c</a>Wait for it</div></body></html>')
+
+
+def test_reel_video_gives_screen_text_and_speech_and_old_reels_are_read_again(phone):
+    old = {"code": "VID001", "url": "https://www.instagram.com/reel/VID001/", "status": "done", "added_at": 1, "caption": "Wait for it",
+           "caption_read": 1, "notes": {"topic": "Wait for it"}, "notes_by": "auto", "collections": []}
+    phone.open_with({"db": json.dumps({"reels": [old], "inbox": []}), "pages": {"VID001/embed": VIDEO_EMBED}, "speech": True,
+                     "video": {"screen": "3 habits that changed my mornings", "seconds": 31,
+                               "speech": "first drink water as soon as you wake up then walk for ten minutes and write down one goal for the day"}}, "#/run")
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    r = db_of(phone)["reels"][0]
+    assert ["video", "https://scontent-b.cdninstagram.com/v/reel.mp4?a=1&b=2"] in phone.rn()["calls"]
+    assert r["content"] == "video+speech" and r["transcript"].startswith("first drink water") and "3 habits" in r["onscreen"]
+    assert r["notes_by"] == "auto" and r["notes"]["topic"] != "Wait for it"  # written again from what the reel says
+    phone.goto(phone.url.split("#")[0] + "#/r/VID001")
+    phone.get_by_text("Read from: caption, the text on screen and what is said").wait_for()
+    assert phone.locator("#meta").count() == 0  # Ask Meta AI only when switched on in Settings
+
+
+def test_try_on_five_reels_and_speech_model_download(phone):
+    links = [f"https://www.instagram.com/reel/TRY00{i}/" for i in range(7)]
+    phone.open_with({"shared": links}, "#/run")
+    phone.get_by_role("button", name="Try on 5 reels first").click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    assert len([r for r in db_of(phone)["reels"] if r.get("caption_read")]) == 5
+    phone.goto(phone.url.split("#")[0] + "#/settings")
+    phone.get_by_role("button", name="Download speech to text").click()
+    phone.get_by_text("Speech to text is ready").wait_for()
+    assert ["speechDownload"] in phone.rn()["calls"]  # the page names no address: Java knows the pinned one
+
+
+def test_a_speech_download_that_fails_the_check_is_told_honestly_and_never_shown_as_ready(phone):
+    msg = "The download was damaged or changed on the way (check failed). Nothing was installed. Tap Download to try again."
+    phone.open_with({"speechFail": msg}, "#/settings")
+    assert phone.locator(".tag").first.inner_text() == "Not downloaded"
+    phone.get_by_role("button", name="Download speech to text").click()
+    phone.get_by_text(msg).wait_for()
+    phone.get_by_role("button", name="Download speech to text").wait_for()  # still offered: nothing was installed, try again
+    assert phone.locator(".tag").first.inner_text() == "Not downloaded"
+    assert phone.get_by_role("button", name="Delete the speech model").count() == 0 and not phone.rn().get("speech")
+    assert phone.get_by_text("Speech to text is ready").count() == 0
+
+
+def test_a_paused_speech_download_is_shown_as_paused_and_continued(phone):
+    phone.open_with({"speechPartial": 20000000}, "#/settings")
+    assert phone.locator(".tag").first.inner_text() == "Paused"
+    assert phone.get_by_role("button", name="Download speech to text").count() == 0  # the same button now continues
+    assert phone.locator("#dlsp").inner_text() == "Continue download"
+    phone.locator("#dlsp").click()
+    phone.get_by_text("Speech to text is ready").wait_for()
+    phone.get_by_role("button", name="Delete the speech model").wait_for()
+    assert phone.locator(".tag").first.inner_text() == "Ready"
+    assert [c for c in phone.rn()["calls"] if c[0] == "speechDownload"] == [["speechDownload"]]
+
+
+def test_the_page_asks_for_the_speech_model_without_an_address_and_says_it_is_checked():
+    import re
+    js = (LOCAL / "local.js").read_text(encoding="utf-8")
+    assert "alphacephei" not in js  # the address, size and fingerprints live in Java (ModelCatalog.SPEECH)
+    assert re.findall(r'phone\("downloadSpeech"([^)]*)\)', js) == [""]
+    assert "It is checked against the published file before it is installed." in js
+
+
+def test_useful_reels_go_first_then_memes(phone):
+    mk = lambda code, cap, at: {"code": code, "url": f"https://www.instagram.com/reel/{code}/", "status": "ready", "added_at": at,
+                                "caption": cap, "caption_read": 1, "collections": []}
+    reels = [mk("FUN001", "POV when your bestie roasts you 😂😂 lol #meme #funny", 3),
+             mk("USE001", "5 free AI tools that save hours: how to use each one, save this", 1),
+             mk("USE002", "3 habits and tips to fix your sleep, avoid these mistakes", 2)]
+    phone.open_with({"db": json.dumps({"reels": reels, "inbox": []})}, "#/run")
+    phone.get_by_text("2 useful reels will be read properly first").wait_for()
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 3", exact=True).click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    fetched = [c[1] for c in phone.rn()["calls"] if c[0] == "fetchPage"]
+    order = [next(c for c in ("USE001", "USE002", "FUN001") if c in u) for u in fetched if "/embed" in u]
+    assert order == ["USE002", "USE001", "FUN001"]  # useful first (newest first), then memes
+
+
+def test_comment_screenshots_go_to_the_right_reel(phone):
+    mk = lambda code, author, cap: {"code": code, "url": f"https://www.instagram.com/reel/{code}/", "status": "done", "added_at": 1,
+                                    "author": author, "caption": cap, "caption_read": 1, "video_tried": 1, "collections": [],
+                                    "notes": {"topic": cap}, "notes_by": "auto"}
+    reels = [mk("CMT001", "chef_anna", "Pasta in 10 minutes"), mk("CMT002", "dev_raj", "Stop using var in JavaScript")]
+    screen = ["Comments", "dev_raj", "Stop using var in JavaScript", "maria.k", "He means use let and const, var leaks out of blocks",
+              "2d", "Reply", "tom_99", "This is sarcasm right? lol", "1d", "Reply", "Add a comment..."]
+    phone.open_with({"db": json.dumps({"reels": reels, "inbox": []}),
+                     "pictureText": "Comments\nchef_anna\nPasta in 10 minutes\nlee\nAdd garlic at the end, not the start\nReply\nbo\nworks!\nReply"})
+    assert phone.evaluate("(s) => { const ok = fileCommentScreen(s, 5); saveDb(); return ok; }", screen)  # a comment screenshot in the folder
+    got = {r["code"]: r for r in db_of(phone)["reels"]}
+    assert "He means use let and const, var leaks out of blocks" in got["CMT002"]["comments"] and "Reply" not in got["CMT002"]["comments"]
+    assert not got["CMT001"].get("comments") and got["CMT002"]["video_tried"] == 0  # read again with the comments
+    phone.goto(phone.url.split("#")[0] + "#/r/CMT001")
+    phone.get_by_role("button", name="Add comments").click()
+    phone.get_by_text("comment lines added").wait_for()
+    assert "Add garlic at the end, not the start" in db_of(phone)["reels"][0]["comments"]
+    phone.goto(phone.url.split("#")[0] + "#/settings")
+    phone.locator("#mstate").wait_for()
+    assert phone.get_by_text("Read while I scroll").count() == 0  # no Accessibility helper: Play Protect blocks sideloaded apps with one
+
+
+def test_instagram_slow_down_waits_then_stops_and_keeps_the_rest(phone):
+    links = [f"https://www.instagram.com/reel/SLW00{i}/" for i in range(3)]
+    phone.open_with({"shared": links, "igStatus": "Instagram answered 429"})
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 3", exact=True).click()
+    phone.get_by_text("Instagram asked to slow down. The rest waits for the next run.").wait_for()
+    reels = db_of(phone)["reels"]
+    assert all(r["status"] == "new" and not r.get("caption_read") for r in reels)  # nothing marked read: retried next time
+    assert len([c for c in phone.rn()["calls"] if c[0] == "fetchPage"]) == 4  # one try, then 3 waits, then it stops
+
+
+# ---------------------------------------------------------------- YouTube: when YouTube blocks one way, the next one is tried
+
+def yt_player(track_url, lang="en", kind="asr", translatable=True):
+    return {"playabilityStatus": {"status": "OK"},
+            "videoDetails": {"title": "Keep keys safe", "author": "Dev Tips", "shortDescription": "Secrets belong on the server."},
+            "captions": {"playerCaptionsTracklistRenderer": {"captionTracks": [
+                {"baseUrl": track_url, "languageCode": lang, "kind": kind, "isTranslatable": translatable}]}}}
+
+
+SAID = "Never put the key in the app. Use a server proxy. Scan with gitleaks before you ship."
+XML_SAID = f'<transcript><text start="0" dur="3">{SAID}</text></transcript>'
+
+
+def run_short(phone, state):
+    state = {"shared": ["https://youtube.com/shorts/dQw4w9WgXcQ?si=abc"], "pages": {}, **state}
+    state["pages"].setdefault("youtube.com/watch", WATCH)
+    phone.open_with(state)
+    to_inbox(phone)
+    phone.get_by_role("button", name="Start 1", exact=True).click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    return db_of(phone)["reels"][0], phone.rn()["calls"]
+
+
+def test_youtube_tries_the_next_app_when_captions_come_back_empty(phone):
+    r, calls = run_short(phone, {
+        "ytApps": {"ios": yt_player("https://www.youtube.com/api/timedtext?v=1&c=IOS&exp=xpe&fmt=srv3"),
+                   "android": yt_player("https://www.youtube.com/api/timedtext?v=1&c=ANDROID")},
+        "pages": {"c=IOS": "", "c=ANDROID": XML_SAID}})
+    apps = [c[3] for c in calls if c[0] == "postYoutube"]
+    assert apps == ["ios", "android"]
+    ios = next(c for c in calls if c[0] == "postYoutube")[2]
+    assert ios["context"]["client"]["clientName"] == "IOS" and ios["videoId"] == "dQw4w9WgXcQ"
+    assert not any(c[0] == "fetchPage" and "fmt=" in c[1] for c in calls)
+    assert r["transcript"] == SAID and r["transcript_via"] == "android" and r["title"] == "Keep keys safe"
+    assert r["notes_by"] == "auto" and r["notes"]["points"]  # no AI model: notes made from the words, without AI
+
+
+def test_youtube_other_language_is_translated_to_english_or_kept(phone):
+    tamil = yt_player("https://www.youtube.com/api/timedtext?v=1&lang=ta", lang="ta")
+    r, calls = run_short(phone, {"ytApps": {"ios": tamil}, "pages": {"tlang=en": XML_SAID}})
+    assert any("lang=ta&tlang=en" in c[1] for c in calls if c[0] == "fetchPage") and r["transcript_lang"] == "en"
+    # the translation is refused: the original words are used
+    r, calls = run_short(phone, {"ytApps": {"ios": tamil}, "pages": {"tlang=en": "", "lang=ta": XML_SAID}})
+    assert r["transcript"] == SAID and r["transcript_lang"] == "ta"
+    # the setting "the video's own language": no translation asked
+    r, calls = run_short(phone, {"ytApps": {"ios": tamil}, "pages": {"lang=ta": XML_SAID}, "settings": json.dumps({"ytLang": "orig"})})
+    assert not any("tlang" in c[1] for c in calls if c[0] == "fetchPage") and r["transcript_lang"] == "ta"
+
+
+def test_youtube_falls_back_to_the_watch_page_then_the_transcript_panel(phone):
+    page_player = yt_player("https://www.youtube.com/api/timedtext?v=1&from=page")
+    watch = ('<script>ytcfg.set({"INNERTUBE_API_KEY": "AIzaTestKey_123", "INNERTUBE_CONTEXT_CLIENT_VERSION": "2.20261101.00.00", '
+             '"VISITOR_DATA": "Cgt2aXNpdG9y"});var ytInitialPlayerResponse = ' + json.dumps(page_player) + ';</script>'
+             '<script>var ytInitialData = {"engagementPanels": [{"getTranscriptEndpoint": {"params": "CgtkUXc0dzlXZ1hjUQ%3D%3D"}}]};</script>')
+    bot = {"playabilityStatus": {"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm you are not a bot"}}
+    r, calls = run_short(phone, {"ytApps": {"ios": bot, "android": bot}, "pages": {"youtube.com/watch": watch, "from=page": XML_SAID}})
+    assert r["transcript_via"] == "page" and r["title"] == "Keep keys safe"
+    panel = {"actions": [{"updateEngagementPanelAction": {"content": {"transcriptRenderer": {"body": {"segments": [
+        {"transcriptSegmentRenderer": {"startMs": "0", "endMs": "1500", "snippet": {"runs": [{"text": "never put the key in the app"}]}}},
+        {"transcriptSegmentRenderer": {"startMs": "2500", "endMs": "4000", "snippet": {"runs": [{"text": "use a server proxy"}]}}}]}}}}}]}
+    r, calls = run_short(phone, {"ytApps": {"ios": bot, "android": bot, "transcript": panel},
+                                 "pages": {"youtube.com/watch": watch, "from=page": ""}})
+    req = next(c for c in calls if c[0] == "postYoutube" and "get_transcript" in c[1])
+    assert req[3] == "web" and req[2]["params"] == "CgtkUXc0dzlXZ1hjUQ==" and req[2]["context"]["client"]["visitorData"] == "Cgt2aXNpdG9y"
+    assert r["transcript"] == "never put the key in the app\nuse a server proxy" and r["transcript_via"] == "transcript panel"
+
+
+def test_youtube_nothing_works_explains_and_offers_a_retry(phone):
+    r, calls = run_short(phone, {"ytApps": {}})
+    assert "did not give the spoken words" in r["error"] and r["yt_tried"]
+    phone.goto(phone.url.split("#")[0] + "#/r/yt-dQw4w9WgXcQ")
+    phone.get_by_role("button", name="Read from YouTube again").click()
+    phone.get_by_role("heading", name="Done").wait_for()
+    assert sum(1 for c in phone.rn()["calls"] if c[0] == "postYoutube" and c[3] == "ios") == 2
+
+
+def test_caption_formats_and_unpunctuated_auto_captions(phone):
+    phone.open_with()
+    j3 = {"events": [{"tStartMs": 0, "dDurationMs": 1000, "segs": [{"utf8": "so the first tip"}, {"utf8": " is backups"}]},
+                     {"tStartMs": 1000, "dDurationMs": 900, "segs": [{"utf8": "every single day"}]},
+                     {"tStartMs": 3000, "dDurationMs": 1000, "segs": [{"utf8": "the second tip is two factor login"}]}]}
+    assert phone.evaluate("t => Notes.ytCaptions(t)", json.dumps(j3)) == "so the first tip is backups every single day\nthe second tip is two factor login"
+    srv3 = '<timedtext format="3"><body><p t="0" d="2000">Hello &amp;amp; welcome.</p><p t="2000" d="1000">Bye now.</p></body></timedtext>'
+    assert phone.evaluate("t => Notes.ytCaptions(t)", srv3) == "Hello & welcome. Bye now."
+    assert phone.evaluate("t => Notes.ytCaptions(t)", "") == ""
+    long = " ".join(f"Sentence number {i} talks about backups and passwords." for i in range(400))
+    short = phone.evaluate("t => Notes.condense(t, 2000)", long)
+    assert len(short) <= 2000 and short.startswith("Sentence number")
+
+
+def to_inbox(pg):
+    if not pg.url.endswith("#/inbox"):
+        pg.goto(pg.url.split("#")[0] + "#/inbox")

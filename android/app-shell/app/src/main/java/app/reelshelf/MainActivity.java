@@ -1,10 +1,7 @@
 package app.reelshelf;
 
 import android.app.Activity;
-import android.app.DownloadManager;
 import android.content.ClipData;
-import android.content.ClipboardManager;
-import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -13,42 +10,33 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
-import android.os.Environment;
-import android.provider.MediaStore;
 import android.provider.OpenableColumns;
-import android.provider.Settings;
 import android.webkit.CookieManager;
-import android.webkit.JavascriptInterface;
-import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
-import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 
 /**
  * Reel Shelf for Android. By default everything runs inside this app (assets/local): shared reels are saved on the
  * phone, and only when you open the app and tap Start are they read and written up by the AI model on the phone.
- * Nothing runs in the background: leaving the app stops downloads and the model.
- * The older mode (the Python engine in Termux or on a PC) is still reachable from Settings.
+ * A job you started keeps going after you leave the app only with a notification and a Stop button (WorkService).
+ * Only the built-in page is ever shown: links to other sites open in their own app or the browser.
  */
-public class MainActivity extends Activity {
-    private static final String DEFAULT_URL = "http://localhost:8765/";
-    private static final String START_PAGE = "file:///android_asset/start.html";
+public class MainActivity extends Activity implements Host {
     static final String LOCAL_PAGE = "file:///android_asset/local/index.html";
     private static final int MODEL_REQUEST = 3;
+    private static final int FOLDER_REQUEST = 4;
+    private static final int IMAGES_REQUEST = 5;
+    private static final int LISTEN_REQUEST = 6;
     private static final int FILE_REQUEST = 1;
-    private static final int PERMISSION_REQUEST = 2;
-    private static final String TERMUX = "com.termux";
-    private static final String RUN_COMMAND = "com.termux.permission.RUN_COMMAND";
+
+    /** Reel Shelf is on screen (started and not stopped): the nightly run does not start while it is. */
+    static volatile boolean visible;
 
     private WebView web;
     private volatile String currentUrl = "";
@@ -56,6 +44,9 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     private LocalBridge local;
     private java.util.function.Consumer<Uri> modelCallback;
+    private java.util.function.Consumer<Uri> folderCallback;
+    private java.util.function.Consumer<java.util.List<Uri>> imagesCallback;
+    private java.util.function.Consumer<String> listenCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -71,9 +62,9 @@ public class MainActivity extends Activity {
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(false);
-        CookieManager.getInstance().setAcceptCookie(true);
+        CookieManager.getInstance().setAcceptCookie(false);
+        CookieManager.getInstance().removeAllCookies(null);  // older versions signed a page into Instagram: forget it
 
-        web.addJavascriptInterface(new Bridge(), "ReelShelf");
         local = new LocalBridge(this, prefs);
         web.addJavascriptInterface(local, "RN");
         web.setWebViewClient(new WebViewClient() {
@@ -87,20 +78,8 @@ public class MainActivity extends Activity {
                 Uri u = request.getUrl();
                 String scheme = u.getScheme() == null ? "" : u.getScheme();
                 if (scheme.equals("file")) return false;
-                Uri server = Uri.parse(serverUrl());
-                boolean sameServer = scheme.startsWith("http") && u.getHost() != null && u.getHost().equals(server.getHost())
-                        && u.getPort() == server.getPort();
-                if (sameServer) return false;
                 openExternal(u);  // Instagram links, help pages: open in their own app or the browser
                 return true;
-            }
-
-            @Override
-            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                String failed = request.getUrl().toString();
-                if (request.isForMainFrame() && !failed.startsWith("file:")) {
-                    view.loadUrl(START_PAGE);
-                }
             }
         });
         web.setWebChromeClient(new WebChromeClient() {
@@ -118,40 +97,20 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
-        web.setDownloadListener((url, userAgent, contentDisposition, mimeType, length) -> {
-            try {
-                String name = URLUtil.guessFileName(url, contentDisposition, mimeType);
-                DownloadManager.Request r = new DownloadManager.Request(Uri.parse(url));
-                r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-                r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "ReelShelf/" + name);
-                String cookie = CookieManager.getInstance().getCookie(url);
-                if (cookie != null) r.addRequestHeader("Cookie", cookie);
-                ((DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE)).enqueue(r);
-                toast("Saving " + name + " to Downloads/ReelShelf");
-            } catch (Exception e) {
-                toast("Could not save: " + e.getMessage());
-            }
-        });
-        web.loadUrl("server".equals(prefs.getString("mode", "local")) ? serverUrl() : LOCAL_PAGE);
+        prefs.edit().remove("mode").remove("url").apply();  // the old Termux/PC mode is gone
+        web.loadUrl(LOCAL_PAGE);
+        WorkService.STOP_HOOKS.add(stopHook);
+        NightRun.schedule(this);  // the nightly run (on unless switched off in Settings)
+        if (NightRun.prefs(this).getBoolean("nightly_check", false)) NightlyCheck.schedule(this, true);  // drops the old Wi-Fi + charger rule
+        TempSweeper.startOnce(this);  // once per process, 20 s from now, on its own thread: removes the app's own leftover temp files
     }
 
     /** The built-in page (not a web site) is showing: only it may use window.RN. */
-    boolean localPageTrusted() {
+    public boolean localPageTrusted() {
         return currentUrl.startsWith("file:///android_asset/local/");
     }
 
-    /** Switch to the older mode: the Reel Shelf engine in Termux or on a PC. */
-    void openServerMode() {
-        prefs.edit().putString("mode", "server").apply();
-        web.loadUrl(serverUrl());
-    }
-
-    void openLocalMode() {
-        prefs.edit().putString("mode", "local").apply();
-        web.loadUrl(LOCAL_PAGE);
-    }
-
-    void pickModelFile(java.util.function.Consumer<Uri> cb) {
+    public void pickModelFile(java.util.function.Consumer<Uri> cb) {
         modelCallback = cb;
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -164,7 +123,81 @@ public class MainActivity extends Activity {
         }
     }
 
-    String displayName(Uri uri) {
+    /** Android's folder picker, opening at DCIM/Screenshots. Only the folder you choose can be read. */
+    /** Android's picker for pictures (several at once). Only the pictures you choose can be read. */
+    public void pickImages(java.util.function.Consumer<java.util.List<Uri>> cb) {
+        imagesCallback = cb;
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("image/*");
+        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        try {
+            startActivityForResult(i, IMAGES_REQUEST);
+        } catch (Exception e) {
+            imagesCallback = null;
+            cb.accept(null);
+        }
+    }
+
+    /** The search mic: Android's speech screen (no microphone permission for this app; offline when the phone has the pack). */
+    @Override
+    public void listen(java.util.function.Consumer<String> cb) {
+        listenCallback = cb;
+        Intent i = new Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        i.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        i.putExtra(android.speech.RecognizerIntent.EXTRA_PREFER_OFFLINE, true);
+        i.putExtra(android.speech.RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+        i.putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Search");
+        try {
+            startActivityForResult(i, LISTEN_REQUEST);
+        } catch (Exception e) {
+            listenCallback = null;
+            cb.accept("");
+        }
+    }
+
+    public void pickFolder(java.util.function.Consumer<Uri> cb) {
+        folderCallback = cb;
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        if (Build.VERSION.SDK_INT >= 26) {
+            i.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                    Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADCIM%2FScreenshots"));
+        }
+        try {
+            startActivityForResult(i, FOLDER_REQUEST);
+        } catch (Exception e) {
+            folderCallback = null;
+            cb.accept(null);
+        }
+    }
+
+    /** Hands one picture to Google Lens (inside the Google app), or to the share menu when that app is missing. */
+    public void sendToLens(Uri uri) {
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("image/*");
+        send.putExtra(Intent.EXTRA_STREAM, uri);
+        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        Intent lens = new Intent(send).setPackage("com.google.android.googlequicksearchbox");
+        try {
+            startActivity(lens);
+        } catch (Exception e) {
+            try {
+                startActivity(Intent.createChooser(send, "Search with Google Lens"));
+            } catch (Exception e2) {
+                toast("No app can search this picture");
+            }
+        }
+    }
+
+    public void keepScreenOn(boolean on) {
+        runOnUiThread(() -> {
+            if (on) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            else getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        });
+    }
+
+    public String displayName(Uri uri) {
         try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
             if (c != null && c.moveToFirst()) return c.getString(0);
         } catch (Exception ignored) {
@@ -173,7 +206,7 @@ public class MainActivity extends Activity {
         return uri.getLastPathSegment();
     }
 
-    long sizeOf(Uri uri) {
+    public long sizeOf(Uri uri) {
         try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.SIZE}, null, null, null)) {
             if (c != null && c.moveToFirst() && !c.isNull(0)) return c.getLong(0);
         } catch (Exception ignored) {
@@ -182,15 +215,11 @@ public class MainActivity extends Activity {
         return -1;
     }
 
-    private String serverUrl() {
-        return prefs.getString("url", DEFAULT_URL);
-    }
-
-    void toast(String msg) {
+    public void toast(String msg) {
         runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
     }
 
-    void openExternal(Uri u) {
+    public void openExternal(Uri u) {
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, u));
         } catch (Exception e) {
@@ -198,236 +227,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    private boolean termuxInstalled() {
-        try {
-            getPackageManager().getPackageInfo(TERMUX, 0);
-            return true;
-        } catch (PackageManager.NameNotFoundException e) {
-            return false;
-        }
-    }
-
-    /** Only the built-in start page and the Reel Shelf server may use the bridge, never another site shown in the app. */
-    private boolean trustedPage() {
-        String u = currentUrl;
-        if (u.startsWith(START_PAGE) || u.startsWith("file:///android_asset/local/")) return true;
-        Uri page = Uri.parse(u);
-        Uri server = Uri.parse(serverUrl());
-        return page.getScheme() != null && page.getScheme().startsWith("http") && page.getHost() != null
-                && page.getHost().equals(server.getHost()) && page.getPort() == server.getPort();
-    }
-
-    /** Methods the start page (and the app) can call: window.ReelShelf.* */
-    private class Bridge {
-        @JavascriptInterface
-        public String server() {
-            if (!trustedPage()) return "untrusted";
-            return serverUrl();
-        }
-
-        @JavascriptInterface
-        public boolean hasTermux() {
-            if (!trustedPage()) return false;
-            return termuxInstalled();
-        }
-
-        /** Back to the built-in Reel Shelf (no Termux, no PC). */
-        @JavascriptInterface
-        public void localMode() {
-            if (!trustedPage()) return;
-            runOnUiThread(MainActivity.this::openLocalMode);
-        }
-
-        @JavascriptInterface
-        public void open() {
-            if (!trustedPage()) return;
-            runOnUiThread(() -> web.loadUrl(serverUrl()));
-        }
-
-        @JavascriptInterface
-        public void setServer(String url) {
-            if (!trustedPage()) return;
-            String u = url == null ? "" : url.trim();
-            if (u.isEmpty()) u = DEFAULT_URL;
-            if (!u.startsWith("http://") && !u.startsWith("https://")) u = "http://" + u;
-            prefs.edit().putString("url", u).apply();
-            final String target = u;
-            runOnUiThread(() -> web.loadUrl(target));
-        }
-
-        /** Remember "this phone" as the server without reloading the page (the start page keeps polling). */
-        @JavascriptInterface
-        public void rememberPhone() {
-            if (!trustedPage()) return;
-            prefs.edit().putString("url", DEFAULT_URL).apply();
-        }
-
-        @JavascriptInterface
-        public void copy(String text) {
-            if (!trustedPage()) return;
-            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-            cm.setPrimaryClip(ClipData.newPlainText("Reel Shelf", text));
-            toast("Copied. Paste it in Termux.");
-        }
-
-        @JavascriptInterface
-        public void openTermux() {
-            if (!trustedPage()) return;
-            Intent i = getPackageManager().getLaunchIntentForPackage(TERMUX);
-            if (i != null) startActivity(i);
-            else openExternal(Uri.parse("https://f-droid.org/packages/com.termux/"));
-        }
-
-        @JavascriptInterface
-        public void installTermux() {
-            if (!trustedPage()) return;
-            openExternal(Uri.parse("https://f-droid.org/packages/com.termux/"));
-        }
-
-        /**
-         * Hands a screenshot to Google Lens (inside the Google app), or to the share menu when that app is missing.
-         * The picture is saved to Pictures/ReelShelf first, because other apps can only open shared storage.
-         */
-        @JavascriptInterface
-        public String shareImage(String path) {
-            if (!trustedPage()) return "untrusted";
-            if (path == null || !path.matches("/api/items/\\d+/image")) return "Could not open Google Lens";
-            if (Build.VERSION.SDK_INT < 29) return "Needs Android 10 or newer: save the picture and open it in Google Lens";
-            Uri server = Uri.parse(serverUrl());
-            final String base = server.getScheme() + "://" + server.getEncodedAuthority();
-            new Thread(() -> {
-                try {
-                    HttpURLConnection c = (HttpURLConnection) new URL(base + path).openConnection();
-                    String cookie = CookieManager.getInstance().getCookie(base);
-                    if (cookie != null) c.setRequestProperty("Cookie", cookie);
-                    c.setConnectTimeout(10000);
-                    c.setReadTimeout(30000);
-                    if (c.getResponseCode() != 200) {
-                        toast("Could not load the picture (" + c.getResponseCode() + ")");
-                        return;
-                    }
-                    String mime = c.getContentType() == null ? "image/jpeg" : c.getContentType();
-                    ContentValues v = new ContentValues();
-                    v.put(MediaStore.Images.Media.DISPLAY_NAME, "reelshelf_lens_" + System.currentTimeMillis());
-                    v.put(MediaStore.Images.Media.MIME_TYPE, mime);
-                    v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ReelShelf");
-                    Uri uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
-                    if (uri == null) {
-                        toast("Could not save the picture for Google Lens");
-                        return;
-                    }
-                    try (InputStream in = c.getInputStream(); OutputStream out = getContentResolver().openOutputStream(uri)) {
-                        byte[] buf = new byte[65536];
-                        int n;
-                        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                    }
-                    Intent send = new Intent(Intent.ACTION_SEND);
-                    send.setType(mime);
-                    send.putExtra(Intent.EXTRA_STREAM, uri);
-                    send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                    Intent lens = new Intent(send).setPackage("com.google.android.googlequicksearchbox");
-                    runOnUiThread(() -> {
-                        try {
-                            startActivity(lens);
-                        } catch (Exception e) {
-                            startActivity(Intent.createChooser(send, "Search with Google Lens"));
-                        }
-                    });
-                } catch (Exception e) {
-                    toast("Could not open Google Lens: " + e.getMessage());
-                }
-            }).start();
-            return "ok";
-        }
-
-        /** "play" when Termux came from the Play Store (a different build that cannot be started by other apps), else "ok" or "none". */
-        @JavascriptInterface
-        public String termuxSource() {
-            if (!trustedPage()) return "untrusted";
-            if (!termuxInstalled()) return "none";
-            try {
-                String installer = Build.VERSION.SDK_INT >= 30
-                        ? getPackageManager().getInstallSourceInfo(TERMUX).getInstallingPackageName()
-                        : getPackageManager().getInstallerPackageName(TERMUX);
-                return "com.android.vending".equals(installer) ? "play" : "ok";
-            } catch (Exception e) {
-                return "ok";
-            }
-        }
-
-        @JavascriptInterface
-        public boolean getFlag(String name) {
-            if (!trustedPage()) return false;
-            return prefs.getBoolean("flag_" + name, false);
-        }
-
-        @JavascriptInterface
-        public void setFlag(String name, boolean value) {
-            if (!trustedPage()) return;
-            prefs.edit().putBoolean("flag_" + name, value).apply();
-        }
-
-        /** Copies the setup command and opens Termux, so the user only has to paste. */
-        @JavascriptInterface
-        public void copyAndOpenTermux(String text) {
-            if (!trustedPage()) return;
-            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-            cm.setPrimaryClip(ClipData.newPlainText("Reel Shelf", text));
-            runOnUiThread(this::openTermux);
-        }
-
-        @JavascriptInterface
-        public void openAppSettings() {
-            if (!trustedPage()) return;
-            Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()));
-            runOnUiThread(() -> startActivity(i));
-        }
-
-        /**
-         * Starts `reel-shelf --no-open` in Termux's background (needs allow-external-apps, set by the setup script).
-         * Returns started, permission (Android is asking), denied (Android refused), or no-termux.
-         * When it is not "started", the start page opens Termux instead, which starts Reel Shelf by itself.
-         */
-        @JavascriptInterface
-        public String startEngine() {
-            if (!trustedPage()) return "untrusted";
-            if (!termuxInstalled()) return "no-termux";
-            if (checkSelfPermission(RUN_COMMAND) != PackageManager.PERMISSION_GRANTED) {
-                if (prefs.getBoolean("asked", false) && !shouldShowRequestPermissionRationale(RUN_COMMAND)) return "denied";
-                prefs.edit().putBoolean("asked", true).apply();
-                runOnUiThread(() -> requestPermissions(new String[]{RUN_COMMAND}, PERMISSION_REQUEST));
-                return "permission";
-            }
-            return runInTermux();
-        }
-    }
-
-    private String runInTermux() {
-        try {
-            Intent intent = new Intent();
-            intent.setClassName(TERMUX, "com.termux.app.RunCommandService");
-            intent.setAction("com.termux.RUN_COMMAND");
-            intent.putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/reel-shelf");
-            intent.putExtra("com.termux.RUN_COMMAND_ARGUMENTS", new String[]{"--no-open"});
-            intent.putExtra("com.termux.RUN_COMMAND_BACKGROUND", true);
-            startService(intent);
-            return "started";
-        } catch (Exception e) {
-            return "denied";
-        }
-    }
-
-    void callPage(String js) {
+    public void callPage(String js) {
         runOnUiThread(() -> web.evaluateJavascript(js, null));
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
-        if (requestCode == PERMISSION_REQUEST) {
-            boolean ok = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
-            String r = ok ? runInTermux() : "denied";
-            callPage("window.onEngineStart && onEngineStart('" + r + "')");
-        }
     }
 
     @Override
@@ -435,6 +236,35 @@ public class MainActivity extends Activity {
         if (requestCode == MODEL_REQUEST && modelCallback != null) {
             java.util.function.Consumer<Uri> cb = modelCallback;
             modelCallback = null;
+            cb.accept(resultCode == RESULT_OK && data != null ? data.getData() : null);
+            return;
+        }
+        if (requestCode == LISTEN_REQUEST && listenCallback != null) {
+            java.util.function.Consumer<String> cb = listenCallback;
+            listenCallback = null;
+            String said = null;
+            if (resultCode == RESULT_OK && data != null) {
+                java.util.ArrayList<String> got = data.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS);
+                if (got != null && !got.isEmpty()) said = got.get(0);
+            }
+            cb.accept(said);
+            return;
+        }
+        if (requestCode == IMAGES_REQUEST && imagesCallback != null) {
+            java.util.function.Consumer<java.util.List<Uri>> cb = imagesCallback;
+            imagesCallback = null;
+            java.util.List<Uri> got = new java.util.ArrayList<>();
+            if (resultCode == RESULT_OK && data != null) {
+                ClipData clip = data.getClipData();
+                if (clip != null) for (int k = 0; k < clip.getItemCount(); k++) got.add(clip.getItemAt(k).getUri());
+                else if (data.getData() != null) got.add(data.getData());
+            }
+            cb.accept(got);
+            return;
+        }
+        if (requestCode == FOLDER_REQUEST && folderCallback != null) {
+            java.util.function.Consumer<Uri> cb = folderCallback;
+            folderCallback = null;
             cb.accept(resultCode == RESULT_OK && data != null ? data.getData() : null);
             return;
         }
@@ -459,29 +289,83 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        visible = true;
+        WorkService.handOverNight(this);  // a nightly run still going stops its current work, keeps what it saved, and gives the library back
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
+        if (local != null) local.screen(true);  // a model check may run while the app is on screen
         web.onResume();
         callPage("window.onAppResume && onAppResume()");
     }
 
     @Override
     protected void onPause() {
-        web.onPause();
+        if (!working) web.onPause();  // a running job keeps its page alive
         super.onPause();
     }
 
-    /** Leaving the app (home button, another app, screen off): stop all work so nothing drains the battery. */
+    /**
+     * Leaving the app (home button, another app, screen off). A job you started keeps running with its notification
+     * (Stop is there); with no job running, everything stops so nothing drains the battery.
+     */
     @Override
     protected void onStop() {
-        callPage("window.onAppPause && onAppPause()");
-        if (local != null) local.pause();
+        if (local != null) local.screen(false);  // a model check stops here even when a job you started goes on
+        if (!working) {
+            callPage("window.onAppPause && onAppPause()");
+            if (local != null) local.pause();
+        }
+        visible = false;
         super.onStop();
     }
 
     @Override
     protected void onDestroy() {
+        WorkService.STOP_HOOKS.remove(stopHook);
         if (local != null) local.pause();
+        WorkService.end(this);
+        working = false;
+        visible = false;
         super.onDestroy();
+    }
+
+    private volatile boolean working;
+    /** Stop in the notification: the page stops every job, then everything is paused as when leaving the app. */
+    private final Runnable stopHook = () -> runOnUiThread(() -> {
+        working = false;
+        web.evaluateJavascript("window.stopAllWork && stopAllWork()", null);
+        if (local != null) local.pause();
+    });
+
+    @Override
+    public Context ctx() {
+        return this;
+    }
+
+    @Override
+    public boolean isNight() {
+        return false;
+    }
+
+    @Override
+    public void nightDone() {
+    }
+
+    public void setWorking(boolean on) {
+        working = on;
+        if (on) askNotificationPermission();
+    }
+
+    /** Android 13+: the progress notification needs permission (asked once, when the first job starts). */
+    private void askNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33 || prefs.getBoolean("asked_notify", false)) return;
+        if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED) return;
+        prefs.edit().putBoolean("asked_notify", true).apply();
+        runOnUiThread(() -> requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 4));
     }
 }
