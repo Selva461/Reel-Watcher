@@ -206,8 +206,8 @@ function fileAnswer(text, by = "meta", target = null, standalone = false) {
 }
 
 const KEPT_ASIDE = "Kept aside: this reel has your edits. Open it to compare.";
-/** What is said when an answer was kept aside for a reel with your edits (setNotes gave false): the same words for one, a count for several. */
-function keptAside(n) { return n > 1 ? `Kept aside: ${n} reels have your edits. Open them to compare.` : KEPT_ASIDE; }
+/** What is said when answers were kept aside for reels with your edits (setNotes gave false): the same words for one answer, a count of answers for several. */
+function keptAside(n) { return n > 1 ? `${plural(n, "answer")} kept aside: those reels have your edits. Open them to compare.` : KEPT_ASIDE; }
 
 /**
  * Writes the notes of a reel. A reel with your edits is never overwritten by an AI answer: the answer is kept aside in
@@ -841,6 +841,11 @@ const STATUS = {
 };
 const BY = { meta: "Notes by Meta AI", phone: "Notes by the on-phone AI (from the caption)", you: "Your notes",
   auto: "Quick notes without AI: the key sentences of the caption or transcript" };
+/** Who the notes are by; for notes you edited, who wrote them before ("Your notes (edited from Notes by the on-phone AI)"). */
+function byLabel(r) {
+  const was = { meta: "Notes by Meta AI", phone: "Notes by the on-phone AI", auto: "Quick notes without AI" }[r.notes_edit && r.notes_edit.was_by];
+  return r.notes_by === "you" && was ? `${BY.you} (edited from ${was})` : BY[r.notes_by] || "";
+}
 
 /** Instagram reels Meta AI has not done yet (YouTube is read on the phone instead). */
 function forMeta() {
@@ -876,23 +881,24 @@ function reelRow(r) {
     <span class="tag ${kind}">${esc(label)}</span></a>`;
 }
 
-function notesHtml(n) {
-  const sec = (label, body) => body ? `<div class="note-block"><span class="label">${label}</span>${body}</div>` : "";
+function notesHtml(n, r) {
+  const mine = r && Notes.isEdited(r) && r.notes_edit ? r.notes_edit.fields || [] : [];
+  const sec = (label, body, f) => body ? `<div class="note-block"><span class="label">${label}</span>${mine.includes(f) ? `<div class="small muted">Edited by you</div>` : ""}${body}</div>` : "";
   const ol = (a) => a && a.length ? `<ol>${a.map((x) => `<li>${esc(x)}</li>`).join("")}</ol>` : "";
   const ul = (a) => a && a.length ? (a.length === 1 ? `<p>${esc(a[0])}</p>` : `<ul>${a.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`) : "";
   return `<div class="card stack" style="gap:14px">
-    ${sec("Topic", n.topic ? `<p><strong>${esc(n.topic)}</strong></p>` : "")}
+    ${sec("Topic", n.topic ? `<p><strong>${esc(n.topic)}</strong></p>` : "", "topic")}
     ${sec("What they really mean", n.intent ? `<p>${esc(n.intent)}</p>` : "")}
     ${sec("Tone", n.tone ? `<p>${esc(n.tone)}</p>` : "")}
-    ${sec("Points", ol(n.points) + (n.unbacked ? `<p class="small muted">${n.unbacked === 1 ? "1 line was" : n.unbacked + " lines were"} left out: nothing in the reel backed ${n.unbacked === 1 ? "it" : "them"} up.</p>` : ""))}
+    ${sec("Points", ol(n.points) + (n.unbacked ? `<p class="small muted">${n.unbacked === 1 ? "1 line was" : n.unbacked + " lines were"} left out: nothing in the reel backed ${n.unbacked === 1 ? "it" : "them"} up.</p>` : ""), "points")}
     ${sec("Ingredients", (n.ingredients || []).length ? `<ul>${n.ingredients.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "")}
     ${sec("Steps", ol(n.steps))}
     ${sec("Meaning", n.meaning ? `<p>${esc(n.meaning)}</p>` : "")}
     ${sec("Use it for", ul(n.use))}
     ${sec("Tools", (n.tools || []).length ? `<p>${esc(n.tools.join(", "))}</p>` : "")}
     ${sec("Products", (n.products || []).length ? `<p>${esc(n.products.join(", "))}</p>` : "")}
-    ${sec("Takeaway", n.takeaway ? `<p>${esc(n.takeaway)}</p>` : "")}
-    ${sec("Tags", (n.tags || []).length ? `<span class="tagrow">${n.tags.map((t) => `<span class="tag">#${esc(t)}</span>`).join("")}</span>` : "")}</div>`;
+    ${sec("Takeaway", n.takeaway ? `<p>${esc(n.takeaway)}</p>` : "", "takeaway")}
+    ${sec("Tags", (n.tags || []).length ? `<span class="tagrow">${n.tags.map((t) => `<span class="tag">#${esc(t)}</span>`).join("")}</span>` : "", "tags")}</div>`;
 }
 
 /** What went wrong with a reel that failed: how often, why, and when it is tried again (or that it was given up on). */
@@ -918,17 +924,18 @@ function reelScreen(code) {
   const n = r.notes;
   const [label, kind] = STATUS[r.status] || STATUS.new;
   $app.innerHTML = `${header(n && n.topic ? "Reel notes" : "Reel", "#/")}
-    <div class="stack" style="gap:6px"><span class="row wrap" style="gap:8px"><span class="tag ${kind}">${esc(label)}</span>${n ? `<span class="small muted">${esc(BY[r.notes_by] || "")}</span>` : ""}</span>
+    <div class="stack" style="gap:6px"><span class="row wrap" style="gap:8px"><span class="tag ${kind}">${esc(label)}</span>${n ? `<span class="small muted">${esc(byLabel(r))}</span>` : ""}</span>
       <span class="small muted">${esc([r.author ? "@" + r.author : "", "saved " + day(r.added_at), ...(r.collections || [])].filter(Boolean).join(" · "))}</span></div>
     ${backFrom === r.code ? `<div class="card stack"><strong>Back from Instagram</strong><span class="small muted">${r.comments ? "Comments are here. " : "Took screenshots of the comments? Tap Add comments. "}Then tap Read this reel properly: one note from the video, what is said, the text on screen and the comments.</span></div>` : ""}
     ${r.error && !n ? `<div class="card small">${esc(r.error)}</div>` : ""}
     ${r.tries && (!n || r.notes_by === "auto") ? `<div class="card small">${retryLine(r)}</div>` : ""}
-    ${n ? notesHtml(n) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">${r.video_tried ? "Instagram gave too little to work from. Type what the reel says below." : "Tap Start: Reel Shelf reads what the reel shows and says, then writes the notes."}</span></div>`}
+    ${n ? notesHtml(n, r) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">${r.video_tried ? "Instagram gave too little to work from. Type what the reel says below." : "Tap Start: Reel Shelf reads what the reel shows and says, then writes the notes."}</span></div>`}
     ${r.content ? `<span class="small muted">Read from: ${esc({ caption: "the caption only (Instagram gave no video)", video: "caption and the text on screen", "video+speech": "caption, the text on screen and what is said" }[r.content] || r.content)}</span>` : ""}
     <div class="grid2">
       ${r.url && settings.metaAi ? `<button class="btn" id="meta">Ask Meta AI</button><button class="btn" id="paste">Paste an answer</button>` : ""}
       ${r.url ? `<button class="btn" id="open">Open in ${Notes.isYoutube(r) ? "YouTube" : "Instagram"}</button>` : ""}
       ${n ? `<button class="btn" id="copy">Copy notes</button>` : ""}
+      <button class="btn" id="editNotes">${n ? "Edit notes" : "Write my own notes"}</button>
       ${Notes.isYoutube(r) && r.caption_read && !r.transcript ? `<button class="btn" id="ytagain">Read from YouTube again</button>` : ""}
       ${r.tries && (!n || r.notes_by === "auto") ? `<button class="btn primary" id="retryReel">Try again now</button>` : ""}
       ${r.url && !Notes.isYoutube(r) ? `<button class="btn primary" id="deep">Read this reel properly</button>` : ""}
@@ -951,6 +958,7 @@ function reelScreen(code) {
   bind("#open", "click", () => { r.opened_at = Date.now(); saveDb(); sync("openUrl", r.url); });
   bind("#copy", "click", () => { sync("copy", Notes.format(n) + (r.url ? `\n\nReel: ${r.url}` : "")); toast("Notes copied"); });
   bind("#paste", "click", () => pasteDialog(r));
+  bind("#editNotes", "click", () => { editDraft = null; editDialog(r.code); });
   bind("#saveExtra", "click", () => { r.extra = document.getElementById("extra").value.slice(0, 10000); if (!r.notes && r.status === "ready_no_text") r.status = "ready"; saveDb(); toast("Saved"); reelScreen(code); });
   bind("#phoneai", "click", () => startRun([r.code]).then(() => {}));
   bind("#addcom", "click", () => {
@@ -1127,6 +1135,103 @@ function askMeta(r) {
   saveDb();
   sync("shareText", text, "Ask Meta AI");
   toast("Prompt copied. Pick Meta AI (or paste it there). Then share its answer back to Reel Shelf.");
+}
+
+// ------------------------------------------------------------------ your own notes: edit the topic, points, takeaway and tags
+
+/** What is typed in the notes editor: {code, fields: the text in each box, base: the text each box started with, ai: {field: true}} (ai: set to the AI's text,
+    "Use the AI text"). A box whose text is still its base is untouched and follows the reel as it is. It lives here, apart from the reels: loadDb
+    replaces every reel object, and the typed text must never be lost to that or written onto a reel. */
+let editDraft = null;
+const EDIT_FIELDS = [
+  ["topic", "Topic", "input", "One short line, at most 200 letters."],
+  ["points", "Points", "textarea", "One point on each line, at most 40 points."],
+  ["takeaway", "Takeaway", "textarea", "The one thing to remember, at most 1,000 letters."],
+  ["tags", "Tags", "input", "Separated by commas, at most 12."],
+];
+const editText = (f, v) => (f === "points" ? (v || []).join("\n") : f === "tags" ? (v || []).join(", ") : v || "");
+
+/**
+ * Checks what was typed against the reel as it is now (found again by its code: the page may have reloaded since the
+ * editor opened) and applies it. {errors: {field: message}} when something is not allowed (nothing is applied),
+ * {gone: true} when the reel is not on the shelf any more, else {changed, notes} (notes: things to tell after saving, not
+ * errors, like "Only the first 12 tags are kept."). A field set to the AI's text is put back with
+ * revertField, and is not checked (the AI's text may be longer than what you may type). A box you did not touch is left
+ * alone, so what changed elsewhere in that field since the editor opened is kept.
+ */
+function applyDraft(d) {
+  const r = reel(d.code);
+  if (!r) return { gone: true };
+  const n = r.notes || {};
+  const names = EDIT_FIELDS.map((x) => x[0]);
+  const typed = names.filter((f) => !d.ai[f] && d.fields[f] !== d.base[f]);
+  const pending = (f) => (typed.includes(f) || d.ai[f] ? Notes.cleanField(f, d.fields[f], n[f]).value : n[f]);  // what the field will hold, to refuse a topic and points both empty
+  const errors = {}, told = [];
+  let edits = false;
+  for (const f of typed) {
+    const c = Notes.cleanField(f, d.fields[f], n[f], f === "topic" ? pending("points") : f === "points" ? pending("topic") : undefined);
+    if (c.error) errors[f] = c.error;
+    if (c.note) told.push(c.note);
+    edits = edits || c.changed;
+  }
+  if (edits && !Object.keys(errors).length && Notes.noBody(pending("topic"), pending("points"))) errors.topic = errors.points = Notes.NO_BODY;  // tags or a takeaway alone are not notes
+  if (Object.keys(errors).length) return { errors };
+  const now = Date.now();
+  let changed = false;
+  for (const f of typed.sort((a, b) => !d.fields[a].trim() - !d.fields[b].trim())) changed = Notes.applyEdit(r, f, d.fields[f], now) || changed;  // emptied fields last
+  for (const f of names.filter((x) => d.ai[x])) changed = Notes.revertField(r, f, now) || Notes.applyEdit(r, f, d.fields[f], now) || changed;
+  return { changed, notes: told };
+}
+
+function editDialog(code) {
+  const r = reel(code);
+  if (!r) return;
+  const n = r.notes, e = Notes.isEdited(r) && r.notes_edit ? r.notes_edit : null;
+  const fresh = Object.fromEntries(EDIT_FIELDS.map(([f]) => [f, editText(f, n && n[f])]));
+  const again = editDraft && editDraft.code === code ? editDraft : null;  // reopened after a reload: what was typed is kept, the boxes you had not touched show the reel as it is now
+  const kept = (f) => again && (again.ai[f] || again.fields[f] !== again.base[f]);
+  const fields = Object.fromEntries(EDIT_FIELDS.map(([f]) => [f, kept(f) ? again.fields[f] : fresh[f]]));
+  const base = Object.fromEntries(EDIT_FIELDS.map(([f]) => [f, kept(f) ? again.base[f] : fresh[f]]));
+  const ai = again ? { ...again.ai } : {};
+  const hasAi = (f) => !!(e && (e.fields || []).includes(f) && e.ai && f in e.ai);
+  $dlg.innerHTML = `<form method="dialog" class="stack"><h2>${n ? "Edit notes" : "Write your own notes"}</h2>
+    ${EDIT_FIELDS.map(([f, label, tag, hint]) => `<div class="field"><label for="ed-${f}">${label}</label>
+      ${tag === "input" ? `<input class="input" id="ed-${f}" autocomplete="off" aria-describedby="ed-${f}-hint ed-${f}-err">` : `<textarea class="input" id="ed-${f}" aria-describedby="ed-${f}-hint ed-${f}-err"></textarea>`}
+      <span class="small muted" id="ed-${f}-hint" style="font-weight:400">${hint}</span>
+      <span class="small" id="ed-${f}-err" role="alert" style="color:var(--danger)"></span>
+      ${hasAi(f) ? `<button type="button" class="btn" data-ai="${f}">Use the AI text</button>` : ""}</div>`).join("")}
+    <div class="grid2"><button type="button" class="btn" id="edCancel">Cancel</button><button class="btn primary" id="edSave" value="ok">Save</button></div></form>`;
+  const ctl = (f) => $dlg.querySelector("#ed-" + f);
+  for (const [f] of EDIT_FIELDS) {
+    ctl(f).value = fields[f];
+    ctl(f).addEventListener("input", () => { ai[f] = false; });
+  }
+  $dlg.querySelectorAll("[data-ai]").forEach((b) => b.addEventListener("click", () => {  // only the form changes: Save puts the AI's text back, Cancel leaves yours
+    const f = b.dataset.ai;
+    ctl(f).value = editText(f, e.ai[f]);
+    ai[f] = true;
+    $dlg.querySelector(`#ed-${f}-hint`).textContent = "The AI's text is filled in. It is used when you tap Save.";
+  }));
+  let unsaved = false;  // changes applied in memory that the phone refused to store (storage full): the next Save stores them
+  $dlg.querySelector("#edCancel").addEventListener("click", () => { editDraft = null; $dlg.close(); });
+  $dlg.querySelector("#edSave").addEventListener("click", (ev) => {
+    ev.preventDefault();  // the dialog closes below, only when everything was saved
+    editDraft = { code, fields: Object.fromEntries(EDIT_FIELDS.map(([f]) => [f, ctl(f).value])), base, ai: { ...ai } };
+    const res = applyDraft(editDraft);
+    for (const [f] of EDIT_FIELDS) {
+      const msg = (res.errors || {})[f] || "";
+      $dlg.querySelector(`#ed-${f}-err`).textContent = msg;
+      if (msg) ctl(f).setAttribute("aria-invalid", "true"); else ctl(f).removeAttribute("aria-invalid");
+    }
+    if (res.gone) { editDraft = null; $dlg.close(); toast("This reel is no longer on your shelf."); render(); return; }
+    if (res.errors) { ctl(EDIT_FIELDS.find(([f]) => res.errors[f])[0]).focus(); return; }
+    if (!res.changed && !unsaved) { editDraft = null; $dlg.close(); if (res.notes.length) toast(res.notes.join(" ")); return; }
+    unsaved = true;
+    staleSave = false;
+    if (saveDb()) { editDraft = null; $dlg.close(); toast(["Saved", ...res.notes].join(". ")); reelScreen(code); }
+    else if (staleSave) { editDialog(code); toast("Your library changed elsewhere. Your text is still here: tap Save again."); }  // reloaded: the editor opens again on the fresh reel with what was typed, which is applied only when you tap Save
+  });
+  if (!$dlg.open) $dlg.showModal();
 }
 
 function pasteDialog(r) {
@@ -1803,7 +1908,10 @@ function settingsScreen() {
   bind("#excsv", "click", () => phone("saveFile", `watchlist-${stamp()}.csv`, "text/csv", Catalog.exportCsv(db)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#exshare", "click", () => sync("shareText", Notes.exportMarkdown(db.reels), "Share your reel notes"));
   bind("#excopy", "click", () => { sync("copy", Notes.exportMarkdown(db.reels)); toast("All notes copied"); });
-  bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes${db.reels.some(Notes.hasUserData) ? ", including your own edits" : ""}? This cannot be undone.`)) { db.reels = []; db.inbox = []; if (saveDb()) sync("dropBackup", "reels"); toast("Deleted (your watchlist is kept)"); settingsScreen(); } });
+  bind("#wipe", "click", () => {
+    const also = [db.reels.some((r) => Notes.isEdited(r) || r.notes_edit) && "your own edits", db.reels.some((r) => Object.values(r.notes_next || {}).some(Boolean)) && "the versions kept aside"].filter(Boolean).join(" and ");
+    if (confirm(`Delete all ${db.reels.length} reels and their notes${also ? ", including " + also : ""}? This cannot be undone.`)) { db.reels = []; db.inbox = []; if (saveDb()) sync("dropBackup", "reels"); toast("Deleted (your watchlist is kept)"); settingsScreen(); }
+  });
 }
 
 // ------------------------------------------------------------------ router
