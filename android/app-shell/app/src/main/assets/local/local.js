@@ -1109,7 +1109,8 @@ const editText = (f, v) => (f === "points" ? (v || []).join("\n") : f === "tags"
 /**
  * Checks what was typed against the reel as it is now (found again by its code: the page may have reloaded since the
  * editor opened) and applies it. {errors: {field: message}} when something is not allowed (nothing is applied),
- * {gone: true} when the reel is not on the shelf any more, else {changed}. A field set to the AI's text is put back with
+ * {gone: true} when the reel is not on the shelf any more, else {changed, notes} (notes: things to tell after saving, not
+ * errors, like "Only the first 12 tags are kept."). A field set to the AI's text is put back with
  * revertField, and is not checked (the AI's text may be longer than what you may type). A box you did not touch is left
  * alone, so what changed elsewhere in that field since the editor opened is kept.
  */
@@ -1120,17 +1121,21 @@ function applyDraft(d) {
   const names = EDIT_FIELDS.map((x) => x[0]);
   const typed = names.filter((f) => !d.ai[f] && d.fields[f] !== d.base[f]);
   const pending = (f) => (typed.includes(f) || d.ai[f] ? Notes.cleanField(f, d.fields[f], n[f]).value : n[f]);  // what the field will hold, to refuse a topic and points both empty
-  const errors = {};
+  const errors = {}, told = [];
+  let edits = false;
   for (const f of typed) {
     const c = Notes.cleanField(f, d.fields[f], n[f], f === "topic" ? pending("points") : f === "points" ? pending("topic") : undefined);
     if (c.error) errors[f] = c.error;
+    if (c.note) told.push(c.note);
+    edits = edits || c.changed;
   }
+  if (edits && !Object.keys(errors).length && Notes.noBody(pending("topic"), pending("points"))) errors.topic = errors.points = Notes.NO_BODY;  // tags or a takeaway alone are not notes
   if (Object.keys(errors).length) return { errors };
   const now = Date.now();
   let changed = false;
   for (const f of typed.sort((a, b) => !d.fields[a].trim() - !d.fields[b].trim())) changed = Notes.applyEdit(r, f, d.fields[f], now) || changed;  // emptied fields last
-  for (const f of names.filter((x) => d.ai[x])) changed = Notes.revertField(r, f) || Notes.applyEdit(r, f, d.fields[f], now) || changed;
-  return { changed };
+  for (const f of names.filter((x) => d.ai[x])) changed = Notes.revertField(r, f, now) || Notes.applyEdit(r, f, d.fields[f], now) || changed;
+  return { changed, notes: told };
 }
 
 function editDialog(code) {
@@ -1175,10 +1180,10 @@ function editDialog(code) {
     }
     if (res.gone) { editDraft = null; $dlg.close(); toast("This reel is no longer on your shelf."); render(); return; }
     if (res.errors) { ctl(EDIT_FIELDS.find(([f]) => res.errors[f])[0]).focus(); return; }
-    if (!res.changed && !unsaved) { editDraft = null; $dlg.close(); return; }
+    if (!res.changed && !unsaved) { editDraft = null; $dlg.close(); if (res.notes.length) toast(res.notes.join(" ")); return; }
     unsaved = true;
     staleSave = false;
-    if (saveDb()) { editDraft = null; $dlg.close(); toast("Saved"); reelScreen(code); }
+    if (saveDb()) { editDraft = null; $dlg.close(); toast(["Saved", ...res.notes].join(". ")); reelScreen(code); }
     else if (staleSave) { editDialog(code); toast("Your library changed elsewhere. Your text is still here: tap Save again."); }  // reloaded: the editor opens again on the fresh reel with what was typed, which is applied only when you tap Save
   });
   if (!$dlg.open) $dlg.showModal();

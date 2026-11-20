@@ -9,12 +9,13 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 - **You can now edit a reel's notes.** On a reel, tap **Edit notes** to change the topic, the points (one per line), the
   takeaway and the tags, or **Write my own notes** on a reel that has none. Each box has a label, a hint and its own error
   message; Save and Cancel are large. A topic is at most 200 letters, a takeaway 1,000, points 40 lines of 500 letters,
-  tags 12. Only what you change is checked, so fixing one word of a long AI takeaway or one point of a long AI list is
-  never refused.
+  tags 12 (more are cut to the first 12, and Reel Shelf says so). Notes need a topic or at least one point. Only what you
+  change is checked, so fixing one word of a long AI takeaway or one point of a long AI list is never refused.
 - What you edited is marked **Edited by you** under its heading, and the notes say "Your notes (edited from Notes by the
   on-phone AI)". Reel Shelf keeps the AI's original text of each field you changed: in the editor, **Use the AI text**
   fills the box with it (nothing is saved until you tap Save; Cancel leaves your text). Putting back the last edited
-  field gives the notes back to whoever wrote them.
+  field gives the notes back to whoever wrote them. Putting back the points does not bring back the "N lines were left
+  out" note of the AI's answer.
 - If your library changed elsewhere while you were typing (for example the nightly run saved), nothing is lost: the
   page reloads, the editor opens again with your text and says "Your library changed elsewhere. Your text is still here:
   tap Save again." Your text is saved only when you tap Save.

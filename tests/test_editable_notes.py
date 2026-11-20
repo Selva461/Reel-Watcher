@@ -686,6 +686,17 @@ def test_write_my_own_notes_for_a_reel_with_none(phone):
     assert phone.locator("[data-ai]").count() == 0 and phone.locator("h2", has_text="Edit notes").is_visible()  # nothing of the AI to go back to
 
 
+def test_a_cancelled_editor_leaves_nothing_behind_for_the_next_one(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, topic="t" * 201)  # refused: the draft is kept in case of a reload
+    save(phone)
+    assert dialog_open(phone) and phone.evaluate("() => editDraft.fields.topic.length") == 201
+    phone.locator("#edCancel").click()
+    open_editor(phone)
+    assert phone.locator("#ed-topic").input_value() == "Passwords in apps" and phone.evaluate("() => editDraft") is None
+
+
 def test_saving_with_nothing_changed_writes_nothing(phone):
     open_reel(phone, [reel("REEL1", notes=notes(), notes_by="auto")])
     before = phone.rn()["db"]
@@ -815,7 +826,7 @@ def test_every_limit_has_its_message_under_its_own_box(phone):
     typed(phone, topic="t" * 201, points="\n".join("p%d" % i for i in range(41)), takeaway="k" * 1001, tags=", ".join("t%d" % i for i in range(13)))
     save(phone)
     assert [err(phone, f) for f in ("topic", "points", "takeaway", "tags")] == [
-        "The topic can be at most 200 letters.", "Keep at most 40 points, each under 500 letters.", "The takeaway can be at most 1,000 letters.", "Only the first 12 tags are kept."]
+        "The topic can be at most 200 letters.", "Keep at most 40 points, each at most 500 letters.", "The takeaway can be at most 1,000 letters.", ""]  # too many tags is not an error
     assert phone.locator("#dlg [role=alert]").count() == 4 and phone.rn()["db"] == before and dialog_open(phone)
     typed(phone, topic="ok", points="a", takeaway="ok", tags="ok")
     save(phone)
@@ -823,6 +834,37 @@ def test_every_limit_has_its_message_under_its_own_box(phone):
     assert stored(phone)["notes"]["topic"] == "ok"
     open_editor(phone)
     assert [phone.locator("#ed-%s-err" % f).inner_text() for f in ("topic", "points", "takeaway", "tags")] == [""] * 4  # a new editor starts clean
+
+
+def test_more_than_twelve_tags_are_saved_as_the_first_twelve_and_the_editor_says_so(phone):
+    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+    open_editor(phone)
+    typed(phone, tags=", ".join("t%d" % i for i in range(14)))
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert stored(phone)["notes"]["tags"] == ["t%d" % i for i in range(12)]
+    assert toasts(phone) == ["Saved. Only the first 12 tags are kept."]
+    open_editor(phone)
+    typed(phone, tags=", ".join("t%d" % i for i in range(14)))  # the same again: nothing to change, still said
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert toasts(phone)[-1] == "Only the first 12 tags are kept."
+
+
+def test_tags_or_a_takeaway_alone_are_not_notes_in_the_editor_either(phone):
+    open_reel(phone, [reel("REEL1", status="ready", notes=None)])
+    before = phone.rn()["db"]
+    phone.get_by_role("button", name="Write my own notes").click()
+    phone.locator("#ed-topic").wait_for()
+    typed(phone, takeaway="Only a takeaway", tags="a, b")
+    save(phone)
+    assert dialog_open(phone) and phone.rn()["db"] == before
+    assert err(phone, "topic") == err(phone, "points") == "Write a topic or at least one point." and err(phone, "takeaway") == ""
+    typed(phone, points="one point")
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    r = stored(phone)
+    assert r["notes"]["points"] == ["one point"] and r["notes"]["takeaway"] == "Only a takeaway" and r["notes"]["tags"] == ["a", "b"] and r["notes_by"] == "you"
 
 
 def test_a_topic_and_points_that_are_both_emptied_are_refused_but_one_of_them_may_be(phone):
@@ -866,7 +908,7 @@ def test_only_changed_fields_are_checked_through_the_screen(phone):
     open_editor(phone)
     typed(phone, points="\n".join(lines + ["one point more"]))
     save(phone)
-    assert dialog_open(phone) and err(phone, "points") == "Keep at most 51 points, each under 700 letters."  # but it may not grow past what is stored
+    assert dialog_open(phone) and err(phone, "points") == "Keep at most 51 points, each at most 700 letters."  # but it may not grow past what is stored
 
 
 # ---------------------------------------------------------------- labels, hints, alerts and size
@@ -935,17 +977,23 @@ def test_a_change_made_elsewhere_is_kept_when_the_reopened_editor_saves(phone):
     assert r["notes"]["topic"] == "Mine from here" and r["notes"]["tags"] == ["from", "elsewhere"] and r["notes_edit"]["fields"] == ["topic"]  # applied on the reel as it is now
 
 
-def test_a_reload_while_the_editor_is_open_does_not_lose_the_edit_when_saved(phone):
-    """The page may reload (the nightly run saved) while you type: Save must use the reel as it is after the reload."""
-    open_reel(phone, [reel("REEL1", notes=notes(), notes_by="phone")])
+def test_a_reload_while_the_editor_is_open_keeps_the_edit_and_does_not_undo_a_change_made_elsewhere(phone):
+    """The page may reload (the nightly run saved) while you type: Save must use the reel as it is after the reload,
+    and a box you did not touch must not put its old text back over what changed elsewhere."""
+    reels = [reel("REEL1", notes=notes(), notes_by="phone")]
+    open_reel(phone, reels)
     open_editor(phone)
     typed(phone, topic="Typed before the reload")
-    rival_saves(phone)
+    elsewhere = copy.deepcopy(reels[0])
+    elsewhere["notes"]["tags"] = ["from", "elsewhere"]
+    rival_saves(phone, json.dumps({"reels": [elsewhere], "inbox": []}))
     phone.evaluate("() => staleReload()")
     assert dialog_open(phone) and phone.locator("#ed-topic").input_value() == "Typed before the reload"
     save(phone)
     phone.wait_for_function("() => !document.getElementById('dlg').open")
-    assert stored(phone)["notes"]["topic"] == "Typed before the reload" and stored(phone)["notes_by"] == "you"
+    r = stored(phone)
+    assert r["notes"]["topic"] == "Typed before the reload" and r["notes_by"] == "you" and r["notes_edit"]["fields"] == ["topic"]
+    assert r["notes"]["tags"] == ["from", "elsewhere"]  # the untouched Tags box did not bring back "security, apps"
     assert phone.evaluate("() => reel('REEL1').notes.topic") == "Typed before the reload"
 
 
