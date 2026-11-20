@@ -57,6 +57,13 @@ final class LocalBridge {
     private final ExecutorService work = Executors.newSingleThreadExecutor();
     private final ExecutorService net = Executors.newSingleThreadExecutor();
     private volatile boolean downloading;
+    /** True while the app is on screen (MainActivity says so): a model check runs only then, and never at night. */
+    private volatile boolean onScreen;
+    /** True from the start of a picked file's copy to its end; guarded with pickLock so deleteModel never removes a copy in progress. */
+    private volatile boolean picking;
+    private final Object pickLock = new Object();
+    /** Jobs queued or running on the worker thread (generate, saving files): a model check gives way to them. */
+    private final java.util.concurrent.atomic.AtomicInteger jobs = new java.util.concurrent.atomic.AtomicInteger();
     /** The revision of each library file this page has loaded or last saved (see LibraryFile): a save is refused when the file has moved on. */
     private volatile long reelsRev = -1, shotsRev = -1;
     private final ExecutorService verifyWork = Executors.newSingleThreadExecutor();
@@ -75,6 +82,25 @@ final class LocalBridge {
         shots.stop();
         act.keepScreenOn(false);
         verifyStop.set(true);  // the online check (Process) only runs while the app is on screen
+    }
+
+    /** MainActivity: the app is on screen (true) or has left it (false). Leaving stops a model check, even while a job you started goes on. */
+    void screen(boolean on) {
+        onScreen = on;
+        if (!on) model.checks.cancel();
+    }
+
+    /** The one worker thread for jobs. A model check on it gives way: it is stopped first, so a job never waits behind it. */
+    private void runWork(Runnable r) {
+        jobs.incrementAndGet();  // first: a check that is about to start sees the job and does not start
+        model.checks.cancel();
+        work.execute(() -> {
+            try {
+                r.run();
+            } finally {
+                jobs.decrementAndGet();
+            }
+        });
     }
 
     /** Adds shared text to the queue the page reads when it opens (used by ShareActivity, which has no page). */
@@ -219,7 +245,7 @@ final class LocalBridge {
     @JavascriptInterface
     public void saveUnreadable(int id, String which) {
         if (!ok()) return;
-        work.execute(() -> {
+        runWork(() -> {
             LibraryFile f = fileOf(which);
             String name = ("shots".equals(which) ? "shots" : "reels") + "-unreadable-"
                     + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT).format(new java.util.Date()) + ".txt";
@@ -747,7 +773,7 @@ final class LocalBridge {
         if (!ok()) return;
         String safe = new File(name == null || name.isEmpty() ? "reel-shelf.txt" : name).getName().replaceAll("[^A-Za-z0-9._-]", "_");
         byte[] data = (text == null ? "" : text).getBytes(StandardCharsets.UTF_8);
-        work.execute(() -> {
+        runWork(() -> {
             try {
                 if (Build.VERSION.SDK_INT >= 29) {
                     ContentValues v = new ContentValues();
@@ -944,7 +970,16 @@ final class LocalBridge {
 
     // ------------------------------------------------------------------ the on-phone AI model
 
-    /** {"file", "ready", "bytes", "partial", "downloading", "backend", "free"} */
+    /** The answer for a model file without starting any work: "checking" while its check runs, else ModelCheck.known (yes, no, unknown or own). */
+    private String verdict(ModelCatalog.Entry row, File f) {
+        return model.checks.running(f) ? ModelCheck.CHECKING : ModelCheck.known(row, f);
+    }
+
+    /**
+     * {"file", "ready", "bytes", "partial", "downloading", "backend", "free", "installed", "verified", "kept"}. "ready" only
+     * means the file exists. "verified" is "yes", "no", "unknown", "checking" or "own" (see ModelCheck); "kept" is true once
+     * you chose to keep using a file that is not the published one. Nothing is started here: checkModel does that.
+     */
     @JavascriptInterface
     public String modelInfo(String name) {
         if (!ok()) return "{}";
@@ -954,6 +989,8 @@ final class LocalBridge {
         try {
             o.put("file", f.getName());
             o.put("ready", f.isFile());
+            o.put("verified", verdict(ModelCatalog.lookup(name), f));
+            o.put("kept", ModelCheck.kept(f));
             o.put("bytes", f.isFile() ? f.length() : 0);
             o.put("partial", part.isFile() ? part.length() : 0);
             o.put("downloading", downloading && !speechDownloading);  // the speech model's download is not the AI model's
@@ -982,6 +1019,7 @@ final class LocalBridge {
             done(id, false, speechDownloading ? "Speech to text is downloading. Wait until it is done, then download the model." : "Already downloading");
             return;
         }
+        model.checks.cancel();  // a download you start wins over a model check (the check starts again later)
         downloading = true;
         net.execute(() -> {
             try {
@@ -1003,6 +1041,48 @@ final class LocalBridge {
         model.stopAll();
     }
 
+    /**
+     * The check of the model file called name: "yes", "no", "unknown", "checking" or "own" (see ModelCheck). A file with
+     * no result yet is read once in the background and this answers "checking"; the page is told when it ends (progress
+     * "check"). Settings calls this; the nightly run never does and is refused here anyway. It does not start while the
+     * app is off screen, a download or a job runs, or the battery is low (then the answer stays "unknown"). Only the
+     * answer is kept next to the file: the model itself is never touched.
+     */
+    @JavascriptInterface
+    public String checkModel(String name) {
+        if (!ok()) return ModelCheck.UNKNOWN;
+        ModelCatalog.Entry row = ModelCatalog.lookup(name);
+        File f = model.file(name);
+        String v = verdict(row, f);
+        if (!ModelCheck.UNKNOWN.equals(v) || !f.isFile()) return v;
+        int level = -1;
+        boolean charging = false;
+        try {
+            JSONObject b = shots.battery();  // the level the app already reads; no new permission
+            level = b.optInt("level", -1);
+            charging = b.optBoolean("charging", false);
+        } catch (JSONException ignored) {
+            // unknown battery does not stop a check
+        }
+        if (ModelCheck.refuse(onScreen, act.isNight(), downloading, jobs.get() > 0, level, charging) != null) return v;
+        boolean started = model.checks.start(work, row, f, () -> onScreen && jobs.get() == 0, r -> progress("check", 0, 0));  // asked again when the worker gets to it
+        return started ? ModelCheck.CHECKING : v;
+    }
+
+    /** "Stop checking": the running check stops before its next read and records nothing. */
+    @JavascriptInterface
+    public void stopCheck() {
+        if (!ok()) return;
+        model.checks.cancel();
+    }
+
+    /** "Keep using it": remembers that you chose to keep a model file that is not the published one. The file is not touched. */
+    @JavascriptInterface
+    public boolean keepModel(String name) {
+        if (!ok()) return false;
+        return ModelCheck.keep(ModelCatalog.lookup(name), model.file(name));
+    }
+
     @JavascriptInterface
     public boolean deleteModel(String name) {
         if (!ok()) return false;
@@ -1011,10 +1091,19 @@ final class LocalBridge {
         File part = new File(f.getPath() + ".part");
         boolean a = !f.exists() || f.delete();
         boolean b = !part.exists() || part.delete();
+        if (a) ModelCheck.forget(f);  // its own bookkeeping goes with it
+        synchronized (pickLock) {
+            if (!picking) ModelCheck.clearPickTemp(model.dir());  // a pick that was cut off left a copy of up to several GB; not while a pick is copying
+        }
         return a && b;
     }
 
-    /** Lets you pick your own .litertlm model file; it is copied into the app (progress as "import"). */
+    /**
+     * Lets you pick your own .litertlm model file; it is copied into the app (progress as "import"). It is your own file
+     * ("own": Reel Shelf does not claim it is the published one). It never takes the name of a model Reel Shelf downloads
+     * and never replaces a file that is already there: a name in use gets " (own)" added (ModelCheck.keepPicked). The copy
+     * is made under a temporary name of its own, so a download you paused is never touched either.
+     */
     @JavascriptInterface
     public void pickModel(int id) {
         if (!ok()) return;
@@ -1028,44 +1117,60 @@ final class LocalBridge {
                 done(id, false, "Choose a .litertlm model file");
                 return;
             }
-            File dest = model.file(name);
-            File part = new File(dest.getPath() + ".part");
-            try (InputStream in = act.ctx().getContentResolver().openInputStream(uri); OutputStream out = new FileOutputStream(part)) {
-                if (in == null) throw new IOException("Could not open the file");
-                byte[] buf = new byte[1 << 16];
-                long total = act.sizeOf(uri);
-                long d = 0;
-                long last = 0;
-                int n;
-                while ((n = in.read(buf)) > 0) {
-                    out.write(buf, 0, n);
-                    d += n;
-                    if (d - last > 8L * 1024 * 1024) {
-                        last = d;
-                        progress("import", d, total);
-                    }
-                }
-            } catch (Exception e) {
-                //noinspection ResultOfMethodCallIgnored
-                part.delete();
-                done(id, false, "Could not copy the model: " + e.getMessage());
-                return;
+            model.checks.cancel();  // a copy you started wins over a model check
+            synchronized (pickLock) {
+                picking = true;  // deleteModel leaves the temporary copy alone from here to the end of this pick
+                ModelCheck.clearPickTemp(model.dir());  // what an earlier pick that was cut off (the app was killed) left behind
             }
-            if (dest.exists()) //noinspection ResultOfMethodCallIgnored
-                dest.delete();
-            if (!part.renameTo(dest)) {
-                done(id, false, "Could not save the model file");
-                return;
+            try {
+                savePicked(id, uri, name);
+            } finally {
+                picking = false;
             }
-            done(id, true, dest.getName());
         })));
+    }
+
+    /** Copies the picked file to a temporary file of its own, then keeps it as an own model (ModelCheck.keepPicked). Always ends with done(). */
+    private void savePicked(int id, Uri uri, String name) {
+        File part = ModelCheck.pickTemp(model.dir());
+        try (InputStream in = act.ctx().getContentResolver().openInputStream(uri); OutputStream out = new FileOutputStream(part)) {
+            if (in == null) throw new IOException("Could not open the file");
+            byte[] buf = new byte[1 << 16];
+            long total = act.sizeOf(uri);
+            long d = 0;
+            long last = 0;
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                d += n;
+                if (d - last > 8L * 1024 * 1024) {
+                    last = d;
+                    progress("import", d, total);
+                }
+            }
+        } catch (Exception e) {
+            //noinspection ResultOfMethodCallIgnored
+            part.delete();
+            done(id, false, "Could not copy the model: " + e.getMessage());
+            return;
+        }
+        File dest;
+        try {
+            dest = ModelCheck.keepPicked(part, model.dir(), name);
+        } catch (IOException | RuntimeException e) {  // an odd name must never end the app or leave the page waiting
+            //noinspection ResultOfMethodCallIgnored
+            part.delete();  // our own temporary copy; the file you picked is untouched
+            done(id, false, "Could not save the model file");
+            return;
+        }
+        done(id, true, dest.getName());
     }
 
     /** Runs the model once. opts: {"file", "gpu", "system", "maxTokens", "temperature"}. */
     @JavascriptInterface
     public void generate(int id, String prompt, String opts) {
         if (!ok()) return;
-        work.execute(() -> {
+        runWork(() -> {
             try {
                 JSONObject o = new JSONObject(opts == null || opts.isEmpty() ? "{}" : opts);
                 long t0 = System.currentTimeMillis();
@@ -1200,6 +1305,7 @@ final class LocalBridge {
             done(id, false, speechDownloading ? "Already downloading" : "The AI model is downloading. Wait until it is done, then download speech to text.");
             return;
         }
+        model.checks.cancel();  // a download you start wins over a model check
         speechDownloading = true;
         downloading = true;
         net.execute(() -> {
