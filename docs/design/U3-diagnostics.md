@@ -67,7 +67,7 @@ Error texts are mixed. Network errors from `request` give only the class name (L
 
 ## Failure modes
 - A bridge call is missing (an older build, the harness): that line says "not available"; the report is still made.
-- The library is locked or newer: counts are "not available" (the library was not read); the state line says why. The page still opens (it reads no library file itself).
+- The library is locked or newer: today `render()` shows only the locked or newer screen for every route except `#/restore` (local.js:1727), so Diagnostics would not open exactly when it is most useful. U3 adds `#/diagnostics` to that exception and a "Diagnostics" link on both screens (D-U3-6); counts are then "not available" (the library was not read) and the state line says why. The page reads no library file and saves nothing, so it cannot write over a locked library.
 - A huge library: counting statuses is one pass over `db.reels` (no JSON tree, no new read).
 - The clipboard: on Android 12 and older another app in the foreground could read it (NEEDS VERIFICATION per version); the default report has nothing private. Android 13+ shows a clipboard preview.
 - The user turns the switch on and shares: error texts may still hold something `scrub` missed. The switch's label says what it adds, and the full report is visible before Copy or Share.
@@ -93,7 +93,8 @@ Error texts are mixed. Network errors from `request` give only the class name (L
 - **D-U3-2** No device maker or model. Alternative: a second switch "Include phone model".
 - **D-U3-3** Error texts only with the switch, scrubbed, at most 10. Alternative: never include error texts.
 - **D-U3-4** Copy and Share only, no file. Alternative: also "Save to Downloads" (leaves a file other apps can read).
-- **D-U3-5** Use only what is already recorded. Alternative: also keep the last 7 nightly runs (needs a new field, R4 rules apply).
+- **D-U3-5** Use only what is already recorded, plus U4's numbers-only `night_trace` if U4-1 is built. Alternative: also keep the last 7 nightly run logs (needs a new field, R4 rules apply).
+- **D-U3-6** Diagnostics opens from the locked and newer screens too (a router exception like `#/restore`). Alternative: only from Settings (then not while locked).
 
 ## Risks
 - The riskiest assumption is that `scrub` plus the allowlist keeps personal data out of error texts; that is why the default report has no error text at all.

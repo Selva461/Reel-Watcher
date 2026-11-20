@@ -49,7 +49,7 @@ Also verified: no record of the last backup survives a restart (only `lastBackup
 
 - "Measuring..." while the answer is coming; "unknown" when a group could not be read; "at least" when capped. Sizes use the existing `mb()` (local.js:38).
 - No size is ever shown in red or called "too big". The screen never suggests deleting the library, kept files or inbox files.
-- Works while the library is locked (sizes are file facts), but then it only shows (no links into Settings actions, as today's locked screen allows none).
+- While the library is locked or newer, `render()` shows the locked or newer screen for every route except `#/restore` (local.js:1727), so Storage is not reachable then. U1 keeps that (D-U1-7); Settings is not reachable either.
 - U1 adds no delete, no rename and no write. Every existing delete keeps its own confirmation where it is today.
 
 ## Failure modes
@@ -63,7 +63,7 @@ Also verified: no record of the last backup survives a restart (only `lastBackup
 ## Tests
 - **JUnit `StorageInfoTest`** (temp folders): each group sums the right files; `.bak` and `.tmp` go to the right group; a symlinked file and a symlinked folder count 0 and the target is untouched; more than 2,000 entries gives `capped`; an unreadable folder gives `unknown`; the JSON has no file name or path (search the output for every name created); the folders are byte-identical before and after (no write).
 - **JUnit:** `kept` equals `KeptFiles.list` for the same folder.
-- **Phone harness `tests/test_storage_screen.py`** (fake `RN.storageInfo`): every card and text; "unknown" and "at least"; leaving during "Measuring..." does not repaint; the screen has no button whose label contains "Delete" or "Remove"; the links go to `#/kept` and `#/settings`; locked library shows sizes with no links; the Settings link exists; nothing calls `deleteKept`, `deleteModel`, `deleteSpeech` or `dropBackup`.
+- **Phone harness `tests/test_storage_screen.py`** (fake `RN.storageInfo`): every card and text; "unknown" and "at least"; leaving during "Measuring..." does not repaint; the screen has no button whose label contains "Delete" or "Remove"; the links go to `#/kept` and `#/settings`; with a locked library `#/storage` shows the locked screen; the Settings link exists; nothing calls `deleteKept`, `deleteModel`, `deleteSpeech` or `dropBackup`.
 
 ## PR split
 1. **U1-1** (stacked on #70; publishing PR, left READY): `StorageInfo.java`, `StorageInfoTest.java`, `LocalBridge.storageInfo`, the `#/storage` route and screen, the Settings link, `tests/test_storage_screen.py`, CHANGELOG, TESTING rows, version bump. One Opus review (it reads every app folder, so data safety first).
@@ -82,6 +82,7 @@ Also verified: no record of the last backup survives a restart (only `lastBackup
 - **D-U1-4** Temporary files: show only; the 5a sweep stays automatic. Alternative: a "Clean up now" button that runs the same `TempSweeper` allowlist.
 - **D-U1-5** Shared pictures and videos: totals only until 5b is decided. Alternative: a per-reel list (which reels hold which videos), still with no delete.
 - **D-U1-6** Show Android's own total (if it needs no permission). Alternative: leave it out.
+- **D-U1-7** Storage is not reachable while the library is locked (as today for Settings). Alternative: a "Storage" link on the locked screen too (read-only, so safe, but one more router exception).
 
 ## Risks
 - A user reads a big number as advice to clear the app in Android settings, which deletes the library. Mitigation: one line on the screen: "Clearing Reel Shelf's storage in Android settings deletes your library. Back up first."
