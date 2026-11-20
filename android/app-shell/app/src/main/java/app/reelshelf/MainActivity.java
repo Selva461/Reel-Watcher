@@ -35,6 +35,9 @@ public class MainActivity extends Activity implements Host {
     private static final int LISTEN_REQUEST = 6;
     private static final int FILE_REQUEST = 1;
 
+    /** Reel Shelf is on screen (started and not stopped): the nightly run does not start while it is. */
+    static volatile boolean visible;
+
     private WebView web;
     private volatile String currentUrl = "";
     private ValueCallback<Uri[]> fileCallback;
@@ -99,6 +102,7 @@ public class MainActivity extends Activity implements Host {
         WorkService.STOP_HOOKS.add(stopHook);
         NightRun.schedule(this);  // the nightly run (on unless switched off in Settings)
         if (NightRun.prefs(this).getBoolean("nightly_check", false)) NightlyCheck.schedule(this, true);  // drops the old Wi-Fi + charger rule
+        TempSweeper.startOnce(this);  // once per process, 20 s from now, on its own thread: removes the app's own leftover temp files
     }
 
     /** The built-in page (not a web site) is showing: only it may use window.RN. */
@@ -285,8 +289,16 @@ public class MainActivity extends Activity implements Host {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        visible = true;
+        WorkService.handOverNight(this);  // a nightly run still going stops its current work, keeps what it saved, and gives the library back
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
+        if (local != null) local.screen(true);  // a model check may run while the app is on screen
         web.onResume();
         callPage("window.onAppResume && onAppResume()");
     }
@@ -303,10 +315,12 @@ public class MainActivity extends Activity implements Host {
      */
     @Override
     protected void onStop() {
+        if (local != null) local.screen(false);  // a model check stops here even when a job you started goes on
         if (!working) {
             callPage("window.onAppPause && onAppPause()");
             if (local != null) local.pause();
         }
+        visible = false;
         super.onStop();
     }
 
@@ -316,6 +330,7 @@ public class MainActivity extends Activity implements Host {
         if (local != null) local.pause();
         WorkService.end(this);
         working = false;
+        visible = false;
         super.onDestroy();
     }
 
