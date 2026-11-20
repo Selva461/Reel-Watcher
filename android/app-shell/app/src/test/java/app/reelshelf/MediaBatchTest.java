@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -453,6 +454,93 @@ public class MediaBatchTest {
             stuck.stalled.release();
             t.join();
         }
+    }
+
+    // ------------------------------------------------------------------ the temp sweep takes the same lock, without waiting
+
+    @Test(timeout = 20_000)
+    public void theSweepsTryLockDoesNotWaitAndARunningCopyIsNotDisturbed() throws Exception {
+        Stuck stuck = new Stuck();
+        Log first = new Log();
+        MediaBatch.Report[] r = new MediaBatch.Report[1];
+        Thread t = new Thread(() -> r[0] = MediaBatch.run(list(stuck), staging, first));
+        t.start();
+        assertTrue(stuck.stalled.awaitInside());
+        assertEquals("the copy has its half file in staging", 1, stagingCount());
+        AtomicBoolean ran = new AtomicBoolean();
+        long t0 = System.nanoTime();
+        boolean got = MediaBatch.trySweepStaging(() -> ran.set(true));
+        long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+        assertFalse("a copy is running: the sweep does not get the lock", got);
+        assertFalse("and its action did not run", ran.get());
+        assertTrue("and it did not wait (took " + ms + " ms)", ms < 1000);
+        assertEquals("the copy's half file is still there", 1, stagingCount());
+        stuck.stalled.release();
+        t.join();
+        assertEquals("the copy finished as if nothing had happened", 1, r[0].kept());
+        assertEquals(1, inboxCount());
+        assertEquals(0, stagingCount());
+    }
+
+    @Test(timeout = 20_000)
+    public void aShareWaitsWhileTheSweepHoldsTheLockAndThenGoesOn() throws Exception {
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch letGo = new CountDownLatch(1);
+        Thread sweep = new Thread(() -> MediaBatch.trySweepStaging(() -> {
+            inside.countDown();
+            try {
+                letGo.await(15, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }));
+        sweep.start();
+        assertTrue(inside.await(10, TimeUnit.SECONDS));
+        Log second = new Log();
+        MediaBatch.Report[] r = new MediaBatch.Report[1];
+        Thread share = new Thread(() -> r[0] = MediaBatch.run(list(new Shared("quick.mp4", data(1000, 60))), staging, second));
+        share.start();
+        long until = System.currentTimeMillis() + 5000;
+        while (second.waited == 0 && System.currentTimeMillis() < until) Thread.sleep(10);
+        assertEquals("the share is told it waits", 1, second.waited);
+        assertTrue("and has not started", second.events.isEmpty());
+        letGo.countDown();
+        sweep.join();
+        share.join();
+        assertEquals(1, r[0].kept());
+        assertTrue("the lock is free again", MediaBatch.trySweepStaging(() -> {
+        }));
+    }
+
+    @Test
+    public void theSweepCannotGetTheLockFromInsideACopyOnTheSameThread() {
+        boolean[] got = {true};
+        Log log = new Log() {
+            @Override
+            public void started(int index, int total, String label) {
+                super.started(index, total, label);
+                got[0] = MediaBatch.trySweepStaging(() -> {
+                });  // the lock is reentrant: a plain tryLock here would say yes
+            }
+        };
+        MediaBatch.Report r = MediaBatch.run(list(new Shared("a.mp4", data(1000, 61))), staging, log);
+        assertFalse(got[0]);
+        assertEquals(1, r.kept());
+    }
+
+    @Test
+    public void anActionThatThrowsStillFreesTheLock() {
+        try {
+            MediaBatch.trySweepStaging(() -> {
+                throw new IllegalStateException("boom");
+            });
+            org.junit.Assert.fail("the exception is not swallowed");
+        } catch (IllegalStateException expected) {
+            // fine
+        }
+        assertTrue(MediaBatch.trySweepStaging(() -> {
+        }));
+        assertEquals(1, MediaBatch.run(list(new Shared("a.mp4", data(1000, 62))), staging, new Log()).kept());
     }
 
     // ------------------------------------------------------------------ what the picker's page is told
