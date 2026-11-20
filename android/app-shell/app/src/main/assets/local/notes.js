@@ -320,6 +320,102 @@ const Notes = (() => {
     return tries >= RETRY_CAP ? null : (BACKOFF_H[Math.max(1, tries) - 1] || BACKOFF_H[BACKOFF_H.length - 1]) * 3600e3;
   }
 
+  // ---------------------------------------------------------------- your own edits (K1): what you typed is never overwritten by an AI answer
+  // A reel you edited has notes_by "you" and notes_edit {was_by (who wrote the notes before, "" when you wrote them from
+  // scratch), at (the first edit), fields (the edited ones), ai (the AI's text of each edited field, written once)}.
+  // notes_next {meta, phone, you} holds versions set aside by setNotes (local.js). Nothing else about the reel changes shape.
+  const EDITABLE = ["topic", "points", "takeaway", "tags"];
+  const LIMIT = { topic: 200, takeaway: 1000, tags: 12, points: 40, point: 500 };  // for text you type, in letters (points: how many, and how long)
+  const copy = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
+  const blank = (v) => ![].concat(v == null ? [] : v).map(bulletless).some(Boolean);
+  /** The tags of a typed list (a text, or an array), by the rule of `parse`: lowercase, letters, digits, _ and -, once each. */
+  function tagList(v) {
+    return [...new Set(list([].concat(v == null ? [] : v)).flatMap((t) => t.split(/\s+/)).map((t) => t.replace(/^#+/, "").toLowerCase().replace(/[^\p{L}\p{N}_-]/gu, "")).filter(Boolean))];
+  }
+
+  /**
+   * What you typed in one editable field (topic, points, takeaway, tags), written the way `parse` writes AI notes,
+   * and whether it may be saved: {value, error, changed}. A points value is a text with one point per line (or an array),
+   * tags a text with commas (or an array).
+   * Only a field that CHANGED is checked: "changed" means the cleaned new value differs from the cleaned stored value
+   * (points and tags item by item, in order). An unchanged field comes back as stored, even past the limits, because `parse`
+   * lets AI notes go past them. A changed field may be as long as the larger of its limit and what is stored now (a point:
+   * a line that is not already a stored point is held to the larger of 500 and the longest stored point). With
+   * more than the allowed tags the first ones are in `value` and `error` says so. `other` (optional) is what the other of
+   * topic and points will hold: a topic and points both empty are refused.
+   */
+  function cleanField(f, value, old, other) {
+    const num = (n) => n.toLocaleString("en-US");
+    const one = (v, empty) => (v == null ? empty : v);
+    if (f === "points" || f === "tags") {
+      const read = f === "points" ? (v) => lines(typeof v === "string" ? v.split("\n") : [].concat(one(v, []))) : tagList;
+      const next = read(value), prev = read(one(old, []));
+      if (next.length === prev.length && next.every((x, i) => x === prev[i])) return { value: copy(one(old, [])), error: "", changed: false };
+      let error = "", out = next;
+      if (f === "points") {
+        const count = Math.max(LIMIT.points, prev.length), long = prev.reduce((m, p) => Math.max(m, p.length), LIMIT.point), known = new Set(prev);
+        if (next.length > count || next.some((p) => p.length > long && !known.has(p))) error = `Keep at most ${count} points, each under ${num(long)} letters.`;
+        else if (!next.length && other !== undefined && blank(other)) error = "Write a topic or at least one point.";
+      } else {
+        const count = Math.max(LIMIT.tags, prev.length);
+        if (next.length > count) { error = `Only the first ${count} tags are kept.`; out = next.slice(0, count); }
+      }
+      return { value: out, error, changed: true };
+    }
+    const next = clean(value), prev = clean(one(old, ""));
+    if (next === prev) return { value: one(old, ""), error: "", changed: false };
+    let error = "";
+    const bound = Math.max(LIMIT[f], prev.length);
+    if (next.length > bound) error = `The ${f} can be at most ${num(bound)} letters.`;
+    else if (f === "topic" && !next && other !== undefined && blank(other)) error = "Write a topic or at least one point.";
+    return { value: next, error, changed: true };
+  }
+
+  /** A reel whose notes you edited. */
+  function isEdited(r) { return !!r && r.notes_by === "you"; }
+  /** Anything of yours on the reel: an edit, a stale notes_edit (an older build wrote over the notes), or a version kept aside. Such a reel is never deleted or merged away without asking. */
+  function hasUserData(r) { return isEdited(r) || !!r.notes_edit || Object.values(r.notes_next || {}).some(Boolean); }
+
+  /**
+   * Puts what you typed in one field into the reel's notes. The first edit makes the reel yours (notes_by "you") and keeps
+   * who wrote the notes before; the AI's text of the field is kept once, for "Use the AI text". The reel counts as done,
+   * its retry fields go (as a success does), and notes_at moves so the screenshots' tags are read again.
+   * False when nothing was applied: not an editable field, not changed, or not allowed (see cleanField). `now` is a time in ms.
+   */
+  function applyEdit(r, f, value, now) {
+    if (!EDITABLE.includes(f)) return false;
+    const had = r.notes, n = had || {};
+    const c = cleanField(f, value, n[f], f === "topic" ? n.points || [] : f === "points" ? n.topic || "" : undefined);
+    if (c.error || !c.changed) return false;
+    if (!had) r.notes = { topic: "", intent: "", tone: "", points: [], meaning: "", use: [], tools: [], takeaway: "", tags: [] };
+    if (!isEdited(r)) {  // the first edit; a stale notes_edit is replaced
+      r.notes_edit = { was_by: had ? r.notes_by || "" : "", at: now, fields: [], ai: {} };
+      r.notes_by = "you";
+    }
+    const e = r.notes_edit;
+    if (e.was_by && !(f in e.ai)) e.ai[f] = copy(r.notes[f]);
+    if (!e.fields.includes(f)) e.fields.push(f);
+    r.notes[f] = c.value;
+    if (f === "points") delete r.notes.unbacked;  // "N lines were left out" is about the AI's points, not yours
+    r.notes_at = now;
+    r.status = "done";
+    r.error = "";
+    delete r.tries; delete r.next_try_at; delete r.last_fail; delete r.last_fail_at;
+    return true;
+  }
+
+  /** Puts the AI's text back in one edited field. Reverting the last edited field gives the notes back to whoever wrote them (notes_by = was_by) and drops notes_edit. False when that field was not edited or has no AI text. */
+  function revertField(r, f) {
+    const e = r.notes_edit;
+    if (!isEdited(r) || !e || !(e.fields || []).includes(f) || !e.ai || !(f in e.ai)) return false;
+    r.notes[f] = copy(e.ai[f]);
+    e.fields = e.fields.filter((x) => x !== f);
+    delete e.ai[f];
+    r.notes_at = Date.now();
+    if (!e.fields.length) { r.notes_by = e.was_by; delete r.notes_edit; }
+    return true;
+  }
+
   // ---------------------------------------------------------------- YouTube: title, description, transcript (no key, no login)
 
   function ytId(r) { return String(r.code || "").replace(/^yt-/, ""); }
@@ -1117,5 +1213,5 @@ const Notes = (() => {
   return { keepBacked, username, reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, localPromptInfo, estTokens, promptBudget, material, RETRY_CAP, retryAfter, embedUrl, readPage,
     ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
     YT_CLIENTS, condense, search, answerPrompt, answerPromptInfo, webAnswerPrompt, webAnswerPromptInfo, ASK_SYSTEM, WEB_ASK_SYSTEM, markOneSource, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
-    exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS };
+    exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS, cleanField, applyEdit, revertField, isEdited, hasUserData };
 })();
