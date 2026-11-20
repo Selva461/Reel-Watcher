@@ -1,8 +1,9 @@
 # Reel Shelf for Android: changes
 
 Every change raises `versionCode` (+1) and `versionName` in `android/app-shell/app/build.gradle` and adds a
-section here; the APK workflow publishes release `v<versionName>` with this section as its notes, and points
-`apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
+section here. A merge builds and tests the APK (kept as the workflow artifact); the owner publishes it by running the
+"Android APK" workflow by hand on the install branch, which creates release `v<versionName>` with this section as its
+notes and points `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
 ## 1.3.11
