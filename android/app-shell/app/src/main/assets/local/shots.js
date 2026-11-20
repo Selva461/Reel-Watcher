@@ -196,7 +196,7 @@ const Shots = (() => {
       <p class="hint">Only new screenshots are read each time. You can leave the app while it runs (a notification shows it, with Stop).
         ${b.level >= 0 ? ` Battery ${b.level}%${b.charging ? ", charging" : ""}. A big first run is best done on the charger.` : ""}</p>
       ${job && job.finished ? doneHtml() : ""}`;
-    bind("#addp", "click", () => phone("addShotPictures").then((n) => { toast(`${plural(Number(n) || 0, "picture")} added`); process(); }).catch((e) => { if (e.message !== "cancelled") toast(e.message); }));
+    bind("#addp", "click", () => phone("addShotPictures").then((n) => { toast(picturesAddedText(n)); process(); }).catch((e) => { if (e.message !== "cancelled") toast(e.message); }));
     bind("#addf", "click", () => phone("addShotFolder").then(() => { toast("Folder added"); screen(); }).catch((e) => { if (e.message !== "cancelled") toast(e.message); }));
     bind("[data-rm]", "click", (e, el) => { if (confirm("Stop reading this folder? Names already found stay in the watchlist.")) { sync("removeShotFolder", el.dataset.rm); screen(); } });
     bind("#go", "click", () => process());

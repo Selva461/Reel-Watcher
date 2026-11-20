@@ -27,9 +27,7 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.ArrayDeque;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -143,7 +141,7 @@ final class ScreenshotReader {
         return d;
     }
 
-    private static final long MAX_PICTURE = 30L * 1024 * 1024;
+    static final long MAX_PICTURE = 30L * 1024 * 1024;
     static final long MAX_VIDEO_FILE = 500L * 1024 * 1024;
 
     /** Videos you shared to Reel Shelf (from the gallery) are copied here, the app's own storage. */
@@ -153,63 +151,14 @@ final class ScreenshotReader {
         return d;
     }
 
-    /** Copies shared videos into the video inbox. Returns how many were copied. */
-    static int addVideos(Context c, List<Uri> uris) {
-        if (uris == null) return 0;
-        File dir = videoInbox(c);
-        int n = 0;
-        long now = System.currentTimeMillis();
-        for (Uri u : uris) {
-            if (u == null || n >= 200) continue;
-            String type = c.getContentResolver().getType(u);
-            if (type != null && !type.startsWith("video/")) continue;
-            File out = new File(dir, "video_" + now + "_" + n + ".mp4");
-            try (InputStream in = c.getContentResolver().openInputStream(u); OutputStream o = new FileOutputStream(out)) {
-                if (in == null) continue;
-                byte[] buf = new byte[65536];
-                long total = 0;
-                int r;
-                while ((r = in.read(buf)) > 0) {
-                    total += r;
-                    if (total > MAX_VIDEO_FILE) throw new Exception("too big");
-                    o.write(buf, 0, r);
-                }
-                n++;
-            } catch (Exception e) {
-                out.delete();
-            }
-        }
-        return n;
-    }
-
-    /** Copies pictures (from the picker or Share) into the inbox. Returns how many were copied. */
-    static int addPictures(Context c, List<Uri> uris) {
-        if (uris == null) return 0;
-        File dir = inbox(c);
-        int n = 0;
-        long now = System.currentTimeMillis();
-        for (Uri u : uris) {
-            if (u == null || n >= 2000) continue;
-            String type = c.getContentResolver().getType(u);
-            if (type != null && !type.startsWith("image/")) continue;
-            String ext = type != null && type.endsWith("png") ? ".png" : type != null && type.endsWith("webp") ? ".webp" : ".jpg";
-            File out = new File(dir, "shot_" + now + "_" + n + ext);
-            try (InputStream in = c.getContentResolver().openInputStream(u); OutputStream o = new FileOutputStream(out)) {
-                if (in == null) continue;
-                byte[] buf = new byte[65536];
-                long total = 0;
-                int r;
-                while ((r = in.read(buf)) > 0) {
-                    total += r;
-                    if (total > MAX_PICTURE) throw new Exception("too big");
-                    o.write(buf, 0, r);
-                }
-                n++;
-            } catch (Exception e) {
-                out.delete();
-            }
-        }
-        return n;
+    /**
+     * Copies pictures chosen in the picker into the inbox: one at a time, each complete or not at all, the same picture never
+     * twice (see MediaBatch). Does file work: call it on a worker thread, never the main one.
+     */
+    static MediaBatch.Report addPictures(Context c, List<Uri> uris) {
+        if (uris == null) return new MediaBatch.Report();
+        List<Uri> use = uris.subList(0, Math.min(uris.size(), SharedItems.MAX_PICTURES));
+        return MediaBatch.run(SharedItems.pictures(c, use), SharedItems.staging(c), () -> false);
     }
 
     private boolean inInbox(String key) {
