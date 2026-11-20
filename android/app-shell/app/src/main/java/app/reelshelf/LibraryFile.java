@@ -127,6 +127,11 @@ final class LibraryFile {
         return locked;
     }
 
+    /** Whether {@link #read()} has run in this process: only then do {@link #state()} and {@link #locked()} say anything about the file on disk. Never reads. */
+    synchronized boolean loaded() {
+        return loaded;
+    }
+
     /** The schema number this build supports for this file. */
     int supported() {
         return supported;

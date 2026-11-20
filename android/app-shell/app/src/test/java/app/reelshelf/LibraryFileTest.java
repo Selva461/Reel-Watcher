@@ -1124,6 +1124,31 @@ public class LibraryFileTest {
         assertFalse(LibraryFile.isValid(staged("{\"seen\":[]}"), LibraryFile.SHOTS));
     }
 
+    @Test
+    public void loadedIsFalseUntilTheFileHasBeenReadAndAskingNeverReadsIt() throws Exception {
+        File dir = tmp.newFolder();
+        put(new File(dir, "reels.json"), "{\"reels\":[{\"code\":\"CUT");  // damaged, with a good backup: reading it would restore the backup and set this aside
+        put(new File(dir, "reels.json.bak"), V1);
+        String[] before = names(dir);
+        LibraryFile f = LibraryFile.reels(dir);
+        assertFalse(f.loaded());
+        assertFalse(f.locked());
+        assertEquals(LibraryFile.State.MISSING, f.state());  // nothing is known yet: the state says nothing about the file
+        assertFalse("asking is not reading", f.loaded());
+        assertArrayEquals("nothing was recovered or set aside", before, names(dir));
+        f.read();
+        assertTrue(f.loaded());
+        File dir2 = tmp.newFolder();
+        LibraryFile g = LibraryFile.shots(dir2);
+        assertFalse(g.loaded());
+        g.load();
+        assertTrue(g.loaded());
+        LibraryFile h = LibraryFile.reels(tmp.newFolder());
+        assertFalse(h.loaded());
+        h.savedByNewer();
+        assertTrue(h.loaded());
+    }
+
     // ------------------------------------------------------------------ the numbers here and in the page code are the same ones
 
     private static int numberIn(File js, String regex) throws IOException {

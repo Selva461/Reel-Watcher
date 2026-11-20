@@ -46,6 +46,8 @@ final class LocalBridge {
     private static long lastBackupNameTime;
     /** The backup that was checked and waits in filesDir/restore-staging to be restored (see RestoreNow.Stage). Put and cleared only while LIBRARY_JOB is held. */
     private static final RestoreNow.Stage STAGE = new RestoreNow.Stage();
+    /** The one pending confirmation of a delete of a kept file (see KeptFiles.Confirm). */
+    private static final KeptFiles.Confirm KEPT_CONFIRM = new KeptFiles.Confirm();
 
     private final Host act;
     private final SharedPreferences prefs;
@@ -550,6 +552,104 @@ final class LocalBridge {
         } finally {
             LIBRARY_JOB.set(false);
         }
+    }
+
+    // ------------------------------------------------------------------ files kept for safety (the logic is KeptFiles; this is the phone's part)
+
+    private KeptFiles.Env keptEnv() {
+        return new KeptFiles.Env(act.ctx().getFilesDir(), LIBRARY_JOB, this::busyWithWork, reelsFile(), shotsFile(), STAGE, KEPT_CONFIRM, java.util.TimeZone.getDefault());
+    }
+
+    /**
+     * The files Reel Shelf set aside, newest first, as JSON {items: [{name, kind, library, size, at, files}], error}: library files that
+     * could not be read (NAME.bad-STAMP), the library a restore replaced (NAME.before-restore-STAMP), and the leftover files of
+     * restore-staging and backup-check as one row. Nothing else is listed (not the library, its backup, a temp file of a running write,
+     * models, inboxes), no link is followed, and no path is given. Always allowed; changes nothing.
+     */
+    @JavascriptInterface
+    public String keptFiles() {
+        if (!ok()) return "";
+        return KeptFiles.listJson(act.ctx().getFilesDir(), java.util.TimeZone.getDefault());
+    }
+
+    /**
+     * Saves a copy of a kept file to Downloads/ReelShelf as LIBRARY-WHAT-STAMP.txt, like Back up now does: hidden until it has been read back
+     * and found whole (IS_PENDING on Android 10 and newer, NAME.part on 8 and 9), deleted when anything fails, never replacing a file. The kept
+     * file stays where it is. name must be one keptFiles gave (checked again). Always allowed (never blocked by work or a locked library).
+     * Done with JSON {name, where, bytes, uninstall_warning}, or one plain sentence (no path, no exception text). The copy is private data
+     * that other apps can read: the page says so.
+     */
+    @JavascriptInterface
+    public void saveKept(int id, String name) {
+        if (!ok()) return;
+        work.execute(() -> {
+            BackupNow.Outcome o;
+            try {
+                o = saveKeptNow(name);
+            } catch (Throwable t) {  // an Error too: the page must never stay on "Saving..."
+                o = BackupNow.fail(KeptFiles.sentenceFor(t));
+            }
+            done(id, o.ok, o.text);
+        });
+    }
+
+    private BackupNow.Outcome saveKeptNow(String name) throws IOException {
+        File dir = act.ctx().getFilesDir();
+        KeptFiles.Kind kind = KeptFiles.kindOf(name);
+        if (kind == null) return BackupNow.fail(KeptFiles.NOT_KEPT);
+        if (kind == KeptFiles.Kind.TEMP) return BackupNow.fail(KeptFiles.TEMP_SAVE);
+        KeptFiles.Item it = KeptFiles.find(dir, name, java.util.TimeZone.getDefault());
+        if (it == null) return BackupNow.fail(KeptFiles.SAVE_GONE);
+        long need = KeptFiles.neededBytes(it.size, SharedItems.RESERVE_BYTES);
+        long free = dir.getUsableSpace();
+        File external = act.ctx().getExternalFilesDir(null);  // where Downloads is (the same disk on most phones)
+        if (external != null) free = Math.min(free, external.getUsableSpace());
+        if (free < need) return BackupNow.fail(KeptFiles.notEnoughSpace(need, free));
+        java.security.MessageDigest md = KeptFiles.sha256();
+        byte[][] sha = new byte[1][];
+        long[] size = new long[1];
+        String place = saveToDownloads(KeptFiles.saveName(it), "text/plain", out -> {
+            size[0] = KeptFiles.copy(dir, it, out, md);
+            sha[0] = md.digest();
+            return size[0];
+        }, KeptFiles.EMPTY, in -> KeptFiles.verify(in, sha[0], size[0]));  // the proof that the copy is whole
+        String saved = new File(place).getName();  // the name it really has: Android may have changed it ("name (1).txt")
+        boolean appFolder = Build.VERSION.SDK_INT < 29;  // Android 8 and 9: the app's own folder, deleted with the app
+        return KeptFiles.saved(saved, BackupNow.where(appFolder, act.ctx().getPackageName(), saved), size[0], appFolder);
+    }
+
+    /**
+     * Delete, step 1: the page asks to delete a kept file (a name keptFiles gave). Answers JSON {ok:true, token, item} with the file as it is
+     * now (the confirm screen shows it) or {ok:false, text} with one plain sentence; changes nothing. Refused while work or the nightly run is
+     * going, while a backup or restore runs, while the library is locked, and for any name that is not a kept file's.
+     */
+    @JavascriptInterface
+    public String askDeleteKept(String name) {
+        if (!ok()) return "";
+        try {
+            return KeptFiles.ask(keptEnv(), name);
+        } catch (Throwable t) {
+            return KeptFiles.refuse(KeptFiles.NOT_DELETED);
+        }
+    }
+
+    /**
+     * Delete, step 2: deletes that one kept file, only with the one-use token askDeleteKept gave for it, and never while work or the nightly run
+     * is going, a backup or restore runs, or the library is locked (all asked again here, under the same one-at-a-time flag the backup and
+     * restore use). Nothing else is touched. Done with JSON {deleted, bytes} or one plain sentence (nothing was deleted).
+     */
+    @JavascriptInterface
+    public void deleteKept(int id, String name, String token) {
+        if (!ok()) return;
+        work.execute(() -> {
+            BackupNow.Outcome o;
+            try {
+                o = KeptFiles.delete(keptEnv(), name, token);
+            } catch (Throwable t) {  // an Error too: the page must never stay on "Deleting..."
+                o = BackupNow.fail(KeptFiles.NOT_DELETED);
+            }
+            done(id, o.ok, o.text);
+        });
     }
 
     /**
