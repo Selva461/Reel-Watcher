@@ -474,16 +474,20 @@ const Notes = (() => {
   // so typing in a search box or opening a reel does not re-read the library every time.
   const docCache = new WeakMap();
   let lastIx = null;
+  function sameTexts(texts, f) {
+    for (let i = 0; i < texts.length; i++) if (texts[i] !== (f[i][0] || "")) return false;
+    return true;
+  }
   function docOf(r) {
     const f = fieldsOf(r);
-    const sig = f.map((x) => x[0] || "").join("\u0001");
     const hit = docCache.get(r);
-    if (hit && hit.sig === sig) return hit.d;
+    // the fields' texts are compared one by one (the same strings are not copied or joined again: that was most of a warm call)
+    if (hit && sameTexts(hit.texts, f)) return hit.d;
     const tf = new Map();
     let len = 0;
     for (const [text, w] of f) for (const t of words(text)) { tf.set(t, (tf.get(t) || 0) + w); len += w; }
-    const d = { r, tf, len };
-    docCache.set(r, { sig, d });
+    const d = { r, tf, len, g: null };
+    docCache.set(r, { texts: f.map((x) => x[0] || ""), d });
     return d;
   }
   function index(reels) {
@@ -497,73 +501,134 @@ const Notes = (() => {
   }
   function idfOf(ix, t) { const n = ix.df.get(t) || 0; return Math.log(1 + (ix.N - n + 0.5) / (n + 0.5)); }
 
-  /** Ranks reels for a question, like a small search engine. [{reel, score, lines}] */
-  function search(reels, query, limit = 20) {
+  // Small things worked out once for one version of the index (Notes.index gives the same object until a reel changes).
+  const perIx = new WeakMap();
+  function cacheOf(ix) {
+    let c = perIx.get(ix);
+    if (!c) { c = { expand: new Map(), rel: null }; perIx.set(ix, c); }
+    return c;
+  }
+
+  /** What a question word also matches in this library: longer words that start with it, its typos, and its synonyms (each at a lower weight). */
+  function expandOf(ix, t) {
+    const kept = cacheOf(ix).expand;
+    let m = kept.get(t);
+    if (m) return m;
+    m = new Map([[t, 1]]);
+    for (const k of ix.df.keys()) {
+      if (m.has(k)) continue;
+      if (t.length >= 4 && (k.startsWith(t) || (k.length >= 4 && t.startsWith(k)))) m.set(k, 0.7);
+      else if (near(t, k)) m.set(k, 0.6);
+    }
+    for (const s of synonyms(t)) if (!m.has(s)) m.set(s, 0.5);
+    if (kept.size >= 200) kept.clear();
+    kept.set(t, m);
+    return m;
+  }
+
+  /** The lines of a reel that answer the question: those with most of the matching words, three at most. */
+  function linesOf(r, want) {
+    const n = r.notes || {};
+    const cands = [...(n.points || []), n.takeaway, n.meaning, ...(n.use || [])].filter(Boolean);
+    if (!cands.length) cands.push(...sentences([r.transcript, r.caption, r.onscreen, r.extra].filter(Boolean).join("\n")));
+    return cands.map((l) => ({ l, k: new Set(words(l).filter((w) => want.has(w))).size }))
+      .filter((x) => x.k).sort((a, b) => b.k - a.k).slice(0, 3).map((x) => x.l);
+  }
+
+  /** Ranks reels for a question, like a small search engine. [{reel, score, lines}]
+   *  accept(reel), when given, keeps only the reels it says yes to; the cut to `limit` comes after it. The lines are only
+   *  worked out for the reels that are returned (in a library of thousands a common word matches most reels). */
+  function search(reels, query, limit = 20, accept = null) {
     const q = [...new Set(words(query))];
     if (!q.length) return [];
     const ix = index(reels);
-    const vocab = [...ix.df.keys()];
-    // each query word also matches: longer words that start with it, its typos, and its synonyms (each at a lower weight)
-    const expand = new Map(q.map((t) => {
-      const m = new Map([[t, 1]]);
-      for (const k of vocab) {
-        if (m.has(k)) continue;
-        if (t.length >= 4 && (k.startsWith(t) || (k.length >= 4 && t.startsWith(k)))) m.set(k, 0.7);
-        else if (near(t, k)) m.set(k, 0.6);
-      }
-      for (const s of synonyms(t)) if (!m.has(s)) m.set(s, 0.5);
-      return [t, m];
-    }));
-    const out = [];
+    const expand = q.map((t) => expandOf(ix, t));
+    const weighed = expand.map((m) => [...m].map(([k, w]) => [k, w * idfOf(ix, k)]));  // each word's weight times its rarity, once
+    const scored = [];
     for (const d of ix.docs) {
+      const lenNorm = 0.25 + 0.75 * (d.len / ix.avg);
       let s = 0;
       let matched = 0;
-      for (const t of q) {
+      for (const list of weighed) {
         let best = 0;
-        for (const [k, w] of expand.get(t)) {
+        for (const [k, wi] of list) {
           const f = d.tf.get(k);
           if (!f) continue;
-          const v = w * idfOf(ix, k) * ((f * 2.2) / (f + 1.2 * (0.25 + 0.75 * (d.len / ix.avg))));
+          const v = wi * ((f * 2.2) / (f + 1.2 * lenNorm));
           if (v > best) best = v;
         }
         if (best) { matched++; s += best; }
       }
       if (!s) continue;
       s *= 0.5 + matched / q.length;  // reels that match more of the question come first
-      const want = new Set([...expand.values()].flatMap((m) => [...m.keys()]));
-      const n = d.r.notes || {};
-      const cands = [...(n.points || []), n.takeaway, n.meaning, ...(n.use || [])].filter(Boolean);
-      if (!cands.length) cands.push(...sentences([d.r.transcript, d.r.caption, d.r.onscreen, d.r.extra].filter(Boolean).join("\n")));
-      const lines = cands.map((l) => ({ l, k: new Set(words(l).filter((w) => want.has(w))).size }))
-        .filter((x) => x.k).sort((a, b) => b.k - a.k).slice(0, 3).map((x) => x.l);
-      out.push({ reel: d.r, score: s, lines });
+      scored.push({ d, s });
     }
-    return out.sort((a, b) => b.score - a.score).slice(0, limit);
+    scored.sort((a, b) => b.s - a.s);
+    const want = new Set(expand.flatMap((m) => [...m.keys()]));
+    const out = [];
+    for (const { d, s } of scored) {
+      if (out.length >= limit) break;
+      if (accept && !accept(d.r)) continue;
+      out.push({ reel: d.r, score: s, lines: linesOf(d.r, want) });
+    }
+    return out;
+  }
+
+  // the synonym groups each word is in (ascending), and how often each group occurs in a reel (kept with the reel's words)
+  const SYN_OF = new Map();
+  SYN.forEach((g, i) => { for (const w of g) { const a = SYN_OF.get(w); if (!a) SYN_OF.set(w, [i]); else if (a[a.length - 1] !== i) a.push(i); } });
+  const GKEY = SYN.map((_, i) => "~" + i);
+  function groupsOf(d) {
+    if (d.g) return d.g;
+    const g = new Map();
+    for (const [t, f] of d.tf) { const a = SYN_OF.get(t); if (a) for (const i of a) g.set(GKEY[i], (g.get(GKEY[i]) || 0) + f); }
+    d.g = g;
+    return g;
+  }
+  /** For one index version: how rare each synonym group is, and each reel's vector length (worked out when first needed). */
+  function relatedState(ix) {
+    const c = cacheOf(ix);
+    if (c.rel) return c.rel;
+    const gdf = new Map();
+    for (const d of ix.docs) for (const k of groupsOf(d).keys()) gdf.set(k, (gdf.get(k) || 0) + 1);
+    const gl = new Map();
+    for (const [k, n] of gdf) gl.set(k, Math.log(1 + (ix.N - n + 0.5) / (n + 0.5)));
+    c.rel = { gl, norms: new Float64Array(ix.docs.length) };
+    return c.rel;
   }
 
   /** Reels about the same thing (TF-IDF vectors, cosine similarity). [{reel, score}] */
   function related(reels, target, limit = 5) {
     const ix = index(reels);
-    const groups = (d) => { const g = new Map(); for (const [t, f] of d.tf) SYN.forEach((s, i) => { if (s.includes(t)) g.set("~" + i, (g.get("~" + i) || 0) + f); }); return g; };
-    const gdf = new Map();
-    const gs = new Map(ix.docs.map((d) => { const g = groups(d); for (const k of g.keys()) gdf.set(k, (gdf.get(k) || 0) + 1); return [d, g]; }));
-    // words plus their synonym groups (so "password" and "API key" reels are related), each weighted by rarity
-    const vec = (d) => {
-      const v = new Map();
-      let norm = 0;
-      for (const [t, f] of d.tf) { const x = (1 + Math.log(f)) * idfOf(ix, t); v.set(t, x); norm += x * x; }
-      for (const [k, f] of gs.get(d)) { const n = gdf.get(k); const x = 0.7 * (1 + Math.log(f)) * Math.log(1 + (ix.N - n + 0.5) / (n + 0.5)); v.set(k, x); norm += x * x; }
-      return { v, norm: Math.sqrt(norm) || 1 };
-    };
     const me = ix.docs.find((d) => d.r === target);
     if (!me || !me.tf.size) return [];
-    const a = vec(me);
-    return ix.docs.filter((d) => d !== me && d.tf.size).map((d) => {
-      const b = vec(d);
+    const { gl, norms } = relatedState(ix);
+    // words plus their synonym groups (so "password" and "API key" reels are related), each weighted by rarity
+    const termX = (f, idf) => (1 + Math.log(f)) * idf;
+    const groupX = (f, l) => 0.7 * (1 + Math.log(f)) * l;
+    const normOf = (d) => {
+      let norm = 0;
+      for (const [t, f] of d.tf) { const x = termX(f, idfOf(ix, t)); norm += x * x; }
+      for (const [k, f] of groupsOf(d)) { const x = groupX(f, gl.get(k)); norm += x * x; }
+      return Math.sqrt(norm) || 1;
+    };
+    const aT = [], aX = [], aI = [], aG = [], aGX = [], aL = [];
+    for (const [t, f] of me.tf) { const idf = idfOf(ix, t); aT.push(t); aI.push(idf); aX.push(termX(f, idf)); }
+    for (const [k, f] of groupsOf(me)) { const l = gl.get(k); aG.push(k); aL.push(l); aGX.push(groupX(f, l)); }
+    const normA = normOf(me);
+    const out = [];
+    for (let i = 0; i < ix.docs.length; i++) {
+      const d = ix.docs[i];
+      if (d === me || !d.tf.size) continue;
       let dot = 0;
-      for (const [t, x] of a.v) { const y = b.v.get(t); if (y) dot += x * y; }
-      return { reel: d.r, score: dot / (a.norm * b.norm) };
-    }).filter((x) => x.score > 0.05).sort((x, y) => y.score - x.score).slice(0, limit);
+      for (let j = 0; j < aT.length; j++) { const f = d.tf.get(aT[j]); if (f) { const y = termX(f, aI[j]); if (y) dot += aX[j] * y; } }
+      const g = groupsOf(d);
+      for (let j = 0; j < aG.length; j++) { const f = g.get(aG[j]); if (f) { const y = groupX(f, aL[j]); if (y) dot += aGX[j] * y; } }
+      const normB = norms[i] || (norms[i] = normOf(d));
+      const score = dot / (normA * normB);
+      if (score > 0.05) out.push({ reel: d.r, score });
+    }
+    return out.sort((x, y) => y.score - x.score).slice(0, limit);
   }
 
   function sentences(text) {

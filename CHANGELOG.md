@@ -6,6 +6,15 @@ section here. A merge builds and tests the APK (kept as the workflow artifact); 
 notes and points `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.13
+- Searching and opening a reel are much faster in a big library. With 5,000 reels, a search in the Library box or in **Ask**
+  is several times faster, and a reel's screen opens about ten times faster (the "Related reels" part was almost all of
+  its time). These speeds were measured on a computer, not on a phone. Reels, order, scores and the lines shown for each
+  are exactly the same as before.
+- The words of your library are checked more cheaply each time you type or open a reel, and only a reel you changed is
+  read again. Changing a reel makes the next search or reel screen do a little more work once.
+- Not changed: the first search after the app starts still reads the whole library (a second or two with 5,000 reels).
+
 ## 1.3.12
 - Sharing pictures or videos to Reel Shelf no longer holds the phone up. They are copied in the background while a small
   screen shows how far it is (with Stop). The screen stays until every file is saved, or says which ones could not be
