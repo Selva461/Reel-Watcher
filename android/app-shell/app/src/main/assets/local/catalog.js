@@ -1,7 +1,8 @@
 /* Reel Shelf watchlist: movies, series, dramas, anime, manga and every other kind of title, from screenshots and reels.
    No AI and no network here: this file only stores, merges (dedupes), filters and counts titles.
    Other parts of the app write into it through Catalog.add(db, candidate) and Catalog.verify(db, id, facts).
-   Stored inside the same library file as the reels: db.media (titles) and db.mediaTypes (categories you added). */
+   Stored inside the same library file as the reels: db.media (titles) and db.mediaTypes (categories you added).
+   Rule for other files: REPLACE aka and ext (m.aka = [...], m.ext = {...}), never change them in place: the lookup index sees only a new array or object. */
 "use strict";
 
 const Catalog = (() => {
@@ -112,26 +113,113 @@ const Catalog = (() => {
     return same ? true : null;
   }
 
+  // ---------------------------------------------------------------- the lookup index (memory only, never saved)
+  // Every add and every online check asks "is this title already in the list?". Reading the whole list for each answer (and
+  // cleaning every stored name again) made adding 5,000 titles take over ten seconds. The index files each entry under its cleaned
+  // names (title, original title, other names), its database ids and its own id, so a question only reads the few entries
+  // that can match. The matching rules are still the ones in findSame, run on those entries: the index only narrows where
+  // to look. When two entries match, the one that comes first in the list is read off the list itself, so the order is never
+  // remembered and cannot go stale.
+  // It lives in a WeakMap keyed by the db.media array, so it is never saved, and a new array (load, reload, a filter) starts
+  // with a fresh one. add, merge, update, remove and verify keep it current as they go. On every use it is also checked
+  // against the list (one cheap pass, no names are cleaned): other code that put an entry in, took one out or moved one makes
+  // it start again, and an entry whose title, original_title, aka, ext or id was given a new value is filed again.
+  // Not noticed: a change inside an aka array or an ext object that keeps the same array or object.
+  const indexes = new WeakMap();  // db.media -> Index
+  const extKey = (k, v) => `${k}\u0000${v}`;
+  class Index {
+    constructor(list) {
+      this.list = list;
+      this.recs = [];         // one per entry, in list order: what the entry was filed under
+      this.at = new Map();    // entry -> its rec
+      this.names = new Map(); // cleaned name -> entries
+      this.exts = new Map();  // "tmdb\u0000603" -> entries
+      this.ids = new Map();   // entry id -> entries
+      for (const m of list) this.recs.push(this.at.get(m) || this.file(m));  // an entry that is in the list twice is filed once
+    }
+    put(map, key, m) { const b = map.get(key); if (b) b.push(m); else map.set(key, [m]); }
+    cut(map, key, m) {
+      const b = map.get(key);
+      if (!b) return;
+      const i = b.indexOf(m);
+      if (i >= 0) b.splice(i, 1);
+      if (!b.length) map.delete(key);
+    }
+    file(m) {  // files the entry under what it holds now; the rec says what, so that it can be taken out again
+      const r = this.at.get(m) || { m };
+      r.id = m.id; r.title = m.title; r.orig = m.original_title; r.aka = m.aka; r.ext = m.ext;
+      r.names = [...new Set([m.title, m.original_title, ...(m.aka || [])].map(normTitle))].filter(Boolean);  // "" never matches
+      r.exts = Object.entries(m.ext || {}).filter(([, v]) => v).map(([k, v]) => extKey(k, v));
+      for (const k of r.names) this.put(this.names, k, m);
+      for (const k of r.exts) this.put(this.exts, k, m);
+      this.put(this.ids, m.id, m);
+      this.at.set(m, r);
+      return r;
+    }
+    unfile(r) {
+      for (const k of r.names) this.cut(this.names, k, r.m);
+      for (const k of r.exts) this.cut(this.exts, k, r.m);
+      this.cut(this.ids, r.id, r.m);
+    }
+    refresh(m) { const r = this.at.get(m); if (r) { this.unfile(r); this.file(m); } }  // its names or ids changed
+    add(m) { this.recs.unshift(this.file(m)); }  // m was just put at the front of the list
+    remove(m) { const r = this.at.get(m); if (r) { this.unfile(r); this.at.delete(m); } }
+    adopt(list) { this.list = list; this.recs = this.recs.filter((r) => this.at.has(r.m)); indexes.set(list, this); }  // the list was replaced by a copy without the removed entries
+    /** True when this describes `list`: the same entries in the same order (false: build a new one). */
+    sync(list) {
+      const recs = this.recs;
+      if (list !== this.list || list.length !== recs.length) return false;
+      for (let i = 0; i < recs.length; i++) {
+        const m = list[i], r = recs[i];
+        if (m !== r.m) return false;
+        if (m.title !== r.title || m.original_title !== r.orig || m.aka !== r.aka || m.ext !== r.ext || m.id !== r.id) { this.unfile(r); this.file(m); }
+      }
+      return true;
+    }
+    /** The one of `entries` that comes first in the list. */
+    first(entries) {
+      if (entries.length < 2) return entries[0] || null;
+      const want = new Set(entries);
+      return this.list.find((m) => want.has(m)) || null;
+    }
+    get(id) { return this.first(this.ids.get(id) || []); }
+
+    /** What findSame answers, never `skip` (the entry being checked, when it is looked up in its own list). */
+    find(db, c, skip) {
+      const ea = c.ext || {};
+      const sameId = [];
+      for (const k of Object.keys(ea)) {  // an entry with the same database id wins
+        if (!ea[k]) continue;
+        for (const m of this.exts.get(extKey(k, ea[k])) || []) if (m !== skip && !sameId.includes(m) && idsMatch(c, m) === true) sameId.push(m);
+      }
+      if (sameId.length) return this.first(sameId);
+      const key = normTitle(c.title);
+      const g = groupOf(db, c.type);
+      const hits = [];
+      for (const m of key ? this.names.get(key) || [] : []) {  // the rules below are the old loop's, on the entries that carry the name
+        if (m === skip) continue;
+        const ids = idsMatch(c, m);
+        if (ids === true) return m;
+        if (ids === false) continue;
+        if (groupOf(db, m.type) !== g) continue;
+        if (!yearsMatch(c.year, m.year)) continue;
+        if (c.language && m.language && c.language !== m.language) continue;
+        hits.push(m);
+      }
+      const checked = hits.filter((m) => m.verified === "verified");
+      return this.first(checked.length ? checked : hits);  // a checked entry beats an unchecked one; then the first in the list
+    }
+  }
+  function indexOf(db) {
+    const list = db.media;
+    let ix = indexes.get(list);
+    if (!ix || !ix.sync(list)) { ix = new Index(list); indexes.set(list, ix); }
+    return ix;
+  }
+
   /** The stored entry a candidate is the same title as, or null. Same database id wins; else same title + same group
       (watch/read) + years within one + not two different languages. Anime and its manga stay separate on purpose. */
-  function findSame(db, c) {
-    const list = db.media || [];
-    const key = normTitle(c.title);
-    const g = groupOf(db, c.type);
-    let best = null;
-    for (const m of list) {
-      const ids = idsMatch(c, m);
-      if (ids === true) return m;
-      if (ids === false) continue;
-      if (groupOf(db, m.type) !== g) continue;
-      const names = [m.title, m.original_title, ...(m.aka || [])].map(normTitle);
-      if (!key || !names.includes(key)) continue;
-      if (!yearsMatch(c.year, m.year)) continue;
-      if (c.language && m.language && c.language !== m.language) continue;
-      if (!best || (m.verified === "verified" && best.verified !== "verified")) best = m;
-    }
-    return best;
-  }
+  function findSame(db, c) { return db.media ? indexOf(db).find(db, c, null) : null; }
 
   // ---------------------------------------------------------------- writing (the API other parts of the app use)
 
@@ -146,20 +234,22 @@ const Catalog = (() => {
       candidate: { title (required), type, year, language, original_title, aka[], genres[], country, poster, overview, ext{},
                    confidence 0..1, source: { kind: "screenshot"|"reel"|"manual", ref, method, text, confidence } }
       Returns { entry, created, merged } or null when there is no title. Does not save: call saveDb() after a batch. */
-  function add(db, c) {
+  function add(db, c) { return addTo(db, c, null); }
+  function addTo(db, c, known) {  // known: the index, when the caller has just checked it against the list
     let title = clean(c && c.title, 200);
     const inTitle = title.match(/\s*[([]((?:18|19|20)\d\d)[)\]]\s*$/);  // "Dune (2021)": the year belongs in year
     if (inTitle) title = title.slice(0, inTitle.index).trim();
     if (!title) return null;
     db.media = db.media || [];
+    const ix = known || indexOf(db);
     const cand = { ...c, title, type: typeId(db, c.type || "movie"), language: langCode(c.language), year: toYear(c.year) || (inTitle ? Number(inTitle[1]) : null) };
     const now = Date.now();
     const src = c.source ? { kind: c.source.kind || "manual", ref: clean(c.source.ref, 500), method: clean(c.source.method, 40),
       text: clean(c.source.text, 500), confidence: num01(c.source.confidence, c.confidence), at: c.source.at || now } : null;
-    let m = findSame(db, cand);
+    let m = ix.find(db, cand, null);
     const created = !m;
     if (!m) {
-      m = { id: newId(db, title), title, type: cand.type, year: cand.year || null, language: cand.language || "", original_title: "", aka: [],
+      m = { id: newId(ix, title), title, type: cand.type, year: cand.year || null, language: cand.language || "", original_title: "", aka: [],
         genres: [], country: "", poster: "", overview: "", ext: {}, status: "want", verified: "unverified", confidence: 0, sources: [],
         added_at: now, updated_at: now };
       db.media.unshift(m);
@@ -182,20 +272,26 @@ const Catalog = (() => {
     if (src && !m.sources.some((s) => sourceKey(s) === sourceKey(src))) m.sources.push(src);
     m.confidence = Math.max(m.confidence || 0, num01(cand.confidence, src && src.confidence));
     m.updated_at = now;
+    if (created) ix.add(m); else ix.refresh(m);  // its names or ids may have grown
     return { entry: m, created, merged: !created };
   }
 
   /** Add many candidates; returns { created, merged, skipped }. */
   function addMany(db, list) {
     const r = { created: 0, merged: 0, skipped: 0 };
-    for (const c of list || []) { const x = add(db, c); if (!x) r.skipped++; else if (x.created) r.created++; else r.merged++; }
+    let ix = null;  // checked against the list once: only these adds run in between, and each keeps it current
+    for (const c of list || []) {
+      const x = addTo(db, c, ix);
+      if (!x) r.skipped++; else { ix = ix || indexes.get(db.media); if (x.created) r.created++; else r.merged++; }
+    }
     return r;
   }
 
   /** The online check's answer for one entry. facts may correct title/type/year/language/genres/poster/ext.
       verified: "verified" | "conflict" | "rejected". If the corrected title now equals another entry, the two are merged. */
   function verify(db, id, facts = {}, verified = "verified", by = "") {
-    const m = get(db, id);
+    const ix = db.media ? indexOf(db) : null;
+    const m = ix && ix.get(id);
     if (!m) return null;
     const oldTitle = m.title;
     if (facts.title && clean(facts.title, 200) !== m.title) {  // the official spelling, even when only the capitals differ ("DUNE")
@@ -217,9 +313,9 @@ const Catalog = (() => {
     m.verified_by = clean(by, 60);
     m.verified_at = Date.now();
     m.updated_at = Date.now();
+    ix.refresh(m);
     if (oldTitle !== m.title || facts.ext || facts.year) {  // it may now be a duplicate of another entry
-      const rest = { ...db, media: db.media.filter((x) => x !== m) };
-      const twin = findSame(rest, m);
+      const twin = ix.find(db, m, m);  // looked up among the others
       if (twin) return merge(db, twin.id, m.id);
     }
     return m;
@@ -239,8 +335,9 @@ const Catalog = (() => {
 
   /** Fold entry `fromId` into `intoId` (sources, names, genres). Returns the kept entry. */
   function merge(db, intoId, fromId) {
-    const a = get(db, intoId);
-    const b = get(db, fromId);
+    const ix = db.media ? indexOf(db) : null;
+    const a = ix && ix.get(intoId);
+    const b = ix && ix.get(fromId);
     if (!a || !b || a === b) return a || b;
     const keep = b.verified === "verified" && a.verified !== "verified" ? b : a;
     const drop = keep === a ? b : a;
@@ -252,12 +349,16 @@ const Catalog = (() => {
     keep.confidence = Math.max(keep.confidence || 0, drop.confidence || 0);
     if (drop.status && drop.status !== "want" && keep.status === "want") keep.status = drop.status;
     keep.updated_at = Date.now();
+    ix.refresh(keep);
+    ix.remove(drop);
     db.media = db.media.filter((x) => x !== drop);
+    ix.adopt(db.media);
     return keep;
   }
 
   function update(db, id, patch) {
-    const m = get(db, id);
+    const ix = db.media ? indexOf(db) : null;
+    const m = ix && ix.get(id);
     if (!m) return null;
     if (patch.title != null && clean(patch.title, 200)) m.title = clean(patch.title, 200);
     if (patch.type != null) m.type = typeId(db, patch.type);
@@ -267,10 +368,19 @@ const Catalog = (() => {
     if (patch.status && STATUS[patch.status]) m.status = patch.status;
     if (patch.note != null) m.note = clean(patch.note, 2000);
     m.updated_at = Date.now();
+    ix.refresh(m);  // the title may have changed
     return m;
   }
-  function remove(db, id) { db.media = (db.media || []).filter((m) => m.id !== id); }
-  function get(db, id) { return (db.media || []).find((m) => m.id === id) || null; }
+  function remove(db, id) {
+    const old = db.media || [];
+    const ix = indexes.get(old);
+    db.media = old.filter((m) => m.id !== id);
+    if (ix && ix.sync(old)) {  // the index follows the new array without being built again
+      for (const m of [...(ix.ids.get(id) || [])]) ix.remove(m);
+      ix.adopt(db.media);
+    }
+  }
+  function get(db, id) { return db.media ? indexOf(db).get(id) : null; }
 
   /** Entries the online check should look at: never checked (or changed since), newest first. */
   function toVerify(db, since = 0) {
@@ -350,10 +460,10 @@ const Catalog = (() => {
   }
   function toYear(v) { const m = String(v || "").match(/(18|19|20)\d\d/); return m ? Number(m[0]) : null; }
   function num01(...vs) { for (const v of vs) { const n = Number(v); if (v != null && v !== "" && isFinite(n)) return Math.max(0, Math.min(1, n)); } return 0; }
-  function newId(db, title) {
+  function newId(ix, title) {
     const base = "m-" + (normTitle(title).replace(/ /g, "-").slice(0, 40) || "title");
     let id = base;
-    for (let i = 2; (db.media || []).some((m) => m.id === id); i++) id = `${base}-${i}`;
+    for (let i = 2; ix.ids.has(id); i++) id = `${base}-${i}`;
     return id;
   }
   function fuzzyIn(w, hay) {  // one typo allowed

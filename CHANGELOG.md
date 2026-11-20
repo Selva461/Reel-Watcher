@@ -6,6 +6,15 @@ section here. A merge builds and tests the APK (kept as the workflow artifact); 
 notes and points `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.14
+- Adding a title to your watchlist, and the online check of a title, no longer slow down as the list grows. Each one used
+  to read the whole list again to see whether the title was already there: in a test with a list of 5,000 titles,
+  adding them all took about 13 seconds and checking them all about 14 seconds. Now each takes a fraction of a second.
+  Which titles count as the same one (name, year, kind, language, other names, database ids, the checked one first, the
+  newest first) is exactly as before, and nothing saved changes.
+- The first title you add or check after the app starts prepares the lookup for your whole list once (a fraction of a
+  second even with 5,000 titles); the next ones are quick.
+
 ## 1.3.13
 - Searching and opening a reel are much faster in a big library. With 5,000 reels, a search in the Library box or in **Ask**
   is several times faster, and a reel's screen opens about ten times faster (the "Related reels" part was almost all of
