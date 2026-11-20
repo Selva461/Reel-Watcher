@@ -3,7 +3,7 @@
 Base for every file:line below: `origin/stabilize/s4-4-files-set-aside` at **563f81f** (PR #70, **not merged**, 1.3.25 / 32; it contains Task 4, 5a-1, S4-1 to S4-4 and Task 2b). Lines marked **A2-3** are from `origin/stabilize/a2-3-existing-models` at **fd16625** (PR #68, not merged, a sibling line). The default branch (1.3.11) has none of S4, 5a or A2. Planning only: no code was changed.
 
 ## Problem
-- Reel Shelf writes several kinds of files into its private storage (library, its `.bak`, files set aside for safety, AI and speech models, copies of shared pictures and videos, temporary files). Nothing shows the user what takes the space. The only size the user can see today is the AI model's (`local.js:1563`).
+- Reel Shelf writes several kinds of files into its private storage (library, its `.bak`, files set aside for safety, AI and speech models, copies of shared pictures and videos, temporary files). Nothing shows the user what takes the space. The only size the user can see today is the AI model's (`local.js:1564`).
 - The inboxes are not bounded (5a/5b design, "Storage (order of magnitude)": 100 shared reel videos can take 0.5 to 4 GB). Android's own app-storage page shows one total and offers "Clear storage", which deletes the whole library.
 - The 5a design already asked for this screen: "A U1 Storage screen should *show* the inboxes ... with sizes and buttons the user chooses to press, instead of growing the automatic rules" (`docs/design/5a-5b-temp-files.md:156`).
 - Goal: show, never delete by itself, and add **no new way to delete user data**.
