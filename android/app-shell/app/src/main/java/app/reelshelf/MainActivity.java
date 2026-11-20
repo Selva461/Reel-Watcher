@@ -35,6 +35,9 @@ public class MainActivity extends Activity implements Host {
     private static final int LISTEN_REQUEST = 6;
     private static final int FILE_REQUEST = 1;
 
+    /** Reel Shelf is on screen (started and not stopped): the nightly run does not start while it is. */
+    static volatile boolean visible;
+
     private WebView web;
     private volatile String currentUrl = "";
     private ValueCallback<Uri[]> fileCallback;
@@ -286,6 +289,13 @@ public class MainActivity extends Activity implements Host {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        visible = true;
+        WorkService.handOverNight(this);  // a nightly run still going stops its current work, keeps what it saved, and gives the library back
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         web.onResume();
@@ -308,6 +318,7 @@ public class MainActivity extends Activity implements Host {
             callPage("window.onAppPause && onAppPause()");
             if (local != null) local.pause();
         }
+        visible = false;
         super.onStop();
     }
 
@@ -317,6 +328,7 @@ public class MainActivity extends Activity implements Host {
         if (local != null) local.pause();
         WorkService.end(this);
         working = false;
+        visible = false;
         super.onDestroy();
     }
 

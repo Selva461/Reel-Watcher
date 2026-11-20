@@ -772,6 +772,8 @@ window.fileCommentScreen = (lines, at) => {
 
 let backFrom = "";  // the reel you just looked at in Instagram
 window.onAppResume = () => {
+  if (handingOver) return;  // waiting for the nightly run: handOver opens the library when it has stopped
+  if (sync("nightActive")) { handOver(); return; }  // the night started while this screen was away, and is now asked to stop
   if (dbLocked) return;  // the library is not open: Try again on the screen
   if (sync("libraryStale", "reels") || sync("libraryStale", "shots")) staleReload();  // saved elsewhere while this screen was away
   else loadSettings();  // settings have no revision: read again
@@ -1410,6 +1412,36 @@ function lockedScreen() {
   });
 }
 
+// ------------------------------------------------------------------ the app is opened while the nightly run is still going
+// The phone has asked the nightly run to stop its current work (the reel being processed is cancelled; what is saved stays). Until it has, this screen does not read or save
+// anything, so the two can never work on the library at once; then everything is read fresh from disk.
+let handingOver = false;
+const HANDOVER = window.__handover || { poll: 500, max: 45000 };  // the phone ends the run after 20 s; this is only a safety net
+function handOverScreen() {
+  $app.innerHTML = `${header("Finishing the nightly run", "")}
+    <div class="card stack"><strong>The nightly run is finishing</strong>
+      <span class="small">It stops its current work and keeps everything already saved. Your library opens in a moment.</span>
+      <span class="bar"><span style="width:100%"></span></span></div>`;
+}
+function handOver() {
+  if (handingOver) return;
+  handingOver = true;
+  paintTabs("");
+  topBar(false);
+  handOverScreen();
+  const t0 = Date.now();
+  const tick = () => {
+    if (sync("nightActive") && Date.now() - t0 < HANDOVER.max) { setTimeout(tick, HANDOVER.poll); return; }
+    handingOver = false;
+    loadSettings();
+    loadDb();  // fresh: what the night saved is in it, and saves from here on are for this version
+    if (typeof Shots !== "undefined") Shots.reload();  // the screenshot list too: the night may have saved a newer one
+    if (!dbLocked) openLibrary();
+    render();
+  };
+  tick();
+}
+
 /** The library was saved by a newer Reel Shelf. Nothing is saved over it and it is never set aside: the only choice is a copy of the file. */
 function newerScreen() {
   const v = sync("appVersion");
@@ -1428,6 +1460,7 @@ function openLibrary() {
 }
 
 function render() {
+  if (handingOver) { paintTabs(""); topBar(false); handOverScreen(); return; }
   if (dbLocked) { paintTabs(""); topBar(false); if (dbNewer) newerScreen(); else lockedScreen(); return; }
   const h = location.hash || "#/";
   for (const [rx, fn, tab, top] of ROUTES) {
@@ -1444,8 +1477,13 @@ function render() {
 
 window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); });
 loadSettings();
-loadDb();
-bindTopBar();
-if (!dbLocked) openLibrary();  // while locked nothing is taken from the share queue or the check results
-render();
+if (sync("nightActive")) {  // opened while the nightly run is still going: it is finishing; the library is not touched until it has stopped
+  bindTopBar();
+  handOver();
+} else {
+  loadDb();
+  bindTopBar();
+  if (!dbLocked) openLibrary();  // while locked nothing is taken from the share queue or the check results
+  render();
+}
 if (sync("isNight")) { if (dbLocked) sync("nightDone"); else overnightRun(true); }  // the nightly run (no screen): see NightRun.java

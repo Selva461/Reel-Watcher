@@ -6,6 +6,16 @@ section here. A merge builds and tests the APK (kept as the workflow artifact); 
 notes and points `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.21
+<!-- Written and reviewed as 1.3.9 (Task 2b), before 1.3.10 to 1.3.20 existed; it keeps that text and is numbered after 1.3.20. -->
+- The nightly run and the app no longer get in each other's way. If Reel Shelf is on screen when the nightly run is
+  due, that night is skipped (the schedule, the hour and the battery level are unchanged: it runs again the next
+  night). If you open the app while the nightly run is going, the run is asked to stop its current work and keep
+  everything already saved (the reel being processed is cancelled and is retried next night); the app shows "The
+  nightly run is finishing" for a few seconds, then opens with everything the run saved. Nothing it saved is lost,
+  and your own changes are never overwritten.
+- Two nightly runs can no longer overlap, even if two alarms arrive at the same moment.
+
 ## 1.3.20
 - A **Back up now** button in Settings (under "Backup and restore") saves one file with your whole library to
   Downloads/ReelShelf, named `ReelShelf-backup-<date>-<time>.zip`. It holds your reels, notes, watchlist, quotes and

@@ -1370,6 +1370,12 @@ final class LocalBridge {
 
     // ------------------------------------------------------------------ the nightly run
 
+    /** True while a nightly run is still going and this is the app's page (not the nightly page): the app waits for it to finish. */
+    @JavascriptInterface
+    public boolean nightActive() {
+        return ok() && !act.isNight() && WorkService.nightActive();
+    }
+
     /** True when the page runs for the nightly run (no screen): it then does the overnight run and calls nightDone. */
     @JavascriptInterface
     public boolean isNight() {
