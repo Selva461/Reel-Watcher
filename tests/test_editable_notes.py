@@ -31,9 +31,10 @@ def reel(code, **more):
 
 def edited(code, **more):
     """A reel the user edited (topic and takeaway), as applyEdit leaves it."""
-    return reel(code, notes=notes(topic="My own topic", takeaway="My own takeaway"), notes_by="you", notes_at=5, raw="raw text of the AI answer",
-                notes_edit={"was_by": "phone", "at": 7, "fields": ["topic", "takeaway"],
-                            "ai": {"topic": "Passwords in apps", "takeaway": "Keep secrets on the server."}}, **more)
+    base = dict(notes=notes(topic="My own topic", takeaway="My own takeaway"), notes_by="you", notes_at=5, raw="raw text of the AI answer",
+                notes_edit={"was_by": "phone", "at": 7, "fields": ["topic", "takeaway"], "ai": {"topic": "Passwords in apps", "takeaway": "Keep secrets on the server."}})
+    base.update(more)
+    return reel(code, **base)
 
 
 def answer_for(code, topic="A newer topic from Meta AI"):
@@ -529,11 +530,11 @@ def finished(pg):
     pg.wait_for_function("() => run && run.finished")
 
 
-@pytest.mark.parametrize("by", ["meta", "phone", "you"])
-def test_redo_with_phone_ai_writes_nothing_for_a_reel_with_meta_phone_or_your_notes(phone, by):
-    """Verified in the harness (design, NEEDS VERIFICATION 1): the button is shown, the run ends, the model is never called, the notes stay."""
-    extra = dict(notes_edit={"was_by": "phone", "at": 1, "fields": ["topic"], "ai": {"topic": "Passwords in apps"}}) if by == "you" else {}
-    r = reel("REEL1", notes=notes(), notes_by=by, notes_at=5, raw="old raw", **extra)
+@pytest.mark.parametrize("by", ["meta", "phone"])
+def test_redo_with_phone_ai_writes_nothing_for_a_reel_with_meta_or_phone_notes(phone, by):
+    """Verified in the harness (design, NEEDS VERIFICATION 1): the button is shown, the run ends, the model is never called, the notes stay.
+    (Since K1-3 the same button on a reel you EDITED does call the model and keeps the answer aside: see the Redo tests at the end.)"""
+    r = reel("REEL1", notes=notes(), notes_by=by, notes_at=5, raw="old raw")
     start(phone, [copy.deepcopy(r)], model=READY, answers=[ANSWER])
     phone.goto(phone.url.split("#")[0] + "#/r/REEL1")
     phone.get_by_role("button", name="Redo with phone AI").click()
@@ -1018,3 +1019,319 @@ def test_a_save_the_phone_refuses_for_lack_of_space_keeps_the_editor_open_and_th
     save(phone)
     phone.wait_for_function("() => !document.getElementById('dlg').open")
     assert stored(phone)["notes"]["topic"] == "Needs space" and toasts(phone)[-1] == "Saved"
+
+
+# ================================================================ K1-3: a newer AI answer for an edited reel waits for your choice
+
+WAITED = FIXTURES_NOW - 86400000  # when the kept answers arrived
+
+
+def new_notes(topic="New AI topic", **more):
+    return {"topic": topic, "intent": "New intent", "tone": "New tone", "points": ["New point one", "New point two"], "meaning": "New meaning", "use": [],
+            "tools": ["newtool"], "takeaway": "New AI takeaway", "tags": ["newtag"], "products": ["Acme Soap"], **more}
+
+
+def slot(src, **more):
+    return {"at": WAITED, "notes": new_notes(), "raw": "raw of the " + src + " answer", **more}
+
+
+def kept_buttons(pg):
+    return [b.inner_text() for b in pg.locator("#app [data-kept]").all()]
+
+
+def click(pg, name):
+    pg.get_by_role("button", name=name, exact=True).click()
+
+
+def reel_now(pg, code="REEL1"):
+    return pg.evaluate("c => JSON.parse(JSON.stringify(reel(c)))", code)
+
+
+# ---------------------------------------------------------------- 6. the four choices
+
+def test_a_waiting_answer_shows_a_card_with_four_choices_and_show_it_changes_nothing(phone):
+    open_reel(phone, [edited("REEL1", notes_next={"meta": slot("meta")})])
+    when = phone.evaluate("t => day(t)", WAITED)
+    assert phone.get_by_text("A newer version from Meta AI (%s) is waiting. Your edits are kept." % when).is_visible()
+    assert kept_buttons(phone) == ["Show it", "Keep my edits, update the rest", "Use the new AI version", "Dismiss"]
+    assert all(b.bounding_box()["height"] >= 48 for b in phone.locator("#app [data-kept]").all())
+    before = phone.rn()["db"]
+    assert "New intent" not in screen_text(phone)
+    click(phone, "Show it")
+    assert "New intent" in screen_text(phone) and "New AI takeaway" in screen_text(phone) and phone.get_by_role("button", name="Hide it").is_visible()
+    assert phone.rn()["db"] == before and reel_now(phone)["notes"]["topic"] == "My own topic"  # looking changes nothing
+    click(phone, "Hide it")
+    assert "New intent" not in screen_text(phone) and phone.get_by_role("button", name="Show it").is_visible()
+
+
+def test_the_card_names_the_phone_ai_and_a_reel_that_is_not_edited_has_no_keep_button(phone):
+    open_reel(phone, [edited("REEL1", notes_next={"phone": slot("phone")}), reel("REEL2", notes=notes(), notes_by="meta", notes_next={"phone": slot("phone")})])
+    when = phone.evaluate("t => day(t)", WAITED)
+    assert phone.get_by_text("A newer version from the on-phone AI (%s) is waiting. Your edits are kept." % when).is_visible()
+    phone.goto(phone.url.split("#")[0] + "#/r/REEL2")
+    assert phone.get_by_text("A newer version from the on-phone AI (%s) is waiting." % when).is_visible() and "Your edits are kept" not in screen_text(phone)
+    assert kept_buttons(phone) == ["Show it", "Use the new AI version", "Dismiss"]  # nothing of yours to keep
+
+
+def test_keep_my_edits_updates_the_rest_and_keeps_your_text(phone):
+    open_reel(phone, [edited("REEL1", notes_next={"meta": slot("meta")}, raw="R-you")])
+    click(phone, "Keep my edits, update the rest")
+    r = stored(phone)
+    assert r["notes"]["topic"] == "My own topic" and r["notes"]["takeaway"] == "My own takeaway"  # yours
+    assert r["notes"]["points"] == ["New point one", "New point two"] and r["notes"]["intent"] == "New intent" and r["notes"]["tags"] == ["newtag"]  # the rest is new
+    assert r["notes"]["meaning"] == "New meaning" and r["notes"]["tools"] == ["newtool"] and r["notes"]["products"] == ["Acme Soap"]
+    assert r["notes_by"] == "you" and r["raw"] == "raw of the meta answer" and "notes_next" not in r and r["status"] == "done"  # raw: the rest now comes from that answer
+    assert r["notes_edit"] == {"was_by": "meta", "at": 7, "fields": ["topic", "takeaway"], "ai": {"topic": "New AI topic", "takeaway": "New AI takeaway"}}
+    assert [p["name"] for p in db_of(phone)["products"]] == ["Acme Soap"] and toasts(phone) == ["Updated. Your edits are kept."]
+    assert phone.locator("#app [data-kept]").count() == 0 and screen_text(phone).count("Edited by you") == 2
+    open_editor(phone)  # "Use the AI text" now brings back the NEW AI text
+    phone.locator('[data-ai="topic"]').click()
+    save(phone)
+    phone.wait_for_function("() => !document.getElementById('dlg').open")
+    assert stored(phone)["notes"]["topic"] == "New AI topic" and stored(phone)["notes_edit"]["fields"] == ["takeaway"]
+
+
+def test_keep_my_edits_with_edited_points_leaves_no_left_out_line_and_without_them_takes_the_new_one(phone):
+    start(phone, [edited("REEL1", notes_next={"meta": slot("meta", notes=new_notes(unbacked=2))}),
+                  reel("REEL2", notes=notes(topic="Mine"), notes_by="you", notes_next={"meta": slot("meta", notes=new_notes(unbacked=2))},
+                       notes_edit={"was_by": "meta", "at": 1, "fields": ["points"], "ai": {"points": ["old"]}})])
+    got = phone.evaluate("() => [Notes.keepEdits(reel('REEL1'), 'meta', 9), reel('REEL1').notes.unbacked, Notes.keepEdits(reel('REEL2'), 'meta', 9), 'unbacked' in reel('REEL2').notes]")
+    assert got == [True, 2, True, False]  # the new "2 lines left out" belongs to the new points; your points have no such line
+
+
+def test_keep_my_edits_edge_cases(phone):
+    scratch = reel("REEL1", notes=notes(), notes_by="you", notes_edit={"was_by": "", "at": 1, "fields": ["topic"], "ai": {}}, notes_next={"meta": slot("meta"), "you": slot("you")})
+    plain = reel("REEL2", notes=notes(), notes_by="meta", notes_next={"meta": slot("meta")})
+    start(phone, [scratch, plain])
+    got = phone.evaluate("""() => [Notes.keepEdits(reel('REEL1'), 'you'), Notes.keepEdits(reel('REEL1'), 'phone'), Notes.keepEdits(reel('REEL2'), 'meta'),
+      Notes.keepEdits(reel('REEL1'), 'meta', 4), reel('REEL1').notes_edit, Object.keys(reel('REEL1').notes_next)]""")
+    assert got[:3] == [False, False, False]  # your own slot, nothing waiting, a reel that is not edited
+    assert got[3] is True and got[4] == {"was_by": "meta", "at": 1, "fields": ["topic"], "ai": {"topic": "New AI topic"}}  # written from scratch: now there is an AI text to go back to
+    assert got[5] == ["you"]
+
+
+def test_use_the_new_ai_version_keeps_yours_and_use_my_version_again_brings_it_back(phone):
+    original = edited("REEL1", notes_next={"meta": slot("meta")}, raw="R-you")
+    open_reel(phone, [copy.deepcopy(original)])
+    confirm_text(phone, False)
+    click(phone, "Use the new AI version")
+    assert phone.evaluate("() => window.__confirms") == []  # nothing is replaced: no question
+    r = stored(phone)
+    assert r["notes"] == new_notes() and r["notes_by"] == "meta" and r["raw"] == "raw of the meta answer" and "notes_edit" not in r and r["status"] == "done"
+    assert r["notes_next"] == {"you": {"at": 5, "notes": original["notes"], "edit": original["notes_edit"], "raw": "R-you"}}  # yours is kept whole, with its raw
+    assert [p["name"] for p in db_of(phone)["products"]] == ["Acme Soap"]
+    text = screen_text(phone)
+    assert "Notes by Meta AI" in text and "Edited by you" not in text and "Your edited version is kept." in text
+    assert kept_buttons(phone) == ["Use my version again", "Delete my version"]
+    click(phone, "Use my version again")  # a swap back: the AI version goes back to its own place
+    back = stored(phone)
+    assert back["notes_next"] == {"meta": {"at": FIXTURES_NOW, "notes": new_notes(), "raw": "raw of the meta answer"}}
+    assert {k: v for k, v in back.items() if k not in ("notes_next", "notes_at", "error")} == {k: v for k, v in original.items() if k not in ("notes_next", "notes_at")}  # notes, notes_edit and raw are as they were
+    assert "A newer version from Meta AI" in screen_text(phone) and "Your edits are kept." in screen_text(phone) and "Edited by you" in screen_text(phone)
+
+
+def test_delete_my_version_asks_and_only_then_deletes_it(phone):
+    open_reel(phone, [edited("REEL1", notes_next={"meta": slot("meta")})])
+    click(phone, "Use the new AI version")
+    confirm_text(phone, False)
+    click(phone, "Delete my version")
+    assert phone.evaluate("() => window.__confirms") == ["Delete your edited notes for good?"] and "you" in stored(phone)["notes_next"]
+    confirm_text(phone, True)
+    click(phone, "Delete my version")
+    r = stored(phone)
+    assert "notes_next" not in r and r["notes"] == new_notes() and phone.evaluate("() => Notes.hasUserData(reel('REEL1'))") is False
+    assert phone.locator("#app [data-kept]").count() == 0
+
+
+def test_dismiss_asks_and_only_then_throws_the_newer_version_away(phone):
+    original = edited("REEL1", notes_next={"meta": slot("meta"), "phone": slot("phone")})
+    open_reel(phone, [copy.deepcopy(original)])
+    confirm_text(phone, False)
+    phone.locator('[data-kept="dismiss"][data-src="meta"]').click()
+    assert phone.evaluate("() => window.__confirms") == ["Delete the newer version from Meta AI that was kept aside? The notes on the screen stay as they are."]
+    assert stored(phone) == original  # No: nothing changes
+    confirm_text(phone, True)
+    phone.locator('[data-kept="dismiss"][data-src="meta"]').click()
+    r = stored(phone)
+    assert list(r["notes_next"]) == ["phone"] and r["notes"] == original["notes"] and r["notes_by"] == "you"  # only that one went; the phone answer waits
+    confirm_text(phone, True)
+    phone.locator('[data-kept="dismiss"][data-src="phone"]').click()
+    assert "notes_next" not in stored(phone) and phone.locator("#app [data-kept]").count() == 0
+
+
+# ---------------------------------------------------------------- 12. swaps
+
+def test_a_second_use_the_new_ai_version_with_your_earlier_version_kept_asks_first(phone):
+    e1 = {"was_by": "phone", "at": 1, "fields": ["topic"], "ai": {"topic": "Passwords in apps"}}
+    earlier = {"at": 3, "notes": notes(topic="Earlier edit"), "edit": e1, "raw": "R1"}
+    original = edited("REEL1", notes_next={"you": earlier, "meta": slot("meta")}, raw="R2")
+    open_reel(phone, [copy.deepcopy(original)])
+    before = phone.rn()["db"]
+    confirm_text(phone, False)
+    click(phone, "Use the new AI version")
+    assert phone.evaluate("() => window.__confirms") == ["Replace your earlier kept version?"]
+    assert phone.rn()["db"] == before and stored(phone) == original  # No: nothing changes at all
+    confirm_text(phone, True)
+    click(phone, "Use the new AI version")
+    r = stored(phone)
+    assert r["notes_by"] == "meta" and r["notes"] == new_notes() and r["notes_next"] == {"you": {"at": 5, "notes": original["notes"], "edit": original["notes_edit"], "raw": "R2"}}  # the newer edits are kept, the earlier ones replaced
+
+
+def test_use_my_version_again_with_newer_edits_on_screen_keeps_those_edits_in_the_kept_place(phone):
+    e1 = {"was_by": "phone", "at": 1, "fields": ["topic"], "ai": {"topic": "Passwords in apps"}}
+    original = edited("REEL1", notes_next={"you": {"at": 3, "notes": notes(topic="Earlier edit"), "edit": e1, "raw": "R1"}}, raw="R2")
+    open_reel(phone, [copy.deepcopy(original)])
+    confirm_text(phone, False)
+    click(phone, "Use my version again")
+    assert phone.evaluate("() => window.__confirms") == []  # the same place: a pure swap, nothing is lost, no question
+    r = stored(phone)
+    assert r["notes"] == notes(topic="Earlier edit") and r["notes_edit"] == e1 and r["raw"] == "R1" and r["notes_by"] == "you"
+    assert r["notes_next"] == {"you": {"at": 5, "notes": original["notes"], "edit": original["notes_edit"], "raw": "R2"}}
+    click(phone, "Use my version again")  # and back again: nothing was dropped
+    again = stored(phone)
+    assert again["notes"] == original["notes"] and again["notes_edit"] == original["notes_edit"] and again["raw"] == "R2"
+    assert again["notes_next"]["you"]["notes"] == notes(topic="Earlier edit") and again["notes_next"]["you"]["raw"] == "R1"
+
+
+@pytest.mark.parametrize("by", ["meta", "phone"])
+def test_use_my_version_again_puts_the_ai_version_back_in_its_own_place(phone, by):
+    e1 = {"was_by": "phone", "at": 1, "fields": ["topic"], "ai": {"topic": "Passwords in apps"}}
+    original = reel("REEL1", notes=new_notes(), notes_by=by, notes_at=8, raw="R-" + by, notes_next={"you": {"at": 3, "notes": notes(topic="Mine"), "edit": e1, "raw": "R-you"}})
+    open_reel(phone, [copy.deepcopy(original)])
+    confirm_text(phone, False)
+    click(phone, "Use my version again")
+    assert phone.evaluate("() => window.__confirms") == []
+    r = stored(phone)
+    assert r["notes"] == notes(topic="Mine") and r["notes_by"] == "you" and r["notes_edit"] == e1 and r["raw"] == "R-you"
+    assert r["notes_next"] == {by: {"at": 8, "notes": new_notes(), "raw": "R-" + by}}  # the AI version and its raw went back to where it came from
+
+
+def test_swapping_in_when_the_places_are_taken_by_another_ai_version_asks_and_names_it(phone):
+    original = reel("REEL1", notes=new_notes(), notes_by="meta", notes_at=8, raw="R-meta", notes_next={"meta": {"at": 2, "notes": notes(topic="Older Meta"), "raw": "R-old"}, "phone": slot("phone")})
+    open_reel(phone, [copy.deepcopy(original)])
+    confirm_text(phone, False)
+    phone.locator('[data-kept="use"][data-src="phone"]').click()
+    assert phone.evaluate("() => window.__confirms") == ["Replace the Meta AI version kept aside?"] and stored(phone) == original
+
+
+def test_swap_helper_edges(phone):
+    start(phone, [reel("REEL1", notes=notes(), notes_by="auto", notes_next={"meta": slot("meta")}), reel("REEL2", notes=notes(), notes_by="meta", notes_next={})])
+    got = phone.evaluate("""() => [Notes.screenSlot({ notes_by: 'you' }), Notes.screenSlot({ notes_by: 'meta' }), Notes.screenSlot({ notes_by: 'phone' }), Notes.screenSlot({ notes_by: 'auto' }), Notes.screenSlot({}),
+      Notes.swapIn(reel('REEL2'), 'meta'), Notes.swapIn(reel('REEL1'), 'phone'), Notes.swapIn(reel('REEL1'), 'meta', 6), reel('REEL1').notes_by, reel('REEL1').notes.topic, reel('REEL1').notes_next === undefined,
+      Notes.dropSlot(reel('REEL2'), 'meta')]""")
+    assert got[:5] == ["you", "meta", "phone", "", ""] and got[5:8] == [False, False, True]
+    assert got[8:] == ["meta", "New AI topic", True, False]  # quick notes on screen are not kept: nothing of yours was lost
+
+
+# ---------------------------------------------------------------- 3 through the screen: every path shows the card
+
+def test_a_kept_meta_answer_shows_its_card_on_the_reel_page(phone):
+    start(phone, [edited("REEL1")], shared=[answer_for("REEL1")])
+    phone.wait_for_function("() => window.__rn.shared.length === 0")
+    phone.goto(phone.url.split("#")[0] + "#/r/REEL1")
+    when = phone.evaluate("t => day(t)", FIXTURES_NOW)
+    assert phone.get_by_text("A newer version from Meta AI (%s) is waiting. Your edits are kept." % when).is_visible()
+    assert kept_buttons(phone) == ["Show it", "Keep my edits, update the rest", "Use the new AI version", "Dismiss"]
+    click(phone, "Show it")
+    assert "A newer topic from Meta AI" in screen_text(phone)
+    click(phone, "Keep my edits, update the rest")
+    r = stored(phone)
+    assert r["notes"]["topic"] == "My own topic" and r["notes"]["points"] == ["A new point"] and r["notes"]["tags"] == ["newtag"] and r["notes_by"] == "you"
+    assert "TOPIC: A newer topic from Meta AI" in r["raw"] and [p["name"] for p in db_of(phone)["products"]] == ["Acme Soap"]
+
+
+# ---------------------------------------------------------------- 11. Redo with phone AI on an edited reel
+
+def run_log(pg):
+    return pg.evaluate("() => run.log")
+
+
+def test_redo_keeps_the_phone_answer_aside_and_a_waiting_meta_answer_survives(phone):
+    original = edited("REEL1", notes_next={"meta": slot("meta")})
+    open_reel(phone, [copy.deepcopy(original)], model=READY, answers=[ANSWER])
+    click(phone, "Redo with phone AI")
+    finished(phone)
+    assert len(generate_calls(phone)) == 1 and phone.evaluate("() => run.done") == 0
+    r = stored(phone)
+    assert r["notes_next"]["phone"]["notes"]["topic"] == AI_TOPIC and r["notes_next"]["phone"]["raw"] == ANSWER
+    assert r["notes_next"]["meta"] == original["notes_next"]["meta"]  # the Meta answer is not touched: the user cannot get it back without asking Meta again
+    assert {k: v for k, v in r.items() if k not in ("notes_next", "error")} == {k: v for k, v in original.items() if k != "notes_next"}  # notes, raw, status: as they were
+    assert run_log(phone)[0]["text"] == KEPT and "tries" not in r
+    phone.goto(phone.url.split("#")[0] + "#/r/REEL1")
+    assert phone.get_by_text("A newer version from the on-phone AI").is_visible() and phone.get_by_text("A newer version from Meta AI").is_visible()
+
+
+def test_redo_asks_before_replacing_a_waiting_phone_answer(phone):
+    original = edited("REEL1", notes_next={"phone": slot("phone"), "meta": slot("meta")})
+    open_reel(phone, [copy.deepcopy(original)], model=READY, answers=[ANSWER])
+    confirm_text(phone, False)
+    click(phone, "Redo with phone AI")
+    assert phone.evaluate("() => window.__confirms") == ["A phone AI version is already waiting. Replace it?"]
+    assert generate_calls(phone) == [] and stored(phone) == original  # No: the model is not even called
+    confirm_text(phone, True)
+    click(phone, "Redo with phone AI")
+    finished(phone)
+    r = stored(phone)
+    assert len(generate_calls(phone)) == 1 and r["notes_next"]["phone"]["raw"] == ANSWER and r["notes_next"]["meta"] == original["notes_next"]["meta"]
+
+
+def run_redo_that_ends_with(pg, how, reels=None):
+    """An edited reel on a model that fails ("fail"), is stopped ("stopped") or meets Instagram's slow down ("slow")."""
+    open_reel(pg, reels or [edited("REEL1")], model=READY)
+    message = {"stopped": "stopped", "slow": "Instagram says slow down"}.get(how)
+    if message:
+        pg.evaluate("m => { RN.generate = (id) => setTimeout(() => rnDone(id, false, m), 5); }", message)
+    click(pg, "Redo with phone AI")
+    finished(pg)
+
+
+@pytest.mark.parametrize("how", ["fail", "stopped", "slow"])
+def test_a_redo_that_fails_is_stopped_or_slowed_down_leaves_an_edited_reel_done_with_no_tries(phone, how):
+    run_redo_that_ends_with(phone, how)
+    r = stored(phone)
+    assert r["status"] == "done" and r["error"] == "" and r["notes_by"] == "you" and r["notes"]["topic"] == "My own topic"
+    assert not any(k in r for k in ("tries", "next_try_at", "last_fail", "last_fail_at")) and "notes_next" not in r
+    assert phone.evaluate("() => db.reels.filter((x) => x.status === 'failed').length") == 0  # never in "Could not finish"
+    if how == "fail":
+        assert phone.evaluate("() => [run.failed, run.log[0].ok, run.log[0].text]") == [1, False, "The AI model failed: out of memory"]  # the reason is in the run log only
+    elif how == "slow":
+        assert phone.evaluate("() => run.note") == "Instagram says slow down"
+    phone.goto(phone.url.split("#")[0] + "#/failed")
+    assert "Nothing here." in screen_text(phone)
+
+
+@pytest.mark.parametrize("how,status", [("fail", "failed"), ("stopped", "new"), ("slow", "new")])
+def test_the_same_run_on_a_reel_that_is_not_edited_still_counts_or_resets_as_before(phone, how, status):
+    """The control for the test above: for a reel nobody edited the three endings are what A1 made them."""
+    open_reel(phone, [reel("REEL1", status="new", notes=None)], model=READY)
+    message = {"stopped": "stopped", "slow": "Instagram says slow down"}.get(how)
+    if message:
+        phone.evaluate("m => { RN.generate = (id) => setTimeout(() => rnDone(id, false, m), 5); }", message)
+    phone.evaluate("() => startRun(['REEL1'])")
+    phone.wait_for_function("() => run && run.finished")
+    r = stored(phone)
+    assert r["status"] == status and (r.get("tries") == 1) is (how == "fail")
+
+
+def test_the_other_explicit_runs_never_send_an_edited_reel_to_the_ai(phone):
+    original = edited("REEL1", notes_next={"meta": slot("meta")})
+    open_reel(phone, [copy.deepcopy(original)], model=READY, answers=[ANSWER, ANSWER])
+    phone.evaluate("() => startRun(['REEL1'])")  # by hand, no redo
+    phone.goto(phone.url.split("#")[0] + "#/r/REEL1")
+    phone.evaluate("() => { window.__before = run; }")
+    click(phone, "Read this reel properly")  # caption, video, then the notes: but not for a reel you edited
+    phone.wait_for_function("() => run !== window.__before && run.finished")
+    assert generate_calls(phone) == []
+    r = stored(phone)
+    assert r["notes"] == original["notes"] and r["notes_by"] == "you" and r["notes_edit"] == original["notes_edit"] and r["notes_next"] == original["notes_next"] and r["raw"] == original["raw"]
+
+
+# ---------------------------------------------------------------- the old Redo claim holds for reels that are not edited
+
+@pytest.mark.parametrize("by", ["meta", "phone"])
+def test_redo_on_a_reel_with_meta_or_phone_notes_that_is_not_edited_changes_nothing_with_the_redo_flag_too(phone, by):
+    r = reel("REEL1", notes=notes(), notes_by=by, notes_at=5, raw="old raw")
+    open_reel(phone, [copy.deepcopy(r)], model=READY, answers=[ANSWER])
+    phone.evaluate("() => startRun(['REEL1'], { redo: true })")  # redo alone must never let the AI write over Meta or phone notes
+    phone.wait_for_function("() => run && run.finished")
+    assert generate_calls(phone) == [] and stored(phone) == {**r, "error": ""}
