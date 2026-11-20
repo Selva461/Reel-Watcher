@@ -37,6 +37,12 @@ final class ReelVideo {
     }
 
     static final long MAX_VIDEO = 60L * 1024 * 1024;
+    /**
+     * How many reel videos are being read right now in this app (one per call of {@link #read} or {@link #readLocal}, until
+     * its cache copy is deleted and its key frames and sound are made). While it is above 0 the temp sweep leaves the cache
+     * files alone. Always lowered in a finally: a missed lowering only makes the sweep do less, never more.
+     */
+    static final java.util.concurrent.atomic.AtomicInteger BUSY = new java.util.concurrent.atomic.AtomicInteger();
     private static final long FRAME_EVERY_US = 2_000_000L;
     private static final int MAX_FRAMES = 90;      // 3 minutes of frames: a whole reel
     private static final long MAX_AUDIO_US = 180_000_000L;  // 3 minutes of speech
@@ -50,11 +56,13 @@ final class ReelVideo {
     /** Reads one reel video. Returns {screen, speech, seconds, speechModel}. */
     static JSONObject read(Context ctx, ScreenshotReader ocr, File speechModel, String url, Stop stop) throws Exception {
         File f = new File(ctx.getCacheDir(), "reel-video.mp4");
+        BUSY.incrementAndGet();
         try {
             fetch(url, f, stop);
             return analyse(ctx, ocr, speechModel, f, stop);
         } finally {
             f.delete();
+            BUSY.decrementAndGet();
         }
     }
 
@@ -65,6 +73,7 @@ final class ReelVideo {
      */
     static JSONObject readLocal(Context ctx, ScreenshotReader ocr, File speechModel, android.net.Uri uri, Stop stop) throws Exception {
         File f = new File(ctx.getCacheDir(), "reel-video-local.mp4");
+        BUSY.incrementAndGet();
         try {
             try (InputStream in = ctx.getContentResolver().openInputStream(uri); OutputStream out = new FileOutputStream(f)) {
                 if (in == null) throw new IOException("Could not open the video");
@@ -81,6 +90,7 @@ final class ReelVideo {
             return analyse(ctx, ocr, speechModel, f, stop);
         } finally {
             f.delete();
+            BUSY.decrementAndGet();
         }
     }
 
