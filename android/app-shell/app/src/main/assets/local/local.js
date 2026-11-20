@@ -125,12 +125,17 @@ function staleReload() {
 }
 function reel(code) { return db.reels.find((r) => r.code === code || r.ig_code === code); }
 
+// ctx: the model's window in tokens (prompt and answer together), which sets how long a prompt may be (Notes.promptBudget). Every value
+// is a cautious 4096 until a phone confirms it (device check 1, TESTING.md E71): Qwen's from its file name (ekv4096), the Gemmas' unknown.
 const MODELS = [
   { id: "qwen", name: "Qwen2.5 1.5B", file: "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm",
+    ctx: 4096,  // from the file name; not confirmed on a phone: device check 1
     size: 1.6e9, note: "Free, about 1.6 GB, good for English notes. Needs a phone with 6 GB of RAM or more." },
   { id: "gemma4", name: "Gemma 4 E2B (watches the reel)", file: "gemma-4-E2B-it.litertlm",
+    ctx: 4096,  // unknown: a cautious guess until device check 1
     size: 2.59e9, note: "Recommended. Free, about 2.6 GB. Looks at key frames and listens to the sound of each reel, plus the text on screen and what is said, then writes the intent, tone and points. About a minute per reel: best at night on the charger." },
   { id: "gemma4e4", name: "Gemma 4 E4B (best quality, slower)", file: "gemma-4-E4B-it.litertlm",
+    ctx: 4096,  // unknown: a cautious guess until device check 1
     size: 3.66e9, note: "Free, about 3.7 GB. Same as E2B but more accurate, about twice as slow. Needs 8 GB of RAM or more." },
 ];
 const DEFAULTS = { modelFile: MODELS[0].file, gpu: true, maxTokens: 800, temperature: 0.3, prompt: Notes.META_PROMPT, localExtra: "", ytLang: "en", tmdbKey: "", omdbKey: "", metaAi: false, webLookup: false };
@@ -506,15 +511,25 @@ function writeWithoutAi(r) {
   return true;
 }
 
+/** Tokens a prompt may take for the model in use: its window less the answer and the system text. A model picked by hand has an
+ *  unknown window: the smallest known one counts. */
+function promptBudget() {
+  const m = MODELS.find((x) => x.file === settings.modelFile);
+  return Notes.promptBudget({ ctx: m ? m.ctx : Math.min(...MODELS.map((x) => x.ctx)), answer: settings.maxTokens, system: Notes.LOCAL_SYSTEM });
+}
+
 async function writeWithPhoneAi(r) {
   const media = run && run.media === r.code;  // key frames and sound of this reel are ready for the AI
   if (run) run.media = "";
-  const out = JSON.parse(await phone("generate", Notes.localPrompt(r, settings.localExtra, { media }),
+  // a prompt with pictures and sound has no budget yet: their size in tokens is not known (device check 3), so it is sent as before
+  const info = Notes.localPromptInfo(r, settings.localExtra, { media, budget: media ? undefined : promptBudget() });
+  const out = JSON.parse(await phone("generate", info.prompt,
     JSON.stringify({ file: settings.modelFile, gpu: settings.gpu, system: Notes.LOCAL_SYSTEM, maxTokens: settings.maxTokens, temperature: settings.temperature, media })));
   const notes = Notes.parse(out.text);
   if (!notes) throw new Error("The on-phone AI's answer was not in the notes format. Try again, or Ask Meta AI.");
   Notes.keepBacked(notes, r);
   setNotes(r, notes, "phone", out.text);
+  out.shortened = info.shortened;  // what was cut to fit the model's window (for the run log; not stored)
   return out;
 }
 
@@ -544,6 +559,11 @@ function nightQueue(reels, ready, now, max) {
   return out;
 }
 
+/** The run log's words for a prompt that was shortened to fit the model (nothing when it was not). */
+function shortenedNote(cut) {
+  return (cut.length ? " (prompt shortened to fit the model)" : "") + (cut.includes("also") ? " (your extra instruction was shortened to fit the model)" : "");
+}
+
 async function startRun(codes) {
   if (run && !run.finished) { location.hash = "#/run"; return; }
   if (!codes) await scanVideos();  // reel videos saved since last time are read too
@@ -563,6 +583,7 @@ async function startRun(codes) {
     run.current = r.code;
     r.status = "working";
     r.error = "";
+    let cut = [];  // what had to be shortened in this reel's prompt
     try {
       if (!r.caption_read || (!Notes.isYoutube(r) && !r.video_tried)) {
         run.step = "caption";
@@ -580,7 +601,7 @@ async function startRun(codes) {
         } else {
           run.step = "ai";
           paintRun();
-          await writeWithPhoneAi(r);
+          cut = (await writeWithPhoneAi(r)).shortened;
           run.done++;
         }
       } else if (!r.notes) {
@@ -604,7 +625,7 @@ async function startRun(codes) {
       streak = { key, n: streak.key === key ? streak.n + 1 : 1 };
       if (streak.n >= 3) { run.note = `Stopped after 3 failures in a row: ${r.last_fail}`; tripped = true; }
     }
-    run.log.unshift({ code: r.code, ok: r.status === "done", text: r.status === "done" ? (r.notes.topic || "Notes written") : r.error || (r.caption ? "Caption read, too short for notes" : "No caption from Instagram") });
+    run.log.unshift({ code: r.code, ok: r.status === "done", text: r.status === "done" ? (r.notes.topic || "Notes written") + shortenedNote(cut) : r.error || (r.caption ? "Caption read, too short for notes" : "No caption from Instagram") });
     saveDb();
     paintRun();
     if (tripped) break;
