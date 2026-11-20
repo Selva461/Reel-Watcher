@@ -682,21 +682,26 @@ final class LocalBridge {
                 long t0 = System.currentTimeMillis();
                 java.util.List<File> frames = new java.util.ArrayList<>();
                 File sound = null;
-                if (o.optBoolean("media", false)) {  // the current reel's key frames and sound, made by readReelVideo
-                    File dir = ReelVideo.mediaDir(act.ctx());
-                    for (int i = 0; i < 4; i++) {
-                        File f = new File(dir, "frame" + i + ".jpg");
-                        if (f.isFile()) frames.add(f);
-                    }
-                    File w = new File(dir, "sound.wav");
-                    if (w.isFile()) sound = w;
-                }
                 String out;
+                boolean media = o.optBoolean("media", false);
+                if (media) ReelVideo.BUSY.incrementAndGet();  // before the files are looked at: the temp sweep leaves the key frames and sound alone from here to the end of the call
                 try {
+                    if (media) {  // the current reel's key frames and sound, made by readReelVideo
+                        File dir = ReelVideo.mediaDir(act.ctx());
+                        for (int i = 0; i < 4; i++) {
+                            File f = new File(dir, "frame" + i + ".jpg");
+                            if (f.isFile()) frames.add(f);
+                        }
+                        File w = new File(dir, "sound.wav");
+                        if (w.isFile()) sound = w;
+                    }
                     out = model.generate(model.file(o.optString("file", "")), o.optBoolean("gpu", true), o.optString("system", ""),
                             prompt == null ? "" : prompt, o.optInt("maxTokens", 800), o.optDouble("temperature", 0.3), frames, sound);
                 } finally {
-                    if (o.optBoolean("media", false)) ReelVideo.clearMedia(act.ctx());
+                    if (media) {
+                        ReelVideo.clearMedia(act.ctx());
+                        ReelVideo.BUSY.decrementAndGet();
+                    }
                 }
                 JSONObject r = new JSONObject();
                 r.put("text", out);
