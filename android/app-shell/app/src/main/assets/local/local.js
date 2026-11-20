@@ -567,7 +567,8 @@ function nightQueue(reels, ready, now, max) {
   return out;
 }
 
-async function startRun(codes) {
+/** opts.redo: "Redo with phone AI" on a reel you edited may send it to the AI (the answer is kept aside, see setNotes). Only that button sets it. */
+async function startRun(codes, opts = {}) {
   if (run && !run.finished) { location.hash = "#/run"; return; }
   if (!codes) await scanVideos();  // reel videos saved since last time are read too
   const ready = !!modelInfo().ready;
@@ -586,7 +587,8 @@ async function startRun(codes) {
     run.current = r.code;
     r.status = "working";
     r.error = "";
-    let kept = false;  // the AI's answer was kept aside: you edited this reel while it was written
+    let kept = false;  // the AI's answer was kept aside: the reel has your edits
+    let why = "";  // why the AI could not write for a reel you edited: shown in the run log only
     try {
       if (!r.caption_read || (!Notes.isYoutube(r) && !r.video_tried)) {
         run.step = "caption";
@@ -597,7 +599,7 @@ async function startRun(codes) {
         saveDb();
       }
       if (run.stop) { r.status = r.notes ? "done" : "new"; break; }
-      if (run.ready && (!r.notes || r.notes_by === "auto")) {
+      if (run.ready && (!r.notes || r.notes_by === "auto" || (opts.redo && Notes.isEdited(r)))) {
         if (Notes.material(r) < 30) {
           r.status = "ready_no_text";
           r.error = "Instagram gave too little to work from (no video, little caption). Type what the reel says, or open it in Instagram.";
@@ -613,21 +615,25 @@ async function startRun(codes) {
       if (r.notes) { r.status = "done"; delete r.tries; delete r.next_try_at; delete r.last_fail; delete r.last_fail_at; }
       streak = { key: "", n: 0 };
     } catch (e) {
-      if (run.stop || e.message === "stopped") { r.status = "new"; break; }
-      if (/slow down/.test(e.message)) { r.status = "new"; run.note = e.message; break; }
-      r.status = "failed";
-      r.error = e.message;
-      run.failed++;
-      const now = Date.now(), key = String(e.message).split(":")[0].slice(0, 40);
-      r.tries = (r.tries || 0) + 1;
-      r.last_fail_at = now;
-      r.last_fail = String(e.message).slice(0, 300);
-      const wait = Notes.retryAfter(r.tries);
-      r.next_try_at = wait === null ? 0 : now + wait;  // parked at the cap: needsWork stops on tries, not on the time
-      streak = { key, n: streak.key === key ? streak.n + 1 : 1 };
-      if (streak.n >= 3) { run.note = `Stopped after 3 failures in a row: ${r.last_fail}`; tripped = true; }
+      const mine = Notes.isEdited(r);  // a reel you edited stays "done" whatever happens: no tries, never in "Could not finish"
+      if (run.stop || e.message === "stopped") { r.status = mine ? "done" : "new"; break; }
+      if (/slow down/.test(e.message)) { r.status = mine ? "done" : "new"; run.note = e.message; break; }
+      if (mine) { r.status = "done"; r.error = ""; run.failed++; why = e.message; }
+      else {
+        r.status = "failed";
+        r.error = e.message;
+        run.failed++;
+        const now = Date.now(), key = String(e.message).split(":")[0].slice(0, 40);
+        r.tries = (r.tries || 0) + 1;
+        r.last_fail_at = now;
+        r.last_fail = String(e.message).slice(0, 300);
+        const wait = Notes.retryAfter(r.tries);
+        r.next_try_at = wait === null ? 0 : now + wait;  // parked at the cap: needsWork stops on tries, not on the time
+        streak = { key, n: streak.key === key ? streak.n + 1 : 1 };
+        if (streak.n >= 3) { run.note = `Stopped after 3 failures in a row: ${r.last_fail}`; tripped = true; }
+      }
     }
-    run.log.unshift({ code: r.code, ok: r.status === "done", text: kept ? KEPT_ASIDE : r.status === "done" ? (r.notes.topic || "Notes written") : r.error || (r.caption ? "Caption read, too short for notes" : "No caption from Instagram") });
+    run.log.unshift({ code: r.code, ok: !why && r.status === "done", text: why ? why : kept ? KEPT_ASIDE : r.status === "done" ? (r.notes.topic || "Notes written") : r.error || (r.caption ? "Caption read, too short for notes" : "No caption from Instagram") });
     saveDb();
     paintRun();
     if (tripped) break;
@@ -906,6 +912,7 @@ function reelScreen(code) {
     ${r.error && !n ? `<div class="card small">${esc(r.error)}</div>` : ""}
     ${r.tries && (!n || r.notes_by === "auto") ? `<div class="card small">${retryLine(r)}</div>` : ""}
     ${n ? notesHtml(n, r) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">${r.video_tried ? "Instagram gave too little to work from. Type what the reel says below." : "Tap Start: Reel Shelf reads what the reel shows and says, then writes the notes."}</span></div>`}
+    ${keptHtml(r)}
     ${r.content ? `<span class="small muted">Read from: ${esc({ caption: "the caption only (Instagram gave no video)", video: "caption and the text on screen", "video+speech": "caption, the text on screen and what is said" }[r.content] || r.content)}</span>` : ""}
     <div class="grid2">
       ${r.url && settings.metaAi ? `<button class="btn" id="meta">Ask Meta AI</button><button class="btn" id="paste">Paste an answer</button>` : ""}
@@ -935,8 +942,12 @@ function reelScreen(code) {
   bind("#copy", "click", () => { sync("copy", Notes.format(n) + (r.url ? `\n\nReel: ${r.url}` : "")); toast("Notes copied"); });
   bind("#paste", "click", () => pasteDialog(r));
   bind("#editNotes", "click", () => { editDraft = null; editDialog(r.code); });
+  bind("[data-kept]", "click", (e, b) => keptAction(r, b.dataset.kept, b.dataset.src));
   bind("#saveExtra", "click", () => { r.extra = document.getElementById("extra").value.slice(0, 10000); if (!r.notes && r.status === "ready_no_text") r.status = "ready"; saveDb(); toast("Saved"); reelScreen(code); });
-  bind("#phoneai", "click", () => startRun([r.code]).then(() => {}));
+  bind("#phoneai", "click", () => {
+    if (Notes.isEdited(r) && r.notes_next && r.notes_next.phone && !confirm("A phone AI version is already waiting. Replace it?")) return;
+    startRun([r.code], { redo: true }).then(() => {});  // for a reel you edited the answer is kept aside; for any other it changes nothing, as before
+  });
   bind("#addcom", "click", () => {
     toast("Pick screenshots of this reel's comments");
     phone("readPictures").then((t) => {
@@ -1090,6 +1101,59 @@ function askMeta(r) {
   saveDb();
   sync("shareText", text, "Ask Meta AI");
   toast("Prompt copied. Pick Meta AI (or paste it there). Then share its answer back to Reel Shelf.");
+}
+
+// ------------------------------------------------------------------ versions kept aside: choose what to do with a newer answer
+
+const AI_NAME = { meta: "Meta AI", phone: "on-phone AI" };
+/** The cards on a reel for what was kept aside: a newer AI answer waiting (Show it, Keep my edits, Use the new AI version, Dismiss), and your own version kept after "Use the new AI version". */
+function keptHtml(r) {
+  const next = r.notes_next || {}, edited = Notes.isEdited(r);
+  const btn = (act, src, label, cls = "") => `<button class="btn block ${cls}" data-kept="${act}" data-src="${src}">${label}</button>`;
+  const ai = ["meta", "phone"].filter((s) => next[s] && next[s].notes).map((s) => `<div class="card stack">
+    <strong>A newer version from ${s === "phone" ? "the " : ""}${AI_NAME[s]} (${esc(day(next[s].at))}) is waiting.${edited ? " Your edits are kept." : ""}</strong>
+    <div id="kept-show-${s}"></div>
+    ${btn("show", s, "Show it")}${edited ? btn("keep", s, "Keep my edits, update the rest", "primary") : ""}${btn("use", s, "Use the new AI version")}${btn("dismiss", s, "Dismiss")}</div>`);
+  const mine = next.you && next.you.notes ? [`<div class="card stack">
+    <strong>Your edited version is kept.</strong><span class="small muted">Saved ${esc(day(next.you.at))}.</span>
+    ${btn("use", "you", "Use my version again")}${btn("delete", "you", "Delete my version", "danger")}</div>`] : [];
+  return ai.concat(mine).join("");
+}
+
+/** Brings a kept version onto the screen; the version on screen goes to its own place (a swap). When that place already holds another version, asks first. */
+function useVersion(r, src) {
+  const to = Notes.screenSlot(r);
+  if (to && to !== src && r.notes_next && r.notes_next[to] && !confirm(to === "you" ? "Replace your earlier kept version?" : `Replace the ${AI_NAME[to]} version kept aside?`)) return false;
+  if (!Notes.swapIn(r, src)) return false;
+  if (src !== "you" && typeof Products !== "undefined") Products.addFromReel(db, r);
+  return true;
+}
+
+function keptAction(r, act, src) {
+  const next = r.notes_next || {};
+  if (act === "show") {
+    const box = document.getElementById("kept-show-" + src), b = $app.querySelector(`[data-kept="show"][data-src="${src}"]`);
+    if (!box || !next[src]) return;
+    box.innerHTML = box.innerHTML ? "" : notesHtml(next[src].notes);
+    b.textContent = box.innerHTML ? "Hide it" : "Show it";
+    return;
+  }
+  if (act === "keep") {
+    if (!Notes.keepEdits(r, src)) return;
+    if (typeof Products !== "undefined") Products.addFromReel(db, r);
+    toast("Updated. Your edits are kept.");
+  } else if (act === "use") {
+    if (!useVersion(r, src)) return;
+    toast(src === "you" ? "Your version is back" : "The new version is on the screen. Yours is kept.");
+  } else if (act === "dismiss") {
+    if (!confirm(`Delete the newer version from ${src === "phone" ? "the " : ""}${AI_NAME[src]} that was kept aside? The notes on the screen stay as they are.`)) return;
+    Notes.dropSlot(r, src);
+  } else if (act === "delete") {
+    if (!confirm("Delete your edited notes for good?")) return;
+    Notes.dropSlot(r, "you");
+  } else return;
+  saveDb();
+  reelScreen(r.code);
 }
 
 // ------------------------------------------------------------------ your own notes: edit the topic, points, takeaway and tags
