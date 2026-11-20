@@ -6,6 +6,25 @@ section here. A merge builds and tests the APK (kept as the workflow artifact); 
 notes and points `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.30
+- **A newer AI answer for a reel you edited waits for your choice.** When Meta AI (pasted, shared or filed) or the on-phone
+  AI (after **Redo with phone AI**) answers for a reel you edited, the answer is kept aside and the reel page shows a
+  card: "A newer version from Meta AI (19 Nov) is waiting. Your edits are kept." with four buttons. **Show it** reads the
+  new version without changing anything. **Keep my edits, update the rest** (the main choice) gives the fields you did
+  not edit the new text and keeps your text in the fields you edited; the new AI text becomes the one **Use the AI text**
+  brings back. **Use the new AI version** puts the new version on screen and **keeps yours, it is not deleted**: a card
+  "Your edited version is kept" has **Use my version again** (a swap: what was on screen is kept in its place) and
+  **Delete my version** (asks "Delete your edited notes for good?"). If that place already holds an earlier version, it
+  asks before replacing it. **Dismiss** asks before it throws the newer version away.
+- **Redo with phone AI** now also works on a reel you edited: the answer is kept aside, never written over your notes, and
+  a Meta AI answer that is waiting is never touched. If a phone AI answer is already waiting, Redo asks before replacing it.
+  A Redo that fails, is stopped or meets Instagram's "slow down" leaves the reel as it is (no retry count, never in
+  "Could not finish"); the reason is in the run log. Every other way of starting the AI (Start, the nightly run, Read this
+  reel properly, Try again now) still skips a reel you edited. On a reel with Meta AI or on-phone AI notes that you did not
+  edit, Redo still changes nothing, as before.
+- Nothing was tried on a phone yet.
+- Version renumbered at merge: 1.3.30 (versionCode 37) is a provisional number for this stacked change.
+
 ## 1.3.29
 - **You can now edit a reel's notes.** On a reel, tap **Edit notes** to change the topic, the points (one per line), the
   takeaway and the tags, or **Write my own notes** on a reel that has none. Each box has a label, a hint and its own error
