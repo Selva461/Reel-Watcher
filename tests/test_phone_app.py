@@ -459,7 +459,10 @@ def test_java_keeps_the_model_check_out_of_the_way():
     assert "ModelCheck.refuse(onScreen, act.isNight(), downloading, jobs.get() > 0," in check
     assert bridge.count("checks.start(") == 1 and bridge.index("checks.start(") > bridge.index("public String checkModel")
     assert "() -> onScreen && jobs.get() == 0" in check  # asked again when the worker gets to the check: not off screen, not behind a job
-    assert bridge.count("work.execute(") == 1
+    # runWork counts the job and stops a model check. The S4 backup, restore and kept-files methods run on the same worker without
+    # that (they work on the library and the files kept for it, not on a model), so a check may run beside them: no other caller may.
+    owners = {re.findall(r"(?:public|private) void (\w+)\(", bridge[:m.start()])[-1] for m in re.finditer(r"work\.execute\(", bridge)}
+    assert owners == {"runWork", "backupLibrary", "chooseBackup", "restoreBackup", "saveKept", "deleteKept"} and bridge.count("work.execute(") == 6
     run = body(bridge, "private void runWork", "work.execute(")
     assert "model.checks.cancel()" in run and run.index("jobs.incrementAndGet()") < run.index("model.checks.cancel()")  # the job is counted first
     for sig in ("public void downloadModel", "public void downloadSpeech", "public void pickModel"):
