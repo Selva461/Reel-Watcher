@@ -177,9 +177,10 @@ function addReels(found, how) {
 /** An answer in the notes format: filed under the reel it names, else the reel you last asked Meta AI about. */
 function fileAnswer(text, by = "meta", target = null, standalone = false) {
   const parts = Notes.splitAnswers(text);
-  if (!parts.length) return { filed: 0, inbox: 0 };
+  if (!parts.length) return { filed: 0, inbox: 0, kept: 0 };
   let filed = 0;
   let inbox = 0;
+  let kept = 0;  // answers kept aside because the reel has your edits
   for (const p of parts) {
     let r = target ? reel(target) : null;
     if (!r && p.links.length) {
@@ -196,31 +197,50 @@ function fileAnswer(text, by = "meta", target = null, standalone = false) {
       r = reel(code);
     }
     if (!r) { db.inbox.push({ text: p.text, at: Date.now() }); inbox++; continue; }
-    setNotes(r, p.notes, by, p.text);
-    filed++;
+    if (setNotes(r, p.notes, by, p.text)) filed++; else kept++;
   }
   saveDb();
-  return { filed, inbox };
+  return { filed, inbox, kept };
 }
 
-function setNotes(r, notes, by, raw) {
+const KEPT_ASIDE = "Kept aside: this reel has your edits. Open it to compare.";
+/** What is said when an answer was kept aside for a reel with your edits (setNotes gave false): the same words for one, a count for several. */
+function keptAside(n) { return n > 1 ? `Kept aside: ${n} reels have your edits. Open them to compare.` : KEPT_ASIDE; }
+
+/**
+ * Writes the notes of a reel. A reel with your edits is never overwritten by an AI answer: the answer is kept aside in
+ * notes_next, one place per source ("meta", "phone"; a newer answer of a source replaces only that source's), nothing
+ * else on the reel changes (not the notes, status, raw or Products), and false is returned: every caller says so
+ * (KEPT_ASIDE). `force` writes anyway (for code that moves a kept version onto the screen). True when written.
+ */
+function setNotes(r, notes, by, raw, force) {
+  const text = raw ? String(raw).slice(0, 20000) : "";
+  if (Notes.isEdited(r) && by !== "you" && !force) {
+    (r.notes_next = r.notes_next || {})[by] = { at: Date.now(), notes, raw: text };
+    return false;
+  }
+  if (by === "meta" && !force && r.notes_next && r.notes_next.meta) {  // a newer Meta AI answer replaces an older one kept aside
+    delete r.notes_next.meta;
+    if (!Object.keys(r.notes_next).length) delete r.notes_next;
+  }
   r.notes = notes;
   r.notes_by = by;
   r.notes_at = Date.now();
   r.status = "done";
   r.error = "";
-  if (raw) r.raw = String(raw).slice(0, 20000);
+  if (raw) r.raw = text;
   if (typeof Products !== "undefined") Products.addFromReel(db, r);  // products the notes name go to Products
+  return true;
 }
 
 /** Files the shared items in the library, in one save. Returns the counts, and whether the save worked. */
 function fileShared(items) {
-  const n = { reels: 0, answers: 0, waiting: 0, other: 0, saved: true };
+  const n = { reels: 0, answers: 0, waiting: 0, kept: 0, other: 0, saved: true };
   deferSaves = true;  // 100 shared reels are one save, not 100
   try {
     for (const it of items) {
       const text = String(it.text || "");
-      if (Notes.parse(text)) { const r = fileAnswer(text, "meta"); n.answers += r.filed; n.waiting += r.inbox; continue; }
+      if (Notes.parse(text)) { const r = fileAnswer(text, "meta"); n.answers += r.filed; n.waiting += r.inbox; n.kept += r.kept; continue; }
       const found = Notes.links(text);
       if (found.length) n.reels += addReels(found, "share"); else n.other++;
     }
@@ -250,7 +270,8 @@ function takeShared() {
   sync("ackShared", JSON.stringify(items.map((x) => x.id).filter(Boolean)));
   const msg = [n.reels && `${plural(n.reels, "new reel")} saved`, n.answers && `${plural(n.answers, "Meta AI answer")} filed`,
     n.waiting && `${plural(n.waiting, "answer")} to file`, n.other && `${plural(n.other, "share")} had no reel link`].filter(Boolean).join(", ");
-  if (msg) toast(msg);
+  const kept = n.kept ? keptAside(n.kept) : "";
+  if (msg || kept) toast([msg, kept].filter(Boolean).join(". "));
   return items.length;
 }
 
@@ -422,7 +443,7 @@ async function readFileVideo(r) {
   if (at && Notes.username(at[1]) && !r.author) r.author = at[1];
   const same = r.author ? db.reels.filter((x) => x !== r && x.url && !x.file && !Notes.isYoutube(x) && (x.author || "").toLowerCase() === r.author.toLowerCase()
     && !/^video/.test(x.content || "")) : [];
-  if (same.length === 1) {  // the saved reel that only had its caption: it is this video
+  if (same.length === 1 && !Notes.hasUserData(same[0])) {  // the saved reel that only had its caption: it is this video (one with your edits or kept versions stays, as its own reel)
     const old = same[0];
     r.url = old.url;
     r.ig_code = old.code;
@@ -517,8 +538,7 @@ async function writeWithPhoneAi(r) {
   const notes = Notes.parse(out.text);
   if (!notes) throw new Error("The on-phone AI's answer was not in the notes format. Try again, or Ask Meta AI.");
   Notes.keepBacked(notes, r);
-  setNotes(r, notes, "phone", out.text);
-  return out;
+  return setNotes(r, notes, "phone", out.text) ? out : null;  // null: the reel has your edits, the answer was kept aside
 }
 
 /** Useful reels first, then jokes, memes and music; newest first within each. */
@@ -566,6 +586,7 @@ async function startRun(codes) {
     run.current = r.code;
     r.status = "working";
     r.error = "";
+    let kept = false;  // the AI's answer was kept aside: you edited this reel while it was written
     try {
       if (!r.caption_read || (!Notes.isYoutube(r) && !r.video_tried)) {
         run.step = "caption";
@@ -583,8 +604,7 @@ async function startRun(codes) {
         } else {
           run.step = "ai";
           paintRun();
-          await writeWithPhoneAi(r);
-          run.done++;
+          if (await writeWithPhoneAi(r)) run.done++; else kept = true;
         }
       } else if (!r.notes) {
         if (Notes.material(r) >= 30) writeWithoutAi(r);
@@ -607,7 +627,7 @@ async function startRun(codes) {
       streak = { key, n: streak.key === key ? streak.n + 1 : 1 };
       if (streak.n >= 3) { run.note = `Stopped after 3 failures in a row: ${r.last_fail}`; tripped = true; }
     }
-    run.log.unshift({ code: r.code, ok: r.status === "done", text: r.status === "done" ? (r.notes.topic || "Notes written") : r.error || (r.caption ? "Caption read, too short for notes" : "No caption from Instagram") });
+    run.log.unshift({ code: r.code, ok: r.status === "done", text: kept ? KEPT_ASIDE : r.status === "done" ? (r.notes.topic || "Notes written") : r.error || (r.caption ? "Caption read, too short for notes" : "No caption from Instagram") });
     saveDb();
     paintRun();
     if (tripped) break;
@@ -929,7 +949,7 @@ function reelScreen(code) {
   bind("#addrt", "click", () => titleDialog(null, r.code));
   bind("#retryReel", "click", () => { r.tries = 0; r.next_try_at = 0; saveDb(); startRun([r.code]); });
   bind("#ytagain", "click", () => { r.caption_read = 0; if (r.notes_by === "auto") { r.notes = null; r.status = "new"; } saveDb(); startRun([r.code]); });
-  bind("#del", "click", () => { if (confirm("Remove this reel and its notes from Reel Shelf?")) { db.reels = db.reels.filter((x) => x !== r); saveDb(); location.hash = "#/"; } });
+  bind("#del", "click", () => { if (confirm(Notes.hasUserData(r) ? "Remove this reel, its notes, your edits and the versions kept aside from Reel Shelf?" : "Remove this reel and its notes from Reel Shelf?")) { db.reels = db.reels.filter((x) => x !== r); saveDb(); location.hash = "#/"; } });
 }
 
 function relatedHtml(r) {
@@ -1074,9 +1094,9 @@ function pasteDialog(r) {
     const t = $dlg.querySelector("#ans").value;
     const notes = Notes.parse(t);
     if (!notes) { e.preventDefault(); toast("That does not look like the notes format (TOPIC, POINTS, ...)"); return; }
-    setNotes(r, notes, "meta", t);
+    const written = setNotes(r, notes, "meta", t);
     saveDb();
-    toast("Saved");
+    toast(written ? "Saved" : KEPT_ASIDE);
     setTimeout(() => reelScreen(r.code), 0);
   });
 }
@@ -1110,7 +1130,7 @@ function addScreen() {
     let msg;
     if (answers.length) {
       const r = fileAnswer(t, "meta", null, true);
-      msg = `${plural(r.filed, "answer")} saved` + (r.inbox ? `, ${r.inbox} to file` : "");
+      msg = [r.filed || r.inbox || !r.kept ? `${plural(r.filed, "answer")} saved` + (r.inbox ? `, ${r.inbox} to file` : "") : "", r.kept ? keptAside(r.kept) : ""].filter(Boolean).join(". ");
     } else {
       const found = Notes.links(t);
       if (!found.length) { toast("No reel links or answers found in that text"); return; }
@@ -1158,7 +1178,7 @@ function fileScreen() {
     <button class="btn block" id="alone">Keep it as a note on its own</button>
     <button class="btn block danger" id="drop">Throw it away</button>`;
   const done = () => { db.inbox.shift(); saveDb(); location.hash = db.inbox.length ? "#/file" : "#/inbox"; render(); };
-  bind("[data-pick]", "click", (e, b) => { setNotes(reel(b.dataset.pick), n, "meta", a.text); done(); });
+  bind("[data-pick]", "click", (e, b) => { if (!setNotes(reel(b.dataset.pick), n, "meta", a.text)) toast(KEPT_ASIDE); done(); });
   bind("#alone", "click", () => {
     const code = "note-" + Date.now().toString(36);
     db.reels.unshift({ code, url: "", author: "", collections: [], status: "done", added_at: Date.now(), added_by: "answer" });
@@ -1334,7 +1354,7 @@ function settingsScreen() {
   bind("#excsv", "click", () => phone("saveFile", `watchlist-${stamp()}.csv`, "text/csv", Catalog.exportCsv(db)).then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#exshare", "click", () => sync("shareText", Notes.exportMarkdown(db.reels), "Share your reel notes"));
   bind("#excopy", "click", () => { sync("copy", Notes.exportMarkdown(db.reels)); toast("All notes copied"); });
-  bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes? This cannot be undone.`)) { db.reels = []; db.inbox = []; if (saveDb()) sync("dropBackup", "reels"); toast("Deleted (your watchlist is kept)"); settingsScreen(); } });
+  bind("#wipe", "click", () => { if (confirm(`Delete all ${db.reels.length} reels and their notes${db.reels.some(Notes.hasUserData) ? ", including your own edits" : ""}? This cannot be undone.`)) { db.reels = []; db.inbox = []; if (saveDb()) sync("dropBackup", "reels"); toast("Deleted (your watchlist is kept)"); settingsScreen(); } });
 }
 
 // ------------------------------------------------------------------ router

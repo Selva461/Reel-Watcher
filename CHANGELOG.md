@@ -5,6 +5,19 @@ section here; the APK workflow publishes release `v<versionName>` with this sect
 `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.28
+- Preparing for notes you can edit (the editing screen itself comes next). Nothing you can see changes yet. Under the
+  hood, a reel's notes can now be marked as written by you, and from then on **nothing writes over them**: a Meta AI
+  answer (pasted, shared, filed from the inbox or shared during the night) and the on-phone AI's answer for such a reel
+  are kept aside on the reel, and Reel Shelf says "Kept aside: this reel has your edits. Open it to compare." One kept
+  answer per source (Meta AI, on-phone AI) is held; a newer answer of the same source replaces only that one.
+- A reel video that Reel Shelf matches to the same saved reel by its creator no longer takes over (and removes) that saved
+  reel when the reel has your edits or a kept version: both stay. "Remove from shelf" and "Delete all reels and notes"
+  now name your edits and the versions kept aside before they ask.
+- Your library file gets three optional fields on a reel (`notes_edit`, `notes_next`, and `notes_by` "you"); older
+  versions keep them and the library layout number is unchanged. Nothing was tried on a phone yet.
+- Version renumbered at merge: 1.3.28 (versionCode 35) is a provisional number for this stacked change.
+
 ## 1.3.16
 - A reel that fails no longer comes back on every Start and every night. If the on-phone AI cannot write the notes for
   a reel, Reel Shelf tries again after 12 hours, then after 3 days, and after the third failure it **stops trying and
