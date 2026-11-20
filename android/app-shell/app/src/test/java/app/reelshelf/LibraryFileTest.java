@@ -844,6 +844,29 @@ public class LibraryFileTest {
     }
 
     @Test
+    public void savedByNewerReadsTheFileOnceAndOnlyANewerLibrarySaysYesAndNothingIsChanged() throws Exception {
+        File newer = tmp.newFolder();
+        put(new File(newer, "reels.json"), NEWER);
+        String before = fingerprint(newer);
+        assertTrue("never read before: it reads the file itself", LibraryFile.reels(newer).savedByNewer());
+        assertEquals(before, fingerprint(newer));
+        File fine = tmp.newFolder();
+        put(new File(fine, "reels.json"), V1);
+        assertFalse(LibraryFile.reels(fine).savedByNewer());
+        File none = tmp.newFolder();
+        assertFalse("no file: a new library", LibraryFile.reels(none).savedByNewer());
+        File cut = tmp.newFolder();
+        put(new File(cut, "reels.json"), V1.substring(0, 12));
+        LibraryFile damaged = LibraryFile.reels(cut);
+        assertFalse("unreadable is not newer: restoring over it is allowed", damaged.savedByNewer());
+        assertTrue(damaged.locked());
+        File newerBak = tmp.newFolder();
+        put(new File(newerBak, "reels.json"), V1.substring(0, 12));
+        put(new File(newerBak, "reels.json.bak"), NEWER);
+        assertTrue("a damaged file beside a newer backup is newer too", LibraryFile.reels(newerBak).savedByNewer());
+    }
+
+    @Test
     public void replaceWithOnALibraryNobodyReadYetStillSeesThatItIsNewer() throws Exception {
         File dir = tmp.newFolder();
         put(new File(dir, "reels.json"), NEWER);

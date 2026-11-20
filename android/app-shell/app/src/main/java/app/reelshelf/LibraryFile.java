@@ -422,6 +422,15 @@ final class LibraryFile {
     }
 
     /**
+     * True when a newer Reel Shelf saved this file ({@link State#NEWER}); reads the file once if this process has not yet. A caller
+     * that is about to {@link #replaceWith} two files asks both first, so a refusal of the second cannot come after the first was replaced.
+     */
+    synchronized boolean savedByNewer() {
+        ensureRead();
+        return state == State.NEWER;
+    }
+
+    /**
      * Installs staged (a file {@link LibraryBackup#check} accepted) as the file. Rules:
      * - NEWER (main, or a newer backup beside a damaged main): REFUSED with an IOException and nothing at all is touched.
      *   A newer library is never replaced, renamed or set aside by an older build.

@@ -775,6 +775,7 @@ window.onAppResume = () => {
   if (handingOver) return;  // waiting for the nightly run: handOver opens the library when it has stopped
   if (sync("nightActive")) { handOver(); return; }  // the night started while this screen was away, and is now asked to stop
   if (dbLocked) return;  // the library is not open: Try again on the screen
+  if (restore.busy === "restore") return;  // the backup of this library is being made and then it is replaced: a reel shared meanwhile must be filed into the restored library (reloadAfterRestore does that), not into the one that is about to be set aside
   if (sync("libraryStale", "reels") || sync("libraryStale", "shots")) staleReload();  // saved elsewhere while this screen was away
   else loadSettings();  // settings have no revision: read again
   const seen = db.reels.filter((x) => x.opened_at && Date.now() - x.opened_at < 20 * 60000).sort((a, b) => b.opened_at - a.opened_at)[0];
@@ -1249,7 +1250,7 @@ function bindSpeech() {
 
 // ------------------------------------------------------------------ Back up now (Settings): one ZIP with the whole library
 // The phone makes it, checks it can be read back, and saves it to Downloads/ReelShelf (RN.backupLibrary). The page only passes the counts to show.
-// Restoring a backup is not here yet. Library locked or newer: the locked screens show instead of Settings, so there is no button.
+// Restoring one is the next section (#/restore). Library newer: its screen shows instead of Settings and has no button (a newer library is never replaced).
 let backup = { running: false, result: null };  // result: {ok: true, name, where, bytes, counts, uninstall_warning, shots_skipped} or {ok: false, text}
 function backupSize(n) { return n < 1048576 ? Math.max(1, Math.round(n / 1024)) + " KB" : mb(n); }
 function backupInner() {
@@ -1264,8 +1265,9 @@ function backupInner() {
     <div class="card stack">
       <button class="btn primary block" id="backupnow" ${backup.running ? "disabled" : ""}>${backup.running ? "Backing up..." : "Back up now"}</button>
       ${status}
+      <a class="btn block" href="#/restore" id="restorebtn">Restore from a backup</a>
       <p class="hint">The backup contains all your reels, notes, watchlist, quotes and products. Anyone who gets the file can read them. It does not contain your settings, API keys, AI models, pictures or videos. It also holds a short part of the text read from each of your screenshots, and their file names.</p>
-      <p class="hint">It is saved in Downloads/ReelShelf. Keep it somewhere safe, or delete it when you no longer need it: Reel Shelf never deletes old backups for you. Restoring a backup is not in this version yet.</p>
+      <p class="hint">It is saved in Downloads/ReelShelf. Keep it somewhere safe, or delete it when you no longer need it: Reel Shelf never deletes old backups for you. Restoring replaces your library with a backup after you confirm; the library you have now is kept on the phone, not deleted.</p>
     </div>`;
 }
 function paintBackup() {
@@ -1284,6 +1286,165 @@ function backupNow() {
     try { r = JSON.parse(t); } catch (e) { /* the sentence below */ }
     backup = { running: false, result: r && typeof r === "object" && r.counts && typeof r.counts === "object" ? { ...r, ok: true } : { ok: false, text: "The backup could not be saved. Your library was not changed." } };
   }, (e) => { backup = { running: false, result: { ok: false, text: e.message } }; }).then(paintBackup);
+}
+
+// ------------------------------------------------------------------ Restore from a backup (#/restore): choose and check, then confirm; nothing changes until Restore
+// RN.chooseBackup opens Android's file picker and checks the file on the phone (nothing is installed) and answers with a preview and a token;
+// RN.restoreBackup(token) installs what was checked. The library in place is kept on the phone (reels.json.before-restore-...), never deleted.
+// restoreBackup is only ever called from the confirm screen, with the token the phone gave, and never while work runs. The phone's refusals are plain
+// sentences and are shown as they are. Nothing is restored over a newer library (its screen has no button: LibraryFile.replaceWith refuses it).
+const RESTORE_WORK = "Reel Shelf is busy with a job (writing notes, reading screenshots, an online check, a download or the nightly run). Stop it, or wait until it is done, then try again. Nothing was changed.";  // RestoreNow.WORK
+const RESTORE_BUSY = "Another backup or restore is already running. Wait for it to finish, then try again. Nothing was changed.";  // RestoreNow.BUSY
+const NOTHING_TO_BACK_UP = "There is nothing to back up yet.";  // BackupNow.NOTHING: a fresh install has no library to save first, which is no reason to stop (a test checks all three against the Java sentences)
+function restoreFresh() { return { step: "pick", busy: "", status: "", message: "", preview: null, before: true, saved: "", result: null }; }
+let restore = restoreFresh();  // step: pick | confirm | done; busy: "" | check | restore
+function restoreBlocked() {
+  if (workNow()) return RESTORE_WORK;
+  if (sync("nightActive")) return RESTORE_WORK;
+  if (backup.running) return RESTORE_BUSY;
+  return "";
+}
+function backupDate(iso) {
+  const t = Date.parse(iso || "");
+  return isNaN(t) ? "" : new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+function libraryCounts(n, t) { return `${plural(Number(n) || 0, "reel")}, ${plural(Number(t) || 0, "title")}`; }
+/** The checked backup and its staged files are dropped (the phone forgets the token too). */
+function restoreDrop() {
+  if (restore.preview) sync("cancelRestore");
+  restore = restoreFresh();
+}
+function restoreRepaint() {
+  if (location.hash === "#/restore") render();
+  else if (restore.preview) restoreDrop();  // the screen was left while the file was being checked: nothing stays staged
+}
+/** A restore that was running always ends on its own screen (the result, or the reason it stopped), wherever the address bar was meanwhile. */
+function restoreShow() {
+  if (location.hash === "#/restore") render(); else location.hash = "#/restore";
+}
+function restoredHtml(res) {
+  const shots = res.shots === "restored" ? "The list of read screenshots was restored too."
+    : res.shots === "kept" ? "The backup has no list of read screenshots, so yours was left as it is."
+    : res.shots === "failed" ? "The list of read screenshots could not be restored: it is as it was before. Your reels, notes and watchlist were restored."
+    : "";
+  const kept = res.set_aside ? `Your previous library is kept on the phone as <strong>${esc(res.set_aside)}</strong> (in Reel Shelf's private storage, not in Downloads). It is not deleted.`
+    : "There was no library on this phone to keep.";
+  return `${header("Restored", "")}
+    <div class="card stack"><strong>Your library was restored${res.date ? " from the backup of " + esc(res.date) : ""}</strong>
+      <span class="small" role="status">Your library now has ${esc(libraryCounts(db.reels.length, (db.media || []).length))}.</span>
+      <span class="small">${kept}</span>
+      ${res.shots_set_aside ? `<span class="small">Your previous list of read screenshots is kept as <strong>${esc(res.shots_set_aside)}</strong>.</span>` : ""}
+      ${res.saved ? `<span class="small">A backup of the library you had was saved to ${esc(res.saved)}.</span>` : ""}
+      ${shots ? `<span class="small" ${res.shots === "failed" ? 'role="alert"' : ""}>${res.shots === "failed" ? `<strong>${esc(shots)}</strong>` : esc(shots)}</span>` : ""}
+      <p class="hint">Pictures and videos are not in backups; reels whose video is no longer on this phone keep their notes.</p></div>
+    <a class="btn primary block" href="#/">Open my library</a>`;
+}
+function restoreScreen() {
+  const r = restore, p = r.preview;
+  if (r.result) { $app.innerHTML = restoredHtml(r.result); return; }
+  const back = dbLocked ? "#/" : "#/settings";
+  const msg = r.message ? `<span class="small" role="alert"><strong>${esc(r.message)}</strong></span>` : "";
+  const wait = r.busy ? `<span class="small" role="status">${esc(r.status || (r.busy === "check" ? "Checking the file. A big backup can take a minute. Please keep the app open." : "Restoring. Please keep the app open."))}</span>` : "";
+  if (!p) {
+    $app.innerHTML = `${header("Restore from a backup", back)}
+      <div class="card stack">
+        <span>Choose a backup made by Back up now (a file called ReelShelf-backup-...zip). The file is checked first; nothing changes until you confirm on the next screen.</span>
+        <button class="btn primary block" id="rpick" ${r.busy ? "disabled" : ""}>${r.busy ? "Checking..." : "Choose a backup file"}</button>
+        ${wait}${msg}
+        <p class="hint">A reels.json file or a notes export (JSON) is not a backup and cannot be restored: only a file made by Back up now can. Pictures and videos are not in backups.</p></div>
+      <a class="btn block" href="${back}" id="rback">Cancel</a>`;
+    bind("#rpick", "click", restorePick);
+    return;
+  }
+  const now = dbLocked ? "your library, which could not be read," : `your library (${libraryCounts(db.reels.length, (db.media || []).length)})`;
+  const date = backupDate(p.created_at);
+  const question = `Replace ${now} with the backup${date ? " from " + date : ""} (${libraryCounts(p.reels, p.titles)})? Your current library is kept on the phone, not deleted.`;
+  $app.innerHTML = `${header("Restore from a backup", back)}
+    <div class="card stack"><strong>Replace your library?</strong>
+      <span id="rquestion">${esc(question)}</span>
+      <span class="small">${p.app_version ? `Made by Reel Shelf ${esc(p.app_version)}. ` : ""}${p.has_shots ? "It includes the list of read screenshots." : "It has no list of read screenshots, so yours stays as it is."}</span>
+      ${dbLocked ? `<span class="small">The unreadable file is set aside under a new name, not deleted.</span>`
+        : `<label class="row" style="gap:10px"><input type="checkbox" id="rbefore" ${r.before ? "checked" : ""} ${r.busy ? "disabled" : ""}><span>Save a backup of the current library first</span></label>
+           <span class="hint">It goes to Downloads/ReelShelf, like Back up now. If it cannot be made, nothing is restored.</span>`}
+      ${wait}${msg}
+      <button class="btn primary block" id="rgo" ${r.busy ? "disabled" : ""}>${r.busy === "restore" ? "Restoring..." : "Restore this backup"}</button>
+      <button class="btn block" id="rcancel" ${r.busy ? "disabled" : ""}>Cancel</button></div>`;
+  bind("#rbefore", "change", (e, el) => { restore.before = el.checked; });
+  bind("#rgo", "click", restoreGo);
+  bind("#rcancel", "click", () => { restoreDrop(); location.hash = back; });
+}
+/** Step 1: the phone opens its file picker and checks the file. Nothing is changed. */
+function restorePick() {
+  if (restore.busy) return;
+  const why = restoreBlocked();
+  if (why) { restore.message = why; restoreScreen(); return; }
+  restore.busy = "check";
+  restore.status = "";
+  restore.message = "";
+  restoreScreen();
+  phone("chooseBackup").then((t) => {
+    let p = null;
+    try { p = JSON.parse(t); } catch (e) { /* the sentence below */ }
+    if (p && typeof p === "object" && typeof p.token === "string" && p.token) { restore.preview = p; restore.step = "confirm"; }
+    else restore.message = "The file could not be checked. Nothing was changed.";
+  }, (e) => { restore.message = e.message; }).then(() => { restore.busy = ""; restoreRepaint(); });
+}
+/** What the phone has now (the restored library, settings, screenshots), and what was shared while the library was shut. */
+function reloadAfterRestore() {
+  backup = { running: false, result: null };
+  dbLocked = false;
+  loadSettings();
+  loadDb();
+  if (typeof Shots !== "undefined") Shots.reload();
+  if (!dbLocked) openLibrary();  // a link shared before the restore is filed into the restored library and acknowledged once
+}
+/** Step 2, only from the confirm screen: the backup of the current library first (unless unticked), then the restore. */
+function restoreGo() {
+  const p = restore.preview;
+  if (restore.busy || !p) return;
+  const box = document.getElementById("rbefore");
+  if (box) restore.before = box.checked;
+  const why = restoreBlocked();
+  if (why) { restore.message = why; restoreScreen(); return; }
+  restore.busy = "restore";
+  restore.message = "";
+  restore.saved = "";
+  restore.status = "";
+  let first = Promise.resolve();
+  if (restore.before && !dbLocked) {  // a locked library cannot be backed up: the restore sets the unreadable file aside instead
+    restore.status = "Saving a backup of your current library first. Please keep the app open.";
+    first = phone("backupLibrary", JSON.stringify({ reels: db.reels.length, titles: (db.media || []).length, screenshots: typeof Shots !== "undefined" ? Shots.total() : 0 })).then((t) => {
+      try { const r = JSON.parse(t); if (r && typeof r.where === "string") restore.saved = r.where; } catch (e) { /* the restore goes on: it was saved */ }
+    }, (e) => {
+      if (e.message === NOTHING_TO_BACK_UP) return;  // no library file yet (a fresh install): nothing to save first
+      const stop = new Error(`The backup of your current library could not be made, so nothing was restored. ${e.message} Untick "Save a backup of the current library first" to restore without it.`);
+      stop.keepConfirm = true;
+      throw stop;
+    });
+  }
+  restoreScreen();
+  first.then(() => {
+    const again = restoreBlocked();  // a job could have been started meanwhile
+    if (again) { const stop = new Error(again); stop.keepConfirm = true; throw stop; }
+    restore.status = "Restoring. Please keep the app open.";
+    restoreScreen();
+    return phone("restoreBackup", p.token);
+  }).then((t) => {
+    let r = null;
+    try { r = JSON.parse(t); } catch (e) { /* an answer the page cannot read still means it was restored */ }
+    r = r && typeof r === "object" ? r : {};
+    const result = { set_aside: String(r.set_aside || ""), shots: String(r.shots || ""), shots_set_aside: String(r.shots_set_aside || ""), saved: restore.saved, date: backupDate(p.created_at) };
+    reloadAfterRestore();  // still "restoring" here: nothing drawn while it reads the library is anything but the restore screen
+    restore = { ...restoreFresh(), step: "done", result };
+    restoreShow();
+  }, (e) => {
+    restore.busy = "";
+    restore.status = "";
+    restore.message = e.message;
+    if (!e.keepConfirm) { sync("cancelRestore"); restore.preview = null; restore.step = "pick"; }  // the phone has used the token up (or lost the file): choose again
+    if (!dbLocked) openLibrary();  // nothing was replaced: what onAppResume held back while it ran (a reel shared meanwhile, results of the online check) is filed into this library now
+    restoreShow();
+  });
 }
 
 function settingsScreen() {
@@ -1389,6 +1550,7 @@ const ROUTES = [
   [/^#\/add$/, addScreen, "inbox"], [/^#\/run$/, runScreen, "inbox"],
   [/^#\/shots$/, () => Shots.screen(), "inbox"], [/^#\/shots\/review$/, () => Shots.review(), "inbox"], [/^#\/settings$/, settingsScreen, ""],
   [/^#\/check$/, () => Verify.screen(), "inbox"], [/^#\/quotes$/, () => { lib.kind = "quotes"; location.replace("#/"); }, "lib"],
+  [/^#\/restore$/, restoreScreen, ""],
 ];
 
 /** The library file could not be read. Nothing is saved over it; you choose what happens next. */
@@ -1398,8 +1560,9 @@ function lockedScreen() {
       <span class="small">Reel Shelf has not changed it, and will not save anything until you choose. Shared reels wait safely.</span></div>
     <button class="btn block" id="retry">Try again</button>
     <button class="btn block" id="saveBad">Save the unreadable file to Downloads</button>
+    <a class="btn block" href="#/restore" id="restorebtn">Restore from a backup</a>
     <button class="btn block danger" id="startNew">Start a new library</button>
-    <p class="hint">Start a new library sets the unreadable file aside under a new name (it is not deleted). Save a copy to Downloads first if you want to keep it outside the app.</p>`;
+    <p class="hint">Start a new library sets the unreadable file aside under a new name (it is not deleted). Save a copy to Downloads first if you want to keep it outside the app. Restore from a backup does the same with the unreadable file, then puts the backup you choose in its place.</p>`;
   bind("#retry", "click", () => { dbLocked = false; loadDb(); if (dbLocked) toast("Still unreadable"); else openLibrary(); render(); });
   bind("#saveBad", "click", () => phone("saveUnreadable", "reels").then((w) => toast("Saved to " + w)).catch((e) => toast(e.message)));
   bind("#startNew", "click", () => {
@@ -1436,7 +1599,7 @@ function handOver() {
     loadSettings();
     loadDb();  // fresh: what the night saved is in it, and saves from here on are for this version
     if (typeof Shots !== "undefined") Shots.reload();  // the screenshot list too: the night may have saved a newer one
-    if (!dbLocked) openLibrary();
+    if (!dbLocked && restore.busy !== "restore") openLibrary();  // not while a restore installs: it opens the restored library itself (or, if it fails, restoreGo does)
     render();
   };
   tick();
@@ -1460,8 +1623,10 @@ function openLibrary() {
 }
 
 function render() {
-  if (handingOver) { paintTabs(""); topBar(false); handOverScreen(); return; }
-  if (dbLocked) { paintTabs(""); topBar(false); if (dbNewer) newerScreen(); else lockedScreen(); return; }
+  if (handingOver) { paintTabs(""); topBar(false); handOverScreen(); return; }  // first on every route, the restore screen included
+  if (restore.busy === "restore") { paintTabs(""); topBar(false); restoreScreen(); return; }  // while it installs this is the only screen: nothing else may save over it
+  if (location.hash !== "#/restore" && !restore.busy && (restore.preview || restore.step === "done")) restoreDrop();  // left the screen: a checked backup is dropped, a result is forgotten
+  if (dbLocked) { paintTabs(""); topBar(false); if (dbNewer) newerScreen(); else if (location.hash === "#/restore") restoreScreen(); else lockedScreen(); return; }
   const h = location.hash || "#/";
   for (const [rx, fn, tab, top] of ROUTES) {
     const m = h.match(rx);

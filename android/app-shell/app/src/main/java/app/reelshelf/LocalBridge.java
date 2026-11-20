@@ -44,6 +44,8 @@ final class LocalBridge {
     private static final java.util.concurrent.atomic.AtomicBoolean LIBRARY_JOB = new java.util.concurrent.atomic.AtomicBoolean();
     /** The moment the last backup's name was made from (see BackupNow.nameTime). Only read and written while LIBRARY_JOB is held. */
     private static long lastBackupNameTime;
+    /** The backup that was checked and waits in filesDir/restore-staging to be restored (see RestoreNow.Stage). Put and cleared only while LIBRARY_JOB is held. */
+    private static final RestoreNow.Stage STAGE = new RestoreNow.Stage();
 
     private final Host act;
     private final SharedPreferences prefs;
@@ -350,7 +352,7 @@ final class LocalBridge {
     private BackupNow.Outcome backupHoldingTheFlag(String countsJson) {
         File dir = act.ctx().getFilesDir();
         File snaps = new File(dir, "backup-work");  // hard links to the library files: only ever read or deleted, never opened for writing
-        File staging = new File(dir, "restore-staging");  // same volume as the library; the read-back unpacks here
+        File staging = new File(dir, "backup-check");  // same volume as the library; the read-back unpacks here (not restore-staging: a restore waiting for its Restore button must survive the backup the page makes first)
         try {
             LibraryBackup.clear(snaps);  // what a cut-off backup left (our own links, not user data); snapshotTo refuses a name that exists
             LibraryFile reels = reelsFile(), shots = shotsFile();
@@ -425,6 +427,128 @@ final class LocalBridge {
         } finally {
             LibraryBackup.clear(snaps);
             LibraryBackup.clear(staging);
+        }
+    }
+
+    // ------------------------------------------------------------------ restore from a backup (two steps: choose and check, then restore)
+
+    /** A job you started, a download, or the nightly run is going: nothing is chosen or restored then. */
+    private boolean busyWithWork() {
+        return act.isNight() || WorkService.isRunning() || WorkService.nightActive();
+    }
+
+    private File restoreStaging() {
+        return new File(act.ctx().getFilesDir(), "restore-staging");  // same volume as the library: the install is a rename
+    }
+
+    /**
+     * Restore, step 1: Android's file picker, then the chosen file is read once through LibraryBackup.check into
+     * filesDir/restore-staging (nothing is installed, the library is not touched). Done with a preview JSON {token, created_at,
+     * app_version, reels, titles, screenshots, has_shots, bytes} for the confirm screen, or with one plain sentence: no file chosen,
+     * a job or the nightly run going, no room, not a backup (a bare reels.json or a notes export), damaged, made by a newer Reel
+     * Shelf. A refusal leaves staging empty. The counts are the backup's own label (its manifest): the page knows the library's.
+     */
+    @JavascriptInterface
+    public void chooseBackup(int id) {
+        if (!ok()) return;
+        if (busyWithWork()) {
+            done(id, false, RestoreNow.WORK);
+            return;
+        }
+        act.runOnUiThread(() -> act.pickModelFile(uri -> work.execute(() -> {
+            BackupNow.Outcome o;
+            try {
+                o = stageBackup(uri);
+            } catch (Throwable t) {  // an Error too (out of memory): the page must never stay on "Checking..."
+                o = BackupNow.fail(RestoreNow.sentenceFor(t));
+            }
+            done(id, o.ok, o.text);
+        })));
+    }
+
+    private BackupNow.Outcome stageBackup(Uri uri) {
+        if (uri == null) return BackupNow.fail(RestoreNow.NO_FILE);
+        if (!LIBRARY_JOB.compareAndSet(false, true)) return BackupNow.fail(RestoreNow.BUSY);
+        try {
+            return stageHoldingTheFlag(uri);
+        } finally {
+            LIBRARY_JOB.set(false);
+        }
+    }
+
+    private BackupNow.Outcome stageHoldingTheFlag(Uri uri) {
+        File dir = act.ctx().getFilesDir();
+        File staging = restoreStaging();
+        STAGE.clear();  // an earlier choice is gone before its files are: a valid token always means the files in staging
+        LibraryBackup.clear(staging);
+        if (busyWithWork()) return BackupNow.fail(RestoreNow.WORK);  // a nightly run can start while the picker is open: the app is not on screen then
+        long current = reelsFile().main.length() + shotsFile().main.length();
+        long free = dir.getUsableSpace();
+        long max = RestoreNow.maxBytes(free, SharedItems.RESERVE_BYTES, current);
+        if (max <= 0) return BackupNow.fail(RestoreNow.notEnoughSpace(free, SharedItems.RESERVE_BYTES, current));
+        try (InputStream in = act.ctx().getContentResolver().openInputStream(uri)) {
+            if (in == null) return BackupNow.fail(RestoreNow.CANNOT_OPEN);
+            LibraryBackup.Checked c = LibraryBackup.check(new java.io.BufferedInputStream(in, 64 * 1024), staging, max);  // check empties staging when it refuses
+            if (!c.ok()) return BackupNow.fail(c.message);
+            long bytes = c.reels.length() + (c.hasShots() ? c.shots.length() : 0);
+            return RestoreNow.preview(STAGE.put(c), c, bytes);
+        } catch (IOException | RuntimeException e) {
+            LibraryBackup.clear(staging);
+            return BackupNow.fail(e instanceof java.io.FileNotFoundException || e instanceof SecurityException ? RestoreNow.CANNOT_OPEN : RestoreNow.sentenceFor(e));
+        } catch (Throwable t) {  // out of memory while checking: nothing unverified stays
+            LibraryBackup.clear(staging);
+            throw t;
+        }
+    }
+
+    /**
+     * Restore, step 2: installs the backup that chooseBackup checked and gave this token for: the reels, then the screenshot list
+     * (RestoreNow.install; LibraryFile.replaceWith). The library in place is kept as reels.json.before-restore-STAMP, never deleted.
+     * Works while the library is unreadable (a way back). Refused (nothing changed) while a job or the nightly run is going, when the
+     * token is not the one staged, and while the library (or the screenshot list) was saved by a newer Reel Shelf. Done with JSON
+     * {set_aside, shots, shots_set_aside}, or one sentence. The token is used up by a call that gets past the token check, and staging is
+     * emptied whatever the answer. The page reads the library fresh afterwards (the bridge does not adopt the new revision here).
+     */
+    @JavascriptInterface
+    public void restoreBackup(int id, String token) {
+        if (!ok()) return;
+        work.execute(() -> {
+            BackupNow.Outcome o;
+            try {
+                o = restoreStaged(token);
+            } catch (Throwable t) {  // an Error too: the page must never stay on "Restoring..."
+                o = BackupNow.fail(RestoreNow.sentenceFor(t));
+            }
+            done(id, o.ok, o.text);
+        });
+    }
+
+    private BackupNow.Outcome restoreStaged(String token) {
+        if (!LIBRARY_JOB.compareAndSet(false, true)) return BackupNow.fail(RestoreNow.BUSY);
+        try {
+            LibraryBackup.Checked c = STAGE.take(token);  // only for the file the page was shown, and only once
+            if (c == null) return BackupNow.fail(RestoreNow.NOT_READY);
+            try {
+                if (busyWithWork()) return BackupNow.fail(RestoreNow.WORK);  // asked again here: a night or a job can start between the two steps
+                return RestoreNow.install(reelsFile(), shotsFile(), c);
+            } finally {
+                LibraryBackup.clear(restoreStaging());
+            }
+        } finally {
+            LIBRARY_JOB.set(false);
+        }
+    }
+
+    /** The page leaves the restore screen (or the user cancels): the checked backup and its staged files are dropped. Skipped while a check or an install runs (it empties its own staging when it ends). */
+    @JavascriptInterface
+    public void cancelRestore() {
+        if (!ok()) return;
+        if (!LIBRARY_JOB.compareAndSet(false, true)) return;
+        try {
+            STAGE.clear();
+            LibraryBackup.clear(restoreStaging());
+        } finally {
+            LIBRARY_JOB.set(false);
         }
     }
 
