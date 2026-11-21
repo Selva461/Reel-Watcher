@@ -421,6 +421,72 @@ const Notes = (() => {
     return true;
   }
 
+  // ---------------------------------------------------------------- versions kept aside (K1-3)
+  // notes_next {meta, phone, you} (see above): "meta" and "phone" are {at, notes, raw}, "you" is {at, notes, edit, raw} (edit: the
+  // notes_edit of that version). Versions move between the screen and these places only by a swap, so none is dropped without a question.
+
+  /** Where the version on screen goes when another comes in: "you" for notes you edited, "meta" or "phone" for an AI's, "" when there is nothing worth keeping (quick notes). */
+  function screenSlot(r) { return r.notes_by === "you" ? "you" : r.notes_by === "meta" || r.notes_by === "phone" ? r.notes_by : ""; }
+
+  /** Throws a kept version away. */
+  function dropSlot(r, src) {
+    if (!r.notes_next || !r.notes_next[src]) return false;
+    delete r.notes_next[src];
+    if (!Object.keys(r.notes_next).length) delete r.notes_next;
+    return true;
+  }
+
+  /**
+   * "Keep my edits, update the rest": the fields you did not edit take the text of the AI version kept in `src` ("meta" or
+   * "phone"), the fields you edited keep your text and get that version's text as the AI text to go back to. The reel stays
+   * yours, `raw` becomes that answer's (the other fields now come from it), and the slot is emptied. False when there is
+   * nothing to do (no such version, or the reel is not edited).
+   */
+  function keepEdits(r, src, now = Date.now()) {
+    const slot = (r.notes_next || {})[src], e = r.notes_edit;
+    if (src === "you" || !slot || !slot.notes || !isEdited(r) || !e || !Array.isArray(e.fields) || !e.ai) return false;
+    const fresh = copy(slot.notes), out = { ...fresh };
+    for (const f of e.fields) {
+      out[f] = r.notes[f];
+      if (fresh[f] !== undefined) e.ai[f] = copy(fresh[f]);
+    }
+    if (e.fields.includes("points")) delete out.unbacked;
+    r.notes = out;
+    e.was_by = src;
+    if (slot.raw) r.raw = slot.raw; else delete r.raw;
+    r.notes_at = now;
+    r.status = "done";
+    r.error = "";
+    dropSlot(r, src);
+    return true;
+  }
+
+  /**
+   * Puts the version kept in `src` ("meta", "phone" or "you") on the screen and the version that was on the screen into its own
+   * place (screenSlot), so nothing is lost: with `src` the same place it is a pure swap. A different place that is already full
+   * is overwritten, so the caller asks first (see screenSlot). The version of yours keeps its notes_edit, an AI version keeps
+   * the `raw` of its answer. False when there is no such version.
+   */
+  function swapIn(r, src, now = Date.now()) {
+    const next = r.notes_next || {}, chosen = next[src];
+    if (!chosen || !chosen.notes) return false;
+    const to = screenSlot(r);
+    const put = to ? { at: r.notes_at || now, notes: r.notes, ...(to === "you" ? { edit: r.notes_edit } : {}), raw: r.raw || "" } : null;
+    delete next[src];
+    if (put) next[to] = put;
+    r.notes_next = next;
+    r.notes = chosen.notes;
+    r.notes_by = src;
+    if (src === "you") { if (chosen.edit) r.notes_edit = chosen.edit; else delete r.notes_edit; }
+    else if (to === "you") delete r.notes_edit;
+    if (chosen.raw) r.raw = chosen.raw; else delete r.raw;
+    r.notes_at = now;
+    r.status = "done";
+    r.error = "";
+    if (!Object.keys(next).length) delete r.notes_next;
+    return true;
+  }
+
   // ---------------------------------------------------------------- YouTube: title, description, transcript (no key, no login)
 
   function ytId(r) { return String(r.code || "").replace(/^yt-/, ""); }
@@ -1218,5 +1284,5 @@ const Notes = (() => {
   return { keepBacked, username, reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, localPromptInfo, estTokens, promptBudget, material, RETRY_CAP, retryAfter, embedUrl, readPage,
     ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
     YT_CLIENTS, condense, search, answerPrompt, answerPromptInfo, webAnswerPrompt, webAnswerPromptInfo, ASK_SYSTEM, WEB_ASK_SYSTEM, markOneSource, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
-    exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS, cleanField, applyEdit, revertField, isEdited, hasUserData, noBody, NO_BODY };
+    exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS, cleanField, applyEdit, revertField, isEdited, hasUserData, noBody, NO_BODY, screenSlot, dropSlot, keepEdits, swapIn };
 })();
