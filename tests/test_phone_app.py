@@ -661,10 +661,9 @@ def test_hostile_text_is_shown_as_text(phone):
     assert phone.evaluate("document.documentElement.scrollWidth") <= 390
 
 
-def test_same_look_as_the_old_app():
-    """The built-in app reuses the old app's stylesheet unchanged (copied into the APK's assets)."""
-    old = Path(__file__).resolve().parents[1] / "src" / "reel_watcher" / "webapp" / "app.css"
-    assert (LOCAL / "app.css").read_text(encoding="utf-8") == old.read_text(encoding="utf-8")
+def test_no_em_dash_in_the_built_in_app_files():
+    """The built-in app has its own stylesheet now (the ground-up dark redesign), so it no longer has to match the
+    PC web app's app.css. The no-em-dash rule still holds across every file it ships."""
     for f in LOCAL.iterdir():
         assert chr(0x2014) not in f.read_text(encoding="utf-8"), f"em dash in {f.name}"
 

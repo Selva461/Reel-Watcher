@@ -6,6 +6,12 @@ section here. A merge builds and tests the APK (kept as the workflow artifact); 
 notes and points `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.31
+- **A ground-up visual redesign (dark).** A fresh, modern dark look across every screen: a deep-ink background,
+  an indigo-violet accent with gradient primary buttons, elevated bordered cards, pill-shaped chips and tags, a
+  blurred bottom tab bar, crisper type and more breathing room. Nothing about how the app works changed: the same
+  screens, flows and on-device reading, only a new look.
+
 ## 1.3.30
 - **A newer AI answer for a reel you edited waits for your choice.** When Meta AI (pasted, shared or filed) or the on-phone
   AI (after **Redo with phone AI**) answers for a reel you edited, the answer is kept aside and the reel page shows a
