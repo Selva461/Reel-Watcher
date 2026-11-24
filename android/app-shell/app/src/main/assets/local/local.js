@@ -312,9 +312,8 @@ function needsWork(r, ready, now = Date.now()) {
   if (r.notes && !(r.notes_by === "auto" && (ready || (!Notes.isYoutube(r) && !r.video_tried)))) return false;
   if (r.file) return !r.video_tried || (ready && Notes.material(r) >= 30 && r.status !== "ready_no_text");  // a video on the phone
   if (!r.url) return false;
-  // An Instagram reel saved from a link cannot be read from Instagram any more; it is worked only from what you typed.
-  if (!Notes.isYoutube(r)) return !r.notes && Notes.material(r) >= 30 && r.status !== "ready_no_text";
-  if (!r.caption_read) return true;  // a YouTube video: its title, description and captions are read on the phone
+  if (!r.caption_read) return true;
+  if (!Notes.isYoutube(r) && !r.video_tried) return true;  // read before videos were read: read what it shows and says
   return ready && Notes.material(r) >= 30 && r.status !== "ready_no_text";
 }
 
@@ -371,6 +370,36 @@ async function readYoutube(r) {
     : "YouTube did not give the spoken words this time (it limits apps that are not its own). Try Start again later. ") +
     "The notes use the title and description; type what is said below for better notes.";
   r.yt_tried = tried.slice(0, 12);
+}
+
+// Instagram is read logged out (no cookies, no account), one page at a time, a few seconds apart, like a person
+// opening links. When Instagram says "slow down" (429), the run waits 2, then 10, then 30 minutes; after that it stops
+// and the remaining reels wait for the next run. This keeps the phone's internet address from being blocked.
+const { gap: IG_GAP_MS, jitter: IG_JITTER_MS, backoff: IG_BACKOFF_MIN } = window.__igPace || { gap: 4000, jitter: 3000, backoff: [2, 10, 30] };
+let igNextAt = 0, igStrikes = 0;
+async function napUnlessStopped(ms) {
+  const until = Date.now() + ms;
+  while (Date.now() < until && !(run && run.stop) && !(night && night.stop)) await nap(Math.min(1000, until - Date.now()));
+}
+async function igFetch(url) {
+  for (;;) {
+    await napUnlessStopped(igNextAt - Date.now());
+    if ((run && run.stop) || (night && night.stop)) throw new Error("stopped");
+    igNextAt = Date.now() + IG_GAP_MS + Math.random() * IG_JITTER_MS;
+    try {
+      const html = await phone("fetchPage", url);
+      igStrikes = 0;
+      return html;
+    } catch (e) {
+      if (!/\b429\b|wait a few minutes|too many/i.test(e.message)) throw e;
+      if (igStrikes >= IG_BACKOFF_MIN.length) throw new Error("Instagram asked to slow down. The rest waits for the next run.");
+      const mins = IG_BACKOFF_MIN[igStrikes++];
+      if (run) run.wait = `Instagram asked to slow down: waiting ${mins} minutes`;
+      if (typeof paintRun === "function") paintRun();
+      await napUnlessStopped(mins * 60000);
+      if (run) run.wait = "";
+    }
+  }
 }
 
 // ------------------------------------------------------------------ whole reels from videos on the phone
@@ -441,9 +470,58 @@ async function readCaption(r) {
     r.keywords = Notes.keywords([r.title, r.caption, r.transcript].join("\n"), 10);
     return;
   }
-  // An Instagram reel saved from a link cannot be read: Instagram no longer serves reel content to
-  // logged-out apps. Share the reel's video (Instagram's Download, or a screen recording) to read it, or use Meta AI.
+  try {
+    const html = await igFetch(Notes.embedUrl(r.code));
+    const got = Notes.readPage(html);
+    if (got.caption) r.caption = got.caption.slice(0, 8000);
+    if (got.author) r.author = got.author;
+    await readOnScreen(r, got);
+    await readVideo(r, got);
+  } catch (e) {
+    r.error = e.message;
+    if (/slow down|stopped/.test(e.message)) throw e;
+  }
+  if (!r.caption && !r.error) {  // the embed page did not have it: the reel's own page sometimes has it in its description
+    try {
+      const got = Notes.readPage(await igFetch(r.url));
+      if (got.caption) r.caption = got.caption.slice(0, 8000);
+      if (got.author && !r.author) r.author = got.author;
+    } catch (e) { if (/slow down|stopped/.test(e.message)) throw e; /* offline or refused: keep going */ }
+  }
   r.caption_read = Date.now();
+  r.keywords = Notes.keywords([r.caption, r.onscreen, r.transcript].filter(Boolean).join("\n"), 10);
+}
+
+/** What the reel shows and says: its video, read on the phone (frames for the text on screen, speech to text). */
+async function readVideo(r, got) {
+  r.video_tried = Date.now();
+  if (!got.video || !(RN && RN.readReelVideo)) { r.content = "caption"; return; }
+  try {
+    const v = JSON.parse(await phone("readReelVideo", got.video) || "{}");
+    const screen = String(v.screen || "").trim();
+    if (screen) r.onscreen = [r.onscreen, screen].filter(Boolean).join("\n").slice(0, 6000);
+    if (v.speech) r.transcript = String(v.speech).slice(0, 40000);
+    r.content = v.speech ? "video+speech" : "video";
+    if (v.media && run) run.media = r.code;
+    r.seconds = v.seconds || 0;
+  } catch (e) {
+    if (e.message === "stopped") throw e;
+    r.content = "caption";
+  }
+}
+
+/** The text written on the reel's cover picture (read on the phone) and Instagram's own description of the picture. */
+async function readOnScreen(r, got) {
+  const found = [];
+  if (got.alt) found.push(got.alt);
+  if (got.cover && RN && RN.readCoverText) {
+    try {
+      const t = String(await phone("readCoverText", got.cover) || "").trim();
+      if (t && !found.some((x) => x.includes(t))) found.push(t);
+    } catch (e) { /* no picture or no text: the caption still counts */ }
+  }
+  const text = found.join("\n").trim();
+  if (text && !(r.caption || "").includes(text)) r.onscreen = text.slice(0, 4000);
 }
 
 /** Notes without any AI (the best sentences, keywords as tags), so every reel can be found in the library. */
@@ -542,7 +620,7 @@ async function startRun(codes, opts = {}) {
       if (run.stop) { r.status = r.notes ? "done" : "new"; break; }
       if (run.ready && (!r.notes || r.notes_by === "auto" || (opts.redo && Notes.isEdited(r)))) {
         if (Notes.material(r) < 30) {
-          const little = "Too little to work from. Type what the reel says below, share the reel's video to Reel Shelf, or use Meta AI.";
+          const little = "Instagram gave too little to work from (no video, little caption). Type what the reel says, or open it in Instagram.";
           if (Notes.isEdited(r)) why = little;  // a reel you edited keeps its status and error: the reason is in the run log only
           else { r.status = "ready_no_text"; r.error = little; }
         } else {
@@ -851,17 +929,16 @@ function reelScreen(code) {
   if (!r) { $app.innerHTML = `${header("Not found", "#/")}<div class="empty">This reel is no longer in your shelf.</div>`; return; }
   const ready = !!modelInfo().ready;
   const n = r.notes;
-  const linkOnly = r.url && !r.file && !Notes.isYoutube(r);  // an Instagram reel saved from a link: it cannot be read from Instagram any more
   const [label, kind] = STATUS[r.status] || STATUS.new;
   $app.innerHTML = `${header(n && n.topic ? "Reel notes" : "Reel", "#/")}
     <div class="stack" style="gap:6px"><span class="row wrap" style="gap:8px"><span class="tag ${kind}">${esc(label)}</span>${n ? `<span class="small muted">${esc(byLabel(r))}</span>` : ""}</span>
       <span class="small muted">${esc([r.author ? "@" + r.author : "", "saved " + day(r.added_at), ...(r.collections || [])].filter(Boolean).join(" · "))}</span></div>
-    ${backFrom === r.code && linkOnly ? `<div class="card stack"><strong>Back from Instagram</strong><span class="small muted">To read this reel, download its video in Instagram (or screen-record it) and share it to Reel Shelf. ${r.comments ? "Your comment screenshots are here. " : "Took screenshots of the comments? Tap Add comments. "}</span></div>` : ""}
+    ${backFrom === r.code ? `<div class="card stack"><strong>Back from Instagram</strong><span class="small muted">${r.comments ? "Comments are here. " : "Took screenshots of the comments? Tap Add comments. "}Then tap Read this reel properly: one note from the video, what is said, the text on screen and the comments.</span></div>` : ""}
     ${r.error && !n ? `<div class="card small">${esc(r.error)}</div>` : ""}
     ${r.tries && (!n || r.notes_by === "auto") ? `<div class="card small">${retryLine(r)}</div>` : ""}
-    ${n ? notesHtml(n, r) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">${linkOnly ? "Instagram no longer lets apps read a reel from its link. To read it, share the reel's video to Reel Shelf (download it in Instagram, or screen-record it). Or use Meta AI, or write your own notes below." : (r.video_tried ? "Too little to work from. Type what the reel says below." : "Tap Start: Reel Shelf reads what the reel shows and says, then writes the notes.")}</span></div>`}
+    ${n ? notesHtml(n, r) : `<div class="card stack"><strong>No notes yet</strong><span class="small muted">${r.video_tried ? "Instagram gave too little to work from. Type what the reel says below." : "Tap Start: Reel Shelf reads what the reel shows and says, then writes the notes."}</span></div>`}
     ${keptHtml(r)}
-    ${r.content ? `<span class="small muted">Read from: ${esc({ video: "the text on screen", "video+speech": "the text on screen and what is said" }[r.content] || r.content)}</span>` : ""}
+    ${r.content ? `<span class="small muted">Read from: ${esc({ caption: "the caption only (Instagram gave no video)", video: "caption and the text on screen", "video+speech": "caption, the text on screen and what is said" }[r.content] || r.content)}</span>` : ""}
     <div class="grid2">
       ${r.url && settings.metaAi ? `<button class="btn" id="meta">Ask Meta AI</button><button class="btn" id="paste">Paste an answer</button>` : ""}
       ${r.url ? `<button class="btn" id="open">Open in ${Notes.isYoutube(r) ? "YouTube" : "Instagram"}</button>` : ""}
@@ -869,8 +946,9 @@ function reelScreen(code) {
       <button class="btn" id="editNotes">${n ? "Edit notes" : "Write my own notes"}</button>
       ${Notes.isYoutube(r) && r.caption_read && !r.transcript ? `<button class="btn" id="ytagain">Read from YouTube again</button>` : ""}
       ${r.tries && (!n || r.notes_by === "auto") ? `<button class="btn primary" id="retryReel">Try again now</button>` : ""}
+      ${r.url && !Notes.isYoutube(r) ? `<button class="btn primary" id="deep">Read this reel properly</button>` : ""}
       ${r.url ? `<button class="btn" id="addcom">Add comments</button>` : ""}
-      ${ready && r.url && (Notes.isYoutube(r) || Notes.material(r) >= 30) ? `<button class="btn" id="phoneai">${n ? "Redo with phone AI" : "Write with phone AI"}</button>` : ""}
+      ${ready && r.url ? `<button class="btn" id="phoneai">${n ? "Redo with phone AI" : "Write with phone AI"}</button>` : ""}
     </div>
     ${r.asked_at && !(n && r.notes_by === "meta") ? `<p class="hint">When Meta AI answers, tap Share on its answer and choose Reel Shelf. It will be filed here.</p>` : ""}
     ${r.caption ? `<details class="card"><summary><strong>${Notes.isYoutube(r) ? "Description" : "Caption"}</strong></summary><p class="pre small" style="margin-top:8px">${esc(r.caption)}</p></details>` : ""}
@@ -902,9 +980,15 @@ function reelScreen(code) {
       if (!got.length) { toast("No comments found in those pictures"); return; }
       r.comments = [...new Set([...(r.comments || "").split("\n").filter(Boolean), ...got])].join("\n").slice(0, 6000);
       saveDb();
-      toast(`${plural(got.length, "comment line")} added.${r.file || Notes.isYoutube(r) ? " Tap Start to use them in the notes." : ""}`);
+      toast(`${plural(got.length, "comment line")} added. Tap Read this reel properly to use them in the notes.`);
       reelScreen(r.code);
     }).catch((e) => { if (e.message !== "cancelled") toast(e.message); });
+  });
+  bind("#deep", "click", () => {  // video, text on screen, speech, then notes with intent and tone
+    r.deep = true; r.video_tried = 0; r.caption_read = 0;
+    if (r.notes_by === "auto") { r.notes = null; r.notes_by = ""; }
+    saveDb();
+    startRun([r.code]);
   });
   bind("#addrt", "click", () => titleDialog(null, r.code));
   bind("#retryReel", "click", () => { r.tries = 0; r.next_try_at = 0; saveDb(); startRun([r.code]); });

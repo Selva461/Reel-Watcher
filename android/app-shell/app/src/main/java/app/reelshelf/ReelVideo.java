@@ -16,6 +16,8 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.text.Normalizer;
@@ -34,6 +36,7 @@ final class ReelVideo {
     private ReelVideo() {
     }
 
+    static final long MAX_VIDEO = 60L * 1024 * 1024;
     /**
      * How many reel videos are being read right now in this app (one per call of {@link #read} or {@link #readLocal}, until
      * its cache copy is deleted and its key frames and sound are made). While it is above 0 the temp sweep leaves the cache
@@ -44,6 +47,24 @@ final class ReelVideo {
     private static final int MAX_FRAMES = 90;      // 3 minutes of frames: a whole reel
     private static final long MAX_AUDIO_US = 180_000_000L;  // 3 minutes of speech
     private static final int RATE = 16000;
+
+    /** Instagram's video servers, https only (the same rule as cover pictures). */
+    static boolean videoHost(String url) {
+        return LocalBridge.coverHost(url);
+    }
+
+    /** Reads one reel video. Returns {screen, speech, seconds, speechModel}. */
+    static JSONObject read(Context ctx, ScreenshotReader ocr, File speechModel, String url, Stop stop) throws Exception {
+        File f = new File(ctx.getCacheDir(), "reel-video.mp4");
+        BUSY.incrementAndGet();
+        try {
+            fetch(url, f, stop);
+            return analyse(ctx, ocr, speechModel, f, stop);
+        } finally {
+            f.delete();
+            BUSY.decrementAndGet();
+        }
+    }
 
     /**
      * Reads a reel video that is on the phone (saved with Instagram's own Download, a screen recording, or shared to
@@ -88,6 +109,33 @@ final class ReelVideo {
 
     interface Stop {
         boolean now();
+    }
+
+    private static void fetch(String url, File dest, Stop stop) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        try {
+            c.setConnectTimeout(15000);
+            c.setReadTimeout(30000);
+            c.setInstanceFollowRedirects(false);
+            c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36");
+            int code = c.getResponseCode();
+            if (code != 200) throw new IOException("Instagram answered " + code + " for the video");
+            long len = c.getContentLengthLong();
+            if (len > MAX_VIDEO) throw new IOException("video too big");
+            try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(dest)) {
+                byte[] buf = new byte[65536];
+                long total = 0;
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    if (stop.now()) throw new IOException("stopped");
+                    total += n;
+                    if (total > MAX_VIDEO) throw new IOException("video too big");
+                    out.write(buf, 0, n);
+                }
+            }
+        } finally {
+            c.disconnect();
+        }
     }
 
     private static long durationUs(File f) {

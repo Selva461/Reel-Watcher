@@ -11,7 +11,7 @@ import pytest
 from test_backup_now import BACKUP_RN
 from test_library_newer import FLAVOURS, assert_untouched, newer_reels, newer_screen, newer_shots, open_newer, settle
 from test_library_safety import DAMAGED, LIB_RN, PIC, SHOT_STATE, locked_screen, unreadable
-from test_phone_app import ANSWER, CONTENT, db_of, phone, site  # noqa: F401  (pytest fixtures)
+from test_phone_app import EMBED, db_of, phone, site  # noqa: F401  (pytest fixtures)
 from test_shots import SHOTS_RN
 from test_stale_writes import GOOD, LINK, OLD_SHOTS, RIVAL, SHOTS_REVISION_RN, another_page_saves, codes, page_codes, toast_has  # noqa: F401
 
@@ -24,13 +24,13 @@ COUNT_POLLS = r"""
   window.RN.nightActive = (...a) => { window.__polls++; return asked(...a); };
 })();
 """
-# the on-phone AI's answers wait until the test lets them through, so a run can be stopped at a known moment (mid-notes)
-HOLD_GEN = r"""
+# fetches (Instagram pages) wait until the test lets them through, so a run can be stopped at a known moment
+HOLD_FETCH = r"""
 (() => {
   const st = window.__rn;
-  const orig = window.RN.generate;
+  const orig = window.RN.fetchPage;
   window.__held = [];
-  window.RN.generate = (id, prompt, opts) => { if (st.hold) window.__held.push(() => orig(id, prompt, opts)); else orig(id, prompt, opts); };
+  window.RN.fetchPage = (id, url) => { if (st.hold) window.__held.push(() => orig(id, url)); else orig(id, url); };
 })();
 """
 
@@ -195,13 +195,10 @@ def test_back_up_now_is_not_offered_while_the_run_finishes_and_is_there_after(ph
 # ---------------------------------------------------------------- stopping a run keeps its work and newer data
 
 def test_stopping_the_nightly_run_keeps_what_it_saved_and_never_overwrites_newer_data(phone):
-    phone.context.add_init_script(HOLD_GEN)
-    good = json.loads(GOOD)
-    good["reels"].append({"code": "WRK001", "url": "https://www.instagram.com/reel/WRK001/", "status": "new",
-                          "caption": CONTENT, "added_at": 8, "collections": []})
-    phone.open_with({"night": True, "hold": True, "db": json.dumps(good), "answers": [ANSWER],
-                     "model": {"ready": True, "partial": 0, "installed": []}, "shared": ["https://www.instagram.com/reel/NEW001/"]})
-    phone.wait_for_function("() => window.__held.length >= 1")  # the run filed the shared reel and is writing notes for the reel that has text
+    phone.context.add_init_script(HOLD_FETCH)
+    phone.open_with({"night": True, "hold": True, "db": GOOD, "shared": ["https://www.instagram.com/reel/NEW001/"],
+                     "pages": {"NEW001/embed": EMBED}})
+    phone.wait_for_function("() => window.__held.length >= 1")  # the run has filed the shared reel and is reading its page
     assert "NEW001" in codes(phone)
     # the app is opened: it saves a reel of its own, and the phone asks the run to stop
     phone.evaluate("""() => { const s = window.__rn; const d = JSON.parse(s.db);
@@ -219,12 +216,9 @@ def test_stopping_the_nightly_run_keeps_what_it_saved_and_never_overwrites_newer
 # ---------------------------------------------------------------- duplicate runs
 
 def test_a_second_attempt_to_run_the_night_while_one_is_going_does_nothing(phone):
-    phone.context.add_init_script(HOLD_GEN)
-    good = json.loads(GOOD)
-    good["reels"].append({"code": "WRK001", "url": "https://www.instagram.com/reel/WRK001/", "status": "new",
-                          "caption": CONTENT, "added_at": 8, "collections": []})
-    phone.open_with({"night": True, "hold": True, "db": json.dumps(good), "answers": [ANSWER],
-                     "model": {"ready": True, "partial": 0, "installed": []}, "shared": ["https://www.instagram.com/reel/NEW001/"]})
+    phone.context.add_init_script(HOLD_FETCH)
+    phone.open_with({"night": True, "hold": True, "db": GOOD, "shared": ["https://www.instagram.com/reel/NEW001/"],
+                     "pages": {"NEW001/embed": EMBED}})
     phone.wait_for_function("() => window.__held.length >= 1")
     phone.evaluate("() => { window.__night0 = night; }")  # the run that is going
     phone.evaluate("() => { overnightRun(true); overnightRun(true); overnightRun(); }")  # more starts while one is going
@@ -233,6 +227,6 @@ def test_a_second_attempt_to_run_the_night_while_one_is_going_does_nothing(phone
     phone.wait_for_function("() => window.__rn.nightDone >= 1")
     rn = phone.rn()
     assert rn["nightDone"] == 1, "one run, one ending"
-    gen = [c for c in rn["calls"] if c[0] == "generate"]
-    assert len(gen) == 1, "the reel with text was written once, not once per start"
+    fetched = [c for c in rn["calls"] if c[0] == "fetchPage" and "NEW001" in c[1]]
+    assert len(fetched) <= 2, "the reel was read once (its page, and at most the reel's own page as a fallback), not once per start"
     assert codes(phone).count("NEW001") == 1

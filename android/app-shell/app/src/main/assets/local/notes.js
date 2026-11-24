@@ -1053,6 +1053,53 @@ const Notes = (() => {
     });
   }
 
+  // ---------------------------------------------------------------- reading a reel's public page (caption, creator)
+
+  function embedUrl(code) { return `https://www.instagram.com/p/${code}/embed/captioned/`; }
+
+  /** Caption and creator from the embed page, or from the page's description tags. {} when there is nothing. */
+  function readPage(html) {
+    const doc = new DOMParser().parseFromString(String(html || ""), "text/html");  // inert: nothing in it runs
+    const out = {};
+    doc.querySelectorAll("script, style, noscript, template").forEach((x) => x.remove());
+    // the reel's video file, when Instagram puts it in the page for logged-out visitors
+    const raw = String(html || "");
+    const vm = raw.match(/\\?"video_url\\?"\s*:\s*\\?"(https:[^"\\]*(?:\\.[^"\\]*)*)/) || raw.match(/<video[^>]+src="(https:[^"]+)"/);
+    if (vm) {
+      const u = vm[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\/g, "").replace(/&amp;/g, "&");
+      if (/^https:\/\/[^/]+\.(cdninstagram\.com|fbcdn\.net)\//.test(u)) out.video = u;
+    }
+    const img = doc.querySelector("img.EmbeddedMediaImage, .EmbeddedMedia img");
+    if (img) {
+      const src = img.getAttribute("src") || "";
+      if (/^https:\/\/[^/]+\.(cdninstagram\.com|fbcdn\.net)\//.test(src)) out.cover = src;
+      const alt = clean(img.getAttribute("alt") || "");
+      // Instagram's own picture description: "Photo by X on May 1, 2024. May be an image of text that says '...'"
+      const said = alt.match(/may be (?:an? )?(?:image|graphic|video|meme)[^.]*?(?:that says|with the text)\s*['"“‘]([\s\S]+?)['"”’]\s*\.?\s*$/i);
+      if (said) out.alt = said[1].trim();
+    }
+    const cap = doc.querySelector(".Caption");
+    if (cap) {
+      const user = cap.querySelector(".CaptionUsername");
+      if (user) out.author = clean(user.textContent).replace(/^@/, "");
+      cap.querySelectorAll(".CaptionUsername, .CaptionComments").forEach((x) => x.remove());
+      cap.querySelectorAll("br").forEach((b) => b.replaceWith("\n"));
+      const t = cap.textContent.replace(/[ \t]+/g, " ").replace(/\n\s+/g, "\n").trim();
+      if (t) out.caption = t;
+    }
+    if (!out.author) {
+      const u = doc.querySelector(".UsernameText, .Username");
+      if (u) out.author = clean(u.textContent).replace(/^@/, "");
+    }
+    if (!out.caption) {
+      const d = doc.querySelector('meta[property="og:description"], meta[name="description"]');
+      const v = d ? d.getAttribute("content") || "" : "";
+      const m = v.match(/^[\d.,KkMm]+\s+likes?,.*?-\s*([A-Za-z0-9_.]+)\s+on\s+[^:]+:\s*["“]([\s\S]*)["”]\.?\s*$/);
+      if (m) { out.author = out.author || m[1]; out.caption = m[2].trim(); } else if (v && !/^(see instagram|instagram)/i.test(v)) out.caption = v.trim();
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------------- exports
 
   function exportRows(reels) {
@@ -1234,7 +1281,7 @@ const Notes = (() => {
     return lines.map((l) => String(l).trim()).filter((l) => l.length > 2 && !COMMENT_NOISE.test(l) && !/^\d+[smhdw]\b/.test(l) && !/^@?[a-z0-9_.]{3,30}$/i.test(l));
   }
 
-  return { keepBacked, username, reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, localPromptInfo, estTokens, promptBudget, material, RETRY_CAP, retryAfter,
+  return { keepBacked, username, reelKind, isCommentScreen, commentLines, FORMAT, META_PROMPT, LOCAL_SYSTEM, links, isYoutube, parse, splitAnswers, format, metaPrompt, batchPrompt, localPrompt, localPromptInfo, estTokens, promptBudget, material, RETRY_CAP, retryAfter, embedUrl, readPage,
     ytWatchUrl, ytKey, ytPlayerUrl, ytPlayerBody, ytPick, ytCaptions, ytPage, ytTranscriptBody, ytTranscriptUrl, ytTranscriptText,
     YT_CLIENTS, condense, search, answerPrompt, answerPromptInfo, webAnswerPrompt, webAnswerPromptInfo, ASK_SYSTEM, WEB_ASK_SYSTEM, markOneSource, words, stem, near, related, keywords, autoNotes, sentences, index, idfOf, tokens, synonyms, fieldsOf,
     exportRows, exportJson, exportMarkdown, exportFile, readZip, KEYS, cleanField, applyEdit, revertField, isEdited, hasUserData, noBody, NO_BODY, screenSlot, dropSlot, keepEdits, swapIn };

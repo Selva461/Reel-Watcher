@@ -17,8 +17,7 @@ import sys
 import pytest
 
 import notes_eval as ne
-from test_phone_app import ANSWER, LOCAL, db_of, phone, site, to_inbox  # noqa: F401  (phone, site: pytest fixtures)
-from test_reel_videos import VIDEO_RN, K  # noqa: F401  (the on-phone video-reading harness: frames, sound, speech)
+from test_phone_app import ANSWER, LOCAL, VIDEO_EMBED, db_of, phone, site, to_inbox  # noqa: F401  (phone, site: pytest fixtures)
 
 CASES = ne.cases()
 BY_CODE = {c["reel"]["code"]: c for c in CASES}
@@ -582,24 +581,22 @@ def test_the_budget_follows_the_model_table_and_a_model_picked_by_hand_gets_the_
 
 def test_a_prompt_with_pictures_and_sound_is_sent_as_before_until_their_size_is_known(phone):
     """Design D-A3-4: no reserve for the key frames and the sound is known yet, so such a prompt has no budget."""
-    phone.context.add_init_script(VIDEO_RN)
     w = ne.Writer(ne.Rng(11), ne.LATIN)
     speech, screen = w.prose(20000), w.lines(3000)
-    phone.open_with({"db": json.dumps({"reels": [], "inbox": []}),
-                     "videos": [{"k": K, "n": "VID_2026.mp4", "f": "Movies/Instagram", "m": 99, "s": 1}],
-                     "videoRead": {K: {"screen": screen, "seconds": 31, "speech": speech, "speechModel": True, "media": 4}},
-                     "speech": True, "model": {"ready": True, "partial": 0, "installed": []}, "answers": [ANSWER]}, "#/inbox")
-    phone.locator("#videos").click()
-    phone.get_by_text("1 new reel video", exact=False).wait_for()
-    phone.locator("#start").click()
+    old = {"code": "VID001", "url": "https://www.instagram.com/reel/VID001/", "status": "new", "added_at": 1, "collections": []}
+    phone.open_with({"db": json.dumps({"reels": [old], "inbox": []}), "pages": {"VID001/embed": VIDEO_EMBED}, "speech": True,
+                     "model": {"ready": True, "partial": 0, "installed": []}, "answers": [ANSWER],
+                     "video": {"screen": screen, "seconds": 31, "speech": speech, "media": True}}, "#/inbox")
+    phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
     (gen,) = [c for c in phone.rn()["calls"] if c[0] == "generate"]
     prompt, opts = gen[1], gen[2]
-    r = [x for x in db_of(phone)["reels"] if x.get("file")][0]
+    r = db_of(phone)["reels"][0]
     budget = phone.evaluate("() => promptBudget()")
     assert opts["media"] is True and "You also get pictures from the reel" in prompt
     assert phone.evaluate("(t) => Notes.estTokens(t)", prompt) > budget   # over what a text-only prompt may be, and sent whole
     assert phone.evaluate("(r) => Notes.localPrompt(r, '', { media: true })", r) == prompt and "[shortened]" not in prompt
+    assert "shortened" not in phone.locator('a.list-item[href="#/r/VID001"]').inner_text()
 
 
 # ---------------------------------------------------------------- A3-2 review follow-ups: cuts inside emoji, the marker once, the transcript's room

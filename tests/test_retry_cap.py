@@ -117,6 +117,20 @@ def test_leaving_the_app_does_not_count(phone):
     assert "tries" not in reels_by_code(phone)["R1"]
 
 
+def test_instagram_slow_down_does_not_count(phone):
+    start(phone, [waiting("R1", caption_read=0, video_tried=0, caption="")], igStatus="Instagram answered 429")
+    run_start(phone)
+    r = reels_by_code(phone)["R1"]
+    assert phone.evaluate("() => run.note").startswith("Instagram asked to slow down")
+    assert "tries" not in r and r["status"] == "new"
+
+
+def test_a_caption_that_cannot_be_read_does_not_count(phone):
+    start(phone, [waiting("R1", caption_read=0, video_tried=0, caption="")], igStatus="Instagram answered 404")
+    run_start(phone)
+    assert "tries" not in reels_by_code(phone)["R1"]
+
+
 # ---------------------------------------------------------------- success
 
 def test_success_clears_the_failure_fields(phone):
