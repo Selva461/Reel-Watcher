@@ -6,6 +6,17 @@ section here. A merge builds and tests the APK (kept as the workflow artifact); 
 notes and points `apk-latest` at it. Builds signed with the stable key (GitHub secrets `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD`) install as updates over the previous version.
 
+## 1.3.31
+- **Reading a reel from its link is removed.** Instagram no longer serves reel content (caption, cover picture, video) to
+  logged-out apps: a reel's page comes back as a JavaScript shell with none of that in it, so the old logged-out page
+  reading always came back empty ("Instagram gave too little to work from"). That dead code is gone: the embed/page
+  reader, the cover-picture text reader and the reel-video-from-a-link reader. A reel saved from a link is now only
+  saved; opening it says so plainly and points you to what works, instead of looking like it is reading and failing.
+- **Read a reel from its video, Meta AI, or your own words.** To get notes for an Instagram reel: download its video in
+  Instagram (or screen-record it) and share that video to Reel Shelf (the whole reel is read on the phone: the text on
+  screen and the spoken words), or use **Ask Meta AI**, or type what the reel says. YouTube Shorts are read as before.
+- The **Read this reel properly** button, which only re-ran the same removed link reading, is gone.
+
 ## 1.3.30
 - **A newer AI answer for a reel you edited waits for your choice.** When Meta AI (pasted, shared or filed) or the on-phone
   AI (after **Redo with phone AI**) answers for a reel you edited, the answer is kept aside and the reel page shows a

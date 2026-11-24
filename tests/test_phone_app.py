@@ -134,9 +134,9 @@ ANSWER = """Here is the breakdown:
 **TAGS:** #cybersecurity, #appsecurity, hardcodedpasswords
 """
 
-EMBED = """<html><body><div class="Embed"><div class="Caption"><a class="CaptionUsername" href="#">creator_a</a>
-Three free tools for <b>notes</b><br>1. Obsidian<br>2. Notion<script>window.__pwned = 1</script>
-<div class="CaptionComments">View all 20 comments</div></div></div></body></html>"""
+# Text a reel carries once it has been read from a shared video or typed in by hand. Instagram links can no longer be
+# scraped (Instagram serves logged-out apps only a JavaScript shell), so a reel's content now comes from the phone, not a link.
+CONTENT = "Three free tools for taking notes. Obsidian links your ideas together. Notion stores databases. Logseq is for daily notes."
 
 
 @pytest.fixture
@@ -203,46 +203,43 @@ def test_parse_meta_ai_answer_and_links(phone):
     assert two == ["Hardcoded secrets in mobile apps", "Second one"]
 
 
-def test_caption_read_from_embed_page_without_running_its_scripts(phone):
-    phone.open_with()
-    got = phone.evaluate("h => Notes.readPage(h)", EMBED)
-    assert got == {"author": "creator_a", "caption": "Three free tools for notes\n1. Obsidian\n2. Notion"} or \
-        (got["author"] == "creator_a" and got["caption"].startswith("Three free tools for notes\n1. Obsidian\n2. Notion"))
-    og = '<meta property="og:description" content="1,204 likes, 33 comments - someone.here on May 2, 2026: &quot;Use Canva for thumbnails&quot;. ">'
-    assert phone.evaluate("h => Notes.readPage(h)", og) == {"author": "someone.here", "caption": "Use Canva for thumbnails"}
-    assert phone.evaluate("window.__pwned") is None
-
-
 # ---------------------------------------------------------------- the app
 
-def test_shared_reel_is_only_saved_then_start_reads_and_writes_notes(phone):
+def test_shared_link_is_only_saved_and_a_reel_with_text_is_read_and_written(phone):
+    # Instagram no longer serves reel content to logged-out apps, so a shared link is only saved. A reel's text comes from
+    # a shared video or typed in by hand; Start then writes the notes from that text (never from the link).
     phone.open_with({"shared": ["Check this https://www.instagram.com/reel/AAA111/?igsh=zz", "hello"],
-                     "pages": {"AAA111/embed": EMBED}, "model": {"ready": True, "partial": 0, "installed": []},
-                     "answers": [ANSWER]})
+                     "db": json.dumps({"reels": [{"code": "RDY001", "url": "https://www.instagram.com/reel/RDY001/", "status": "ready",
+                                                  "caption": CONTENT, "caption_read": 1, "added_at": 2, "collections": []}], "inbox": []}),
+                     "model": {"ready": True, "partial": 0, "installed": []}, "answers": [ANSWER]})
     phone.get_by_text("1 new reel saved").wait_for()
     st = phone.rn()
-    assert not any(c[0] in ("fetchPage", "generate") for c in st["calls"])  # sharing only saves: no work until Start
-    assert db_of(phone)["reels"][0]["status"] == "new"
+    assert not any(c[0] in ("fetchPage", "generate") for c in st["calls"])  # sharing only saves; the link is never scraped
+    assert next(r for r in db_of(phone)["reels"] if r["code"] == "AAA111")["status"] == "new"
     to_inbox(phone)
-    phone.get_by_role("button", name="Start 1", exact=True).click()
+    phone.get_by_role("button", name="Start 1", exact=True).click()  # only the reel that already has text needs work
     phone.get_by_role("heading", name="Done").wait_for()
-    r = db_of(phone)["reels"][0]
-    assert r["status"] == "done" and r["notes_by"] == "phone" and r["author"] == "creator_a"
+    r = next(x for x in db_of(phone)["reels"] if x["code"] == "RDY001")
+    assert r["status"] == "done" and r["notes_by"] == "phone"
     assert r["notes"]["topic"] == "Hardcoded secrets in mobile apps"
     gen = [c for c in phone.rn()["calls"] if c[0] == "generate"][0]
     assert "Obsidian" in gen[1] and "TOPIC:" in gen[1] and gen[2]["gpu"] is True and gen[2]["maxTokens"] == 800
     assert phone.rn()["stopped"] >= 1  # the model is freed as soon as the work is done
     work = phone.rn()["work"]  # a notification (with Stop) while it runs, gone as soon as it is done
     assert work[0] == ["update", "Writing reel notes"] and work[-1] == ["end"]
-    phone.goto(phone.url.split("#")[0] + "#/")
-    phone.get_by_text("Hardcoded secrets in mobile apps").click()
+    phone.goto(phone.url.split("#")[0] + "#/r/RDY001")
     phone.get_by_text("Notes by the on-phone AI (from the caption)").wait_for()
     phone.get_by_role("button", name="Copy notes").click()
-    assert phone.rn()["copied"].startswith("TOPIC: Hardcoded secrets") and "Reel: https://www.instagram.com/reel/AAA111/" in phone.rn()["copied"]
+    assert phone.rn()["copied"].startswith("TOPIC: Hardcoded secrets") and "Reel: https://www.instagram.com/reel/RDY001/" in phone.rn()["copied"]
+    # the shared link reel cannot be read from Instagram: it shows honest guidance, not a false "caption read"
+    phone.goto(phone.url.split("#")[0] + "#/r/AAA111")
+    phone.get_by_text("Instagram no longer lets apps read a reel from its link", exact=False).wait_for()
 
 
-def test_without_the_model_start_reads_captions_and_ask_meta_ai_files_the_answer(phone):
-    phone.open_with({"shared": ["https://www.instagram.com/reel/BBB222/"], "pages": {"BBB222/embed": EMBED}, "settings": json.dumps({"metaAi": True})})
+def test_without_the_model_a_reel_with_text_gets_quick_notes_and_ask_meta_ai_files_the_answer(phone):
+    phone.open_with({"db": json.dumps({"reels": [{"code": "BBB222", "url": "https://www.instagram.com/reel/BBB222/", "status": "new",
+                                                  "caption": CONTENT, "added_at": 1, "collections": []}], "inbox": []}),
+                     "settings": json.dumps({"metaAi": True})})
     to_inbox(phone)
     phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
@@ -418,9 +415,9 @@ def test_a_check_can_be_stopped_and_is_not_started_again_until_you_ask(phone):
 
 def test_notes_are_still_written_with_a_model_that_is_not_the_published_file(phone):
     """The check only labels a model: it keeps working (the owner's decision D1), and nothing starts a check or a download by itself."""
-    phone.open_with({"shared": ["https://www.instagram.com/reel/AAA111/"], "pages": {"AAA111/embed": EMBED},
+    phone.open_with({"db": json.dumps({"reels": [{"code": "AAA111", "url": "https://www.instagram.com/reel/AAA111/", "status": "new",
+                                                  "caption": CONTENT, "added_at": 1, "collections": []}], "inbox": []}),
                      "model": {**ON_PHONE, "verified": "no"}, "answers": [ANSWER]})
-    phone.get_by_text("1 new reel saved").wait_for()
     to_inbox(phone)
     phone.get_by_role("button", name="Start 1", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
@@ -566,7 +563,9 @@ def test_big_zip64_export_is_read(phone, tmp_path):
 
 
 def test_overnight_run_does_everything_then_ends_the_notification(phone):
-    phone.open_with({"shared": ["https://www.instagram.com/reel/NIG001/"], "pages": {"NIG001/embed": EMBED}, "answers": [ANSWER]}, "#/run")
+    phone.open_with({"db": json.dumps({"reels": [{"code": "NIG001", "url": "https://www.instagram.com/reel/NIG001/", "status": "new",
+                                                  "caption": CONTENT, "added_at": 1, "collections": []}], "inbox": []}),
+                     "answers": [ANSWER]}, "#/run")
     phone.get_by_role("button", name="Run everything overnight").click()
     phone.get_by_text("Notes exported to Downloads/ReelShelf/").wait_for()
     st = phone.rn()
@@ -580,15 +579,13 @@ def test_nightly_run_files_the_day_and_skips_reels_already_known(phone):
             "notes": {"topic": "Old"}, "notes_by": "meta", "collections": []}
     phone.open_with({"night": True, "db": json.dumps({"reels": [done], "inbox": []}),
                      "shared": ["https://www.instagram.com/reel/NEW001/", "https://www.instagram.com/reel/OLD001/",
-                                "https://www.instagram.com/reel/NEW001/"],
-                     "pages": {"NEW001/embed": EMBED}})
+                                "https://www.instagram.com/reel/NEW001/"]})
     phone.wait_for_function("window.__rn.nightDone >= 1")
     st = phone.rn()
     reels = {r["code"]: r for r in db_of(phone)["reels"]}
     assert sorted(reels) == ["NEW001", "OLD001"]  # shared twice, or already known: still one each
     assert reels["OLD001"]["notes_by"] == "meta"  # already done: not touched
-    fetched = [c[1] for c in st["calls"] if c[0] == "fetchPage"]
-    assert fetched and all("NEW001" in u for u in fetched)
+    assert not reels["NEW001"].get("notes")  # a shared link cannot be read; it waits for its video or your typed text
     assert not any(c[0] == "download" for c in st["calls"])  # no big model download at night
     assert st["work"][-1] == ["end"] and db_of(phone)["lastNight"]["log"]
 
@@ -632,8 +629,9 @@ def test_exports_and_leaving_the_app_stops_work(phone):
     assert phone.rn()["saved"][1]["text"].startswith("# Reel notes")
     # a reel waiting for the on-phone AI; the app leaves the screen in the middle: everything stops
     phone.evaluate("""() => { const s = window.__rn; s.model.ready = true; s.answers = [];
-        s.shared.push('https://www.instagram.com/reel/EEE555/'); s.pages = {'EEE555/embed': '<div class=Caption>' + 'long caption '.repeat(10) + '</div>'};
+        s.shared.push('https://www.instagram.com/reel/EEE555/');
         sessionStorage.setItem('rn', JSON.stringify(s)); onAppResume(); }""")
+    phone.evaluate("""() => { const r = reel('EEE555'); r.extra = 'a long note about morning routines and the habits this reel explains, step by step, in detail'; saveDb(); }""")
     phone.evaluate("""() => { RN.generate = (id) => { window.__genId = id; }; }""")  # the answer never comes back on its own
     phone.goto(phone.url.split("#")[0] + "#/run")
     to_inbox(phone)
@@ -783,47 +781,10 @@ def test_instagram_export_opens_in_chrome_and_the_reminder_goes_once_a_zip_is_ch
     assert not any(c[0] in ("fetchPage", "generate") for c in phone.rn()["calls"])  # importing does no other work
 
 
-def test_text_on_the_cover_picture_and_its_description_count_for_notes(phone):
-    embed = ('<html><body><div class="Embed"><img class="EmbeddedMediaImage" src="https://scontent-a.cdninstagram.com/v/cover.jpg" '
-             'alt="Photo by creator_b on May 1, 2024. May be an image of text that says \'Stop hardcoding passwords\'."> '
-             '<div class="Caption"><a class="CaptionUsername" href="#">creator_b</a>Part 2 #tech</div></div></body></html>')
-    phone.open_with({"shared": ["https://www.instagram.com/reel/COV001/"], "pages": {"COV001/embed": embed},
-                     "coverText": "Keep secrets on the server, rotate any leaked key and scan code before shipping"})
-    to_inbox(phone)
-    phone.get_by_role("button", name="Start 1", exact=True).click()
-    phone.get_by_role("heading", name="Done").wait_for()
-    r = db_of(phone)["reels"][0]
-    assert ["cover", "https://scontent-a.cdninstagram.com/v/cover.jpg"] in phone.rn()["calls"]
-    assert r["onscreen"].startswith("Stop hardcoding passwords\nKeep secrets on the server")
-    assert r["status"] == "done" and r["notes_by"] == "auto"  # enough text for quick notes now, not just "Part 2"
-
-
-VIDEO_EMBED = ('<html><body><script>window.__additionalDataLoaded("x", {"shortcode_media": {"video_url": '
-               '"https:\\/\\/scontent-b.cdninstagram.com\\/v\\/reel.mp4?a=1\\u0026b=2"}})</script>'
-               '<div class="Caption"><a class="CaptionUsername" href="#">creator_c</a>Wait for it</div></body></html>')
-
-
-def test_reel_video_gives_screen_text_and_speech_and_old_reels_are_read_again(phone):
-    old = {"code": "VID001", "url": "https://www.instagram.com/reel/VID001/", "status": "done", "added_at": 1, "caption": "Wait for it",
-           "caption_read": 1, "notes": {"topic": "Wait for it"}, "notes_by": "auto", "collections": []}
-    phone.open_with({"db": json.dumps({"reels": [old], "inbox": []}), "pages": {"VID001/embed": VIDEO_EMBED}, "speech": True,
-                     "video": {"screen": "3 habits that changed my mornings", "seconds": 31,
-                               "speech": "first drink water as soon as you wake up then walk for ten minutes and write down one goal for the day"}}, "#/run")
-    to_inbox(phone)
-    phone.get_by_role("button", name="Start 1", exact=True).click()
-    phone.get_by_role("heading", name="Done").wait_for()
-    r = db_of(phone)["reels"][0]
-    assert ["video", "https://scontent-b.cdninstagram.com/v/reel.mp4?a=1&b=2"] in phone.rn()["calls"]
-    assert r["content"] == "video+speech" and r["transcript"].startswith("first drink water") and "3 habits" in r["onscreen"]
-    assert r["notes_by"] == "auto" and r["notes"]["topic"] != "Wait for it"  # written again from what the reel says
-    phone.goto(phone.url.split("#")[0] + "#/r/VID001")
-    phone.get_by_text("Read from: caption, the text on screen and what is said").wait_for()
-    assert phone.locator("#meta").count() == 0  # Ask Meta AI only when switched on in Settings
-
-
 def test_try_on_five_reels_and_speech_model_download(phone):
-    links = [f"https://www.instagram.com/reel/TRY00{i}/" for i in range(7)]
-    phone.open_with({"shared": links}, "#/run")
+    reels = [{"code": f"TRY00{i}", "url": f"https://www.instagram.com/reel/TRY00{i}/", "status": "new",
+              "caption": CONTENT, "added_at": i, "collections": []} for i in range(7)]
+    phone.open_with({"db": json.dumps({"reels": reels, "inbox": []})}, "#/run")
     phone.get_by_role("button", name="Try on 5 reels first").click()
     phone.get_by_role("heading", name="Done").wait_for()
     assert len([r for r in db_of(phone)["reels"] if r.get("caption_read")]) == 5
@@ -871,13 +832,14 @@ def test_useful_reels_go_first_then_memes(phone):
     reels = [mk("FUN001", "POV when your bestie roasts you 😂😂 lol #meme #funny", 3),
              mk("USE001", "5 free AI tools that save hours: how to use each one, save this", 1),
              mk("USE002", "3 habits and tips to fix your sleep, avoid these mistakes", 2)]
-    phone.open_with({"db": json.dumps({"reels": reels, "inbox": []})}, "#/run")
+    phone.open_with({"db": json.dumps({"reels": reels, "inbox": []}),
+                     "model": {"ready": True, "partial": 0, "installed": []}, "answers": [ANSWER, ANSWER, ANSWER]}, "#/run")
     phone.get_by_text("2 useful reels will be read properly first").wait_for()
     to_inbox(phone)
     phone.get_by_role("button", name="Start 3", exact=True).click()
     phone.get_by_role("heading", name="Done").wait_for()
-    fetched = [c[1] for c in phone.rn()["calls"] if c[0] == "fetchPage"]
-    order = [next(c for c in ("USE001", "USE002", "FUN001") if c in u) for u in fetched if "/embed" in u]
+    prompts = [c[1] for c in phone.rn()["calls"] if c[0] == "generate"]  # the reel's own text is in its prompt, so the order is visible
+    order = [next(c for c, s in (("USE001", "5 free AI tools"), ("USE002", "fix your sleep"), ("FUN001", "roasts you")) if s in p) for p in prompts]
     assert order == ["USE002", "USE001", "FUN001"]  # useful first (newest first), then memes
 
 
@@ -901,17 +863,6 @@ def test_comment_screenshots_go_to_the_right_reel(phone):
     phone.goto(phone.url.split("#")[0] + "#/settings")
     phone.locator("#mstate").wait_for()
     assert phone.get_by_text("Read while I scroll").count() == 0  # no Accessibility helper: Play Protect blocks sideloaded apps with one
-
-
-def test_instagram_slow_down_waits_then_stops_and_keeps_the_rest(phone):
-    links = [f"https://www.instagram.com/reel/SLW00{i}/" for i in range(3)]
-    phone.open_with({"shared": links, "igStatus": "Instagram answered 429"})
-    to_inbox(phone)
-    phone.get_by_role("button", name="Start 3", exact=True).click()
-    phone.get_by_text("Instagram asked to slow down. The rest waits for the next run.").wait_for()
-    reels = db_of(phone)["reels"]
-    assert all(r["status"] == "new" and not r.get("caption_read") for r in reels)  # nothing marked read: retried next time
-    assert len([c for c in phone.rn()["calls"] if c[0] == "fetchPage"]) == 4  # one try, then 3 waits, then it stops
 
 
 # ---------------------------------------------------------------- YouTube: when YouTube blocks one way, the next one is tried
