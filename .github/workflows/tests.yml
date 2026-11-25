@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       # A runner network fault used to hang this step until the 30 minute job limit (seen twice in one hour on PR
       # #71 and #72, before any test ran). Each apt command now has its own time limit and the whole step is
       # retried; the step as a whole is capped at 10 minutes so a bad runner fails fast and can be re-run.
@@ -49,7 +49,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       - name: Known vulnerabilities in every locked dependency (pip-audit)
         run: |
           uv export --locked --all-groups --no-hashes --no-emit-project > requirements-audit.txt
