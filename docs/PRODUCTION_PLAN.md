@@ -106,3 +106,46 @@ Reliability (why ~50 users won't crash Hobby):
 3. **Acknowledge the legal/ToS risk in §9.**
 
 Give me #1 (the key) and I'll wire the reader and prove it reads a real reel the same day.
+
+## 12. Scale: 10,000 reels/day and a 10,000-reel backfill
+The design above still holds, but at this volume three things change and one new piece is required.
+
+**What changes**
+- The limiter is no longer Vercel - it's **cost** and **Instagram's rate limits** (through the provider). Vercel just
+  paces the work.
+- You outgrow Hobby for *sustained* 10k/day -> move to Pro ($20/mo), or keep each function tiny and let the queue
+  pace them (below). A single-user one-time backfill can stay on Hobby; sustained 10k/day across customers -> Pro.
+- Full reads (speech + OCR) get expensive fast; **caption-first stays cheap**. Make full reads an opt-in.
+
+**New required piece: a durable job queue + background workers**
+A 10,000-reel backfill can't run in one request (timeouts). Instead:
+- Enqueue one job per reel (Upstash QStash, or Inngest / Trigger.dev - serverless queues built for exactly this:
+  retries, rate-limit control, free tiers).
+- The queue delivers jobs one-by-one, paced to the provider's rate limit, to a short Vercel function:
+  read reel -> cache -> notes -> store -> bump progress.
+- The phone shows "1,240 of 10,000 read"; the job survives restarts; failures retry with backoff.
+This keeps everything serverless and makes 10k gracefully slow instead of crashing.
+
+**Global cache / dedup (the big cost saver)**
+Cache reel data by shortcode **platform-wide**, not per user. A popular reel read once serves every customer; any
+overlap in your own 10k is free.
+
+**Your 10,000-reel backfill flow**
+1. Import your saved list from Instagram's own data export (the list of shortcodes is free - no scraping).
+2. Enqueue them; the backend drips through in the background, rate-limited and budget-capped.
+3. Watch progress; notes fill in over hours/days, bounded by provider rate + your budget cap - not by us.
+
+**Honest cost (confirm live prices)**
+- One-time 10,000-reel backfill, caption-only: provider ~$5-20 + LLM notes ~$10-100 -> roughly **$30-100 one-time**.
+- Same backfill with full speech + OCR: add transcription (~$30) + OCR + video bandwidth -> roughly **$100-300+**.
+- Sustained 10,000/day (300k/mo), caption-only: order **$500-1,500/month**; full reads: several thousand/month.
+- Takeaway: a per-user one-time backfill is affordable; sustained high volume is a real monthly cost your pricing
+  must cover. Ship a per-user budget cap and a caption-only vs full switch.
+
+**Instagram risk scales too**
+More volume = more block/ban pressure. That is exactly why you use a provider that rotates proxies/accounts - it
+absorbs that. A budget cap + pacing also protect you from runaway cost or a hard block.
+
+**Design implication**
+Build the **queue + global cache from day one** (not a rewrite later). v1 = caption-first through the queue; full
+reads are a paid opt-in. That single decision lets the same system serve 1 reel or 10,000 without changing shape.
